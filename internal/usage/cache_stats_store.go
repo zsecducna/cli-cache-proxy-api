@@ -23,16 +23,17 @@ const (
 )
 
 type CacheStatisticsEvent struct {
-	Timestamp time.Time
-	Provider  string
-	Model     string
-	Source    string
-	AuthID    string
-	AuthIndex string
-	LatencyMs int64
-	Failed    bool
-	Tokens    TokenStats
-	Cache     *helps.CodexCacheObservability
+	Timestamp       time.Time
+	Provider        string
+	Model           string
+	ReasoningEffort string
+	Source          string
+	AuthID          string
+	AuthIndex       string
+	LatencyMs       int64
+	Failed          bool
+	Tokens          TokenStats
+	Cache           *helps.CodexCacheObservability
 }
 
 type CacheStatisticsSummary struct {
@@ -75,6 +76,7 @@ type CacheStatisticsRequest struct {
 	Timestamp            time.Time `json:"timestamp"`
 	Provider             string    `json:"provider"`
 	Model                string    `json:"model"`
+	ReasoningEffort      string    `json:"reasoning_effort,omitempty"`
 	Source               string    `json:"source"`
 	AuthID               string    `json:"auth_id"`
 	AuthIndex            string    `json:"auth_index"`
@@ -240,6 +242,7 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     requested_at TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    reasoning_effort TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL,
     auth_id TEXT NOT NULL,
     auth_index TEXT NOT NULL,
@@ -261,6 +264,9 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "reasoning_effort", "ALTER TABLE cache_statistics_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
 	return nil
 }
 
@@ -279,13 +285,14 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 	cache := event.Cache
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO cache_statistics_requests (
-    requested_at, provider, model, source, auth_id, auth_index, latency_ms, failed,
+    requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
 		strings.TrimSpace(event.Model),
+		strings.TrimSpace(event.ReasoningEffort),
 		strings.TrimSpace(event.Source),
 		strings.TrimSpace(event.AuthID),
 		strings.TrimSpace(event.AuthIndex),
@@ -471,7 +478,7 @@ ORDER BY day ASC`, since)
 func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string) ([]CacheStatisticsRequest, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-    id, requested_at, provider, model, source, auth_id, auth_index, latency_ms, failed,
+    id, requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention
 FROM cache_statistics_requests
@@ -492,6 +499,7 @@ LIMIT ?`, since, limit)
 			&requestedAt,
 			&item.Provider,
 			&item.Model,
+			&item.ReasoningEffort,
 			&item.Source,
 			&item.AuthID,
 			&item.AuthIndex,
@@ -520,6 +528,22 @@ LIMIT ?`, since, limit)
 		return nil, fmt.Errorf("cache statistics store: iterate recent requests: %w", err)
 	}
 	return result, nil
+}
+
+func ensureCacheStatisticsColumn(db *sql.DB, tableName, columnName, alterSQL string) error {
+	if db == nil {
+		return fmt.Errorf("cache statistics store: database is nil")
+	}
+	var count int
+	row := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, tableName, columnName)
+	if err := row.Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := db.Exec(alterSQL)
+	return err
 }
 
 func resolveCacheStatisticsDBPath(cfg *config.Config, configFilePath string) (string, error) {

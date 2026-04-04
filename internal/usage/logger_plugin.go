@@ -434,16 +434,17 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		provider = "unknown"
 	}
 	return CacheStatisticsEvent{
-		Timestamp: detail.Timestamp,
-		Provider:  provider,
-		Model:     modelName,
-		Source:    detail.Source,
-		AuthID:    record.AuthID,
-		AuthIndex: detail.AuthIndex,
-		LatencyMs: detail.LatencyMs,
-		Failed:    detail.Failed,
-		Tokens:    detail.Tokens,
-		Cache:     detail.Cache,
+		Timestamp:       detail.Timestamp,
+		Provider:        provider,
+		Model:           modelName,
+		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
+		Source:          detail.Source,
+		AuthID:          record.AuthID,
+		AuthIndex:       detail.AuthIndex,
+		LatencyMs:       detail.LatencyMs,
+		Failed:          detail.Failed,
+		Tokens:          detail.Tokens,
+		Cache:           detail.Cache,
 	}
 }
 

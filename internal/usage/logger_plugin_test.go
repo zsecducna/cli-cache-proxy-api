@@ -110,12 +110,13 @@ func TestLoggerPluginPersistsWithDetachedContext(t *testing.T) {
 
 	plugin := NewLoggerPlugin()
 	plugin.HandleUsage(ctx, coreusage.Record{
-		Provider:    "codex",
-		Model:       "gpt-5.4",
-		RequestedAt: time.Now().UTC(),
-		Source:      "user@example.com",
-		AuthID:      "auth-1",
-		AuthIndex:   "0",
+		Provider:        "codex",
+		Model:           "gpt-5.4",
+		ReasoningEffort: "high",
+		RequestedAt:     time.Now().UTC(),
+		Source:          "user@example.com",
+		AuthID:          "auth-1",
+		AuthIndex:       "0",
 		Detail: coreusage.Detail{
 			InputTokens:  100,
 			OutputTokens: 20,
@@ -136,6 +137,9 @@ func TestLoggerPluginPersistsWithDetachedContext(t *testing.T) {
 	}
 	if snapshot.RecentRequests[0].ResponseID != "resp-1" {
 		t.Fatalf("response_id = %q, want resp-1", snapshot.RecentRequests[0].ResponseID)
+	}
+	if snapshot.RecentRequests[0].ReasoningEffort != "high" {
+		t.Fatalf("reasoning_effort = %q, want high", snapshot.RecentRequests[0].ReasoningEffort)
 	}
 }
 

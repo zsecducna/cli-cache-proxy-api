@@ -1,787 +1,954 @@
 <!-- cliproxy-cache-stats-overlay -->
+<!-- cliproxy-management-enhancer -->
 <script>
 (() => {
-  if (window.__cliproxyCacheStatsOverlay) return;
-  window.__cliproxyCacheStatsOverlay = true;
+  if (window.__cliproxyManagementEnhancer) return;
+  window.__cliproxyManagementEnhancer = true;
 
-  const host = document.createElement('div');
-  host.id = 'cliproxy-cache-stats-host';
-  document.body.appendChild(host);
-  const shadow = host.attachShadow({ mode: 'open' });
+  const STYLE_ID = 'cliproxy-management-enhancer-style';
+  const TIME_RANGE_KEY = 'cli-proxy-usage-time-range-v1';
+  const STORAGE_KEYS = {
+    usageAuto: 'cliproxy-usage-auto-refresh-enabled-v1',
+    usageInterval: 'cliproxy-usage-auto-refresh-interval-v1',
+    quotaAuto: 'cliproxy-quota-auto-refresh-enabled-v1',
+    quotaInterval: 'cliproxy-quota-auto-refresh-interval-v1',
+    quotaPageSize: 'cliproxy-quota-page-size-v1',
+  };
+  const DEFAULT_USAGE_INTERVAL = 5;
+  const DEFAULT_QUOTA_INTERVAL = 5;
+  const DEFAULT_QUOTA_PAGE_SIZE = 6;
+  const MAX_REQUEST_ROWS = 50;
+  const RECENT_REQUEST_FETCH_LIMIT = 500;
+  const MODEL_LIMIT = 10;
 
-  const inlineHost = document.createElement('div');
-  inlineHost.id = 'cliproxy-cache-stats-inline-host';
-  inlineHost.hidden = true;
-  const rootMount = document.getElementById('root');
-  document.body.insertBefore(inlineHost, rootMount || host);
-  const inlineShadow = inlineHost.attachShadow({ mode: 'open' });
+  let managementAuthorization = '';
+  let nativeFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+  let usageTimer = null;
+  let usageRefreshRetryTimer = null;
+  let quotaTimer = null;
+  let routeSyncTimer = null;
+  let authPrimePromise = null;
+  let usageRefreshInFlight = false;
+  let lastUsageStatisticsFetchAt = 0;
+  let lastUsageStatistics = null;
+  let quotaRefreshInFlight = false;
+  let quotaClickInterceptorInstalled = false;
+  const quotaModes = new Map();
 
-  shadow.innerHTML = `
-    <style>
-      :host { all: initial; }
-      .cliproxy-cache-stats__launch {
-        position: fixed;
-        right: 24px;
-        bottom: 24px;
-        z-index: 2147483600;
-        border: 0;
-        border-radius: 999px;
-        padding: 12px 16px;
-        background: #2563eb;
-        color: #fff;
-        font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45);
-        cursor: pointer;
-      }
-      .cliproxy-cache-stats__backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483601;
-        display: flex;
-        justify-content: flex-end;
-        background: rgba(2, 6, 23, 0.62);
-        backdrop-filter: blur(2px);
-      }
-      .cliproxy-cache-stats__backdrop[hidden] { display: none; }
-      .cliproxy-cache-stats__panel {
-        width: min(720px, 100vw);
-        height: 100vh;
-        overflow: auto;
-        box-sizing: border-box;
-        padding: 20px;
-        background: #0b1020;
-        color: #e5e7eb;
-        font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        border-left: 1px solid #1f2937;
-        box-shadow: -16px 0 40px rgba(15, 23, 42, 0.35);
-      }
-      .cliproxy-cache-stats__header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 12px;
-      }
-      .cliproxy-cache-stats__title {
-        font-size: 24px;
-        font-weight: 700;
-        margin: 0;
-      }
-      .cliproxy-cache-stats__subtitle {
-        margin: 0 0 16px;
-        color: #94a3b8;
-      }
-      .cliproxy-cache-stats__toolbar {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 12px;
-        margin-bottom: 16px;
-      }
-      .cliproxy-cache-stats__presets {
-        grid-column: 1 / -1;
+  function installStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      .cliproxy-enhancer__toolbar {
         display: flex;
         flex-wrap: wrap;
-        gap: 8px;
+        align-items: center;
+        gap: 12px;
+        margin: 12px 0 16px;
+        padding: 12px 16px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 88%, transparent);
       }
-      .cliproxy-cache-stats__toolbar input,
-      .cliproxy-cache-stats__toolbar button,
-      .cliproxy-cache-stats__close {
-        box-sizing: border-box;
+      .cliproxy-enhancer__toolbar label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--text-secondary, #4b5563);
+      }
+      .cliproxy-enhancer__toolbar input[type="number"] {
+        width: 84px;
+      }
+      .cliproxy-enhancer__toolbar input,
+      .cliproxy-enhancer__toolbar select {
+        padding: 6px 10px;
+        border: 1px solid var(--border-color, #d5d9e0);
         border-radius: 10px;
-        border: 1px solid #334155;
-        background: #111827;
-        color: #e5e7eb;
-        padding: 10px 12px;
+        background: var(--bg-primary, #fff);
+        color: var(--text-primary, #111827);
         font: inherit;
       }
-      .cliproxy-cache-stats__toolbar button,
-      .cliproxy-cache-stats__close {
-        cursor: pointer;
-        background: #2563eb;
-        border-color: #2563eb;
-      }
-      .cliproxy-cache-stats__toolbar .cliproxy-cache-stats__preset {
-        background: #0f172a;
-        border-color: #334155;
-      }
-      .cliproxy-cache-stats__toolbar .cliproxy-cache-stats__preset[data-active="true"] {
-        background: #2563eb;
-        border-color: #2563eb;
-      }
-      .cliproxy-cache-stats__close {
-        background: transparent;
-        border-color: #334155;
-      }
-      .cliproxy-cache-stats__status {
-        color: #94a3b8;
-        font-size: 12px;
-        min-height: 18px;
-      }
-      .cliproxy-cache-stats__error {
-        color: #fca5a5;
-        white-space: pre-wrap;
-        min-height: 18px;
-        margin-top: 4px;
-      }
-      .cliproxy-cache-stats__cards {
+      .cliproxy-enhancer__service-row {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-        gap: 12px;
-        margin: 18px 0 24px;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin: 0 0 16px;
       }
-      .cliproxy-cache-stats__card,
-      .cliproxy-cache-stats__chart,
-      .cliproxy-cache-stats__tablewrap {
-        border: 1px solid #1f2937;
-        border-radius: 16px;
-        background: #111827;
-      }
-      .cliproxy-cache-stats__card {
-        padding: 14px;
-      }
-      .cliproxy-cache-stats__label {
-        color: #93c5fd;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-      .cliproxy-cache-stats__value {
-        margin-top: 8px;
-        font-size: 24px;
-        font-weight: 700;
-      }
-      .cliproxy-cache-stats__section {
-        margin-top: 28px;
-      }
-      .cliproxy-cache-stats__section h3 {
-        margin: 0 0 10px;
-        font-size: 18px;
-      }
-      .cliproxy-cache-stats__chart-grid {
-        display: grid;
-        gap: 12px;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      }
-      .cliproxy-cache-stats__chart {
-        padding: 14px;
-      }
-      .cliproxy-cache-stats__chart-subtitle {
-        color: #94a3b8;
-        font-size: 12px;
-        margin-bottom: 10px;
-      }
-      .cliproxy-cache-stats__chart-empty {
-        min-height: 180px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px dashed #334155;
-        border-radius: 12px;
-        color: #94a3b8;
-      }
-      .cliproxy-cache-stats__chart-svg {
-        width: 100%;
-        height: auto;
-        display: block;
-      }
-      .cliproxy-cache-stats__axis-label {
-        fill: #94a3b8;
-        font-size: 11px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      }
-      .cliproxy-cache-stats__grid-line {
-        stroke: #1f2937;
-        stroke-width: 1;
-      }
-      .cliproxy-cache-stats__line {
-        fill: none;
-        stroke-width: 3;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-      }
-      .cliproxy-cache-stats__point {
-        stroke: #0b1020;
-        stroke-width: 2;
-      }
-      .cliproxy-cache-stats__tablewrap {
-        overflow: auto;
-      }
-      .cliproxy-cache-stats__table {
-        width: 100%;
-        border-collapse: collapse;
-        min-width: 620px;
-      }
-      .cliproxy-cache-stats__table th,
-      .cliproxy-cache-stats__table td {
-        padding: 10px 12px;
-        border-bottom: 1px solid #1f2937;
-        text-align: left;
-        vertical-align: top;
-      }
-      .cliproxy-cache-stats__table th {
-        color: #93c5fd;
-        background: #0f172a;
-        position: sticky;
-        top: 0;
-      }
-      .cliproxy-cache-stats__table tr:last-child td {
-        border-bottom: 0;
-      }
-      .cliproxy-cache-stats__muted {
-        color: #94a3b8;
-        font-size: 12px;
-      }
-      @media (max-width: 700px) {
-        .cliproxy-cache-stats__launch {
-          right: 16px;
-          bottom: 16px;
-        }
-        .cliproxy-cache-stats__panel {
-          padding: 16px;
-        }
-      }
-    </style>
-    <button id="openBtn" class="cliproxy-cache-stats__launch" type="button">Cache Stats</button>
-    <div id="backdrop" class="cliproxy-cache-stats__backdrop" hidden>
-      <section class="cliproxy-cache-stats__panel" role="dialog" aria-modal="true" aria-labelledby="cliproxy-cache-stats-title">
-        <div class="cliproxy-cache-stats__header">
-          <div>
-            <h2 id="cliproxy-cache-stats-title" class="cliproxy-cache-stats__title">Caching Statistics</h2>
-            <p class="cliproxy-cache-stats__subtitle">Live cache metrics inside management.html. The management key stays only in memory for this tab.</p>
-          </div>
-          <button id="closeBtn" class="cliproxy-cache-stats__close" type="button">Close</button>
-        </div>
-        <div class="cliproxy-cache-stats__toolbar">
-          <input id="managementKey" type="password" autocomplete="off" placeholder="Management key">
-          <div class="cliproxy-cache-stats__presets" aria-label="Time presets">
-            <button class="cliproxy-cache-stats__preset" data-preset="today" type="button">Today</button>
-            <button class="cliproxy-cache-stats__preset" data-preset="last7" type="button">Last 7 Days</button>
-            <button class="cliproxy-cache-stats__preset" data-preset="month" type="button">This Month</button>
-          </div>
-          <input id="days" type="number" min="1" value="14" placeholder="Days">
-          <input id="limit" type="number" min="1" value="50" placeholder="Recent rows">
-          <input id="modelLimit" type="number" min="1" value="10" placeholder="Model rows">
-          <button id="refreshBtn" type="button">Refresh</button>
-        </div>
-        <div id="status" class="cliproxy-cache-stats__status"></div>
-        <div id="error" class="cliproxy-cache-stats__error"></div>
-        <div id="cards" class="cliproxy-cache-stats__cards"></div>
-        <div class="cliproxy-cache-stats__section">
-          <h3>Charts</h3>
-          <div id="chartGrid" class="cliproxy-cache-stats__chart-grid"></div>
-        </div>
-        <div class="cliproxy-cache-stats__section">
-          <h3>Models</h3>
-          <div class="cliproxy-cache-stats__tablewrap">
-            <table class="cliproxy-cache-stats__table">
-              <thead><tr><th>Model</th><th>Requests</th><th>Failed</th><th>Input</th><th>Cached</th><th>Cache Ratio</th><th>Avg Latency</th></tr></thead>
-              <tbody id="modelsBody"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="cliproxy-cache-stats__section">
-          <h3>Daily Trend</h3>
-          <div class="cliproxy-cache-stats__tablewrap">
-            <table class="cliproxy-cache-stats__table">
-              <thead><tr><th>Day</th><th>Requests</th><th>Input</th><th>Cached</th><th>Cache Ratio</th></tr></thead>
-              <tbody id="daysBody"></tbody>
-            </table>
-          </div>
-        </div>
-        <div class="cliproxy-cache-stats__section">
-          <h3>Recent Requests</h3>
-          <div class="cliproxy-cache-stats__tablewrap">
-            <table class="cliproxy-cache-stats__table">
-              <thead><tr><th>When</th><th>Provider</th><th>Model</th><th>Latency</th><th>Input</th><th>Output</th><th>Cached</th><th>Cache Ratio</th></tr></thead>
-              <tbody id="recentBody"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-    </div>
-  `;
-
-  inlineShadow.innerHTML = `
-    <style>
-      :host {
-        all: initial;
-        display: block;
-        min-width: 0;
-      }
-      :host([data-mode="fallback"]) {
-        margin: 16px 16px 0;
-      }
-      .cliproxy-cache-stats__inline {
-        height: 100%;
-        box-sizing: border-box;
-        padding: 16px;
-        border-radius: 16px;
-        border: 1px solid rgba(37, 99, 235, 0.28);
-        background: linear-gradient(135deg, rgba(37, 99, 235, 0.16), rgba(15, 23, 42, 0.92));
-        color: #e5e7eb;
-        font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
-      }
-      .cliproxy-cache-stats__inline-row {
+      .cliproxy-enhancer__card {
         display: flex;
         flex-direction: column;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 14px;
-        height: 100%;
+        gap: 6px;
+        padding: 16px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 86%, transparent);
       }
-      .cliproxy-cache-stats__inline-label {
-        color: #93c5fd;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
+      .cliproxy-enhancer__label {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        color: var(--text-secondary, #4b5563);
         text-transform: uppercase;
       }
-      .cliproxy-cache-stats__inline-title {
-        margin: 8px 0 0;
-        font-size: 18px;
+      .cliproxy-enhancer__value {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        font-size: 24px;
         font-weight: 700;
-        line-height: 1.25;
+        color: var(--text-primary, #111827);
       }
-      .cliproxy-cache-stats__inline-copy {
-        margin: 6px 0 0;
-        color: #cbd5e1;
+      .cliproxy-enhancer__value span {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-secondary, #4b5563);
+      }
+      .cliproxy-enhancer__hint {
+        font-size: 12px;
+        color: var(--text-tertiary, #6b7280);
+      }
+      .cliproxy-enhancer__request-events {
+        margin-top: 8px;
+      }
+      .cliproxy-enhancer__table-wrap {
+        overflow: auto;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: var(--bg-primary, #fff);
+      }
+      .cliproxy-enhancer__table {
+        width: 100%;
+        min-width: 920px;
+        border-collapse: collapse;
+      }
+      .cliproxy-enhancer__table th,
+      .cliproxy-enhancer__table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border-color, #e5e7eb);
+        text-align: left;
+        vertical-align: top;
         font-size: 13px;
       }
-      .cliproxy-cache-stats__inline-action {
-        border: 0;
-        border-radius: 999px;
-        padding: 10px 14px;
-        background: #2563eb;
-        color: #fff;
-        font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        cursor: pointer;
-        white-space: nowrap;
+      .cliproxy-enhancer__table th {
+        position: sticky;
+        top: 0;
+        background: var(--bg-secondary, #f8fafc);
+        color: var(--text-secondary, #4b5563);
+        font-weight: 700;
+        z-index: 1;
       }
-      @media (max-width: 700px) {
-        :host([data-mode="fallback"]) {
-          margin: 12px 12px 0;
+      .cliproxy-enhancer__table tr:last-child td {
+        border-bottom: 0;
+      }
+      .cliproxy-enhancer__muted {
+        color: var(--text-tertiary, #6b7280);
+      }
+      .cliproxy-enhancer__warning-hidden {
+        display: none !important;
+      }
+      @media (max-width: 960px) {
+        .cliproxy-enhancer__toolbar {
+          align-items: stretch;
         }
       }
-    </style>
-    <section class="cliproxy-cache-stats__inline" aria-label="Cache statistics launcher">
-      <div class="cliproxy-cache-stats__inline-row">
-        <div>
-          <div class="cliproxy-cache-stats__inline-label">Prompt Cache</div>
-          <h2 class="cliproxy-cache-stats__inline-title">Prompt Cache Statistics</h2>
-          <p class="cliproxy-cache-stats__inline-copy">Open cache ratio trends, token totals, and recent request rows.</p>
-        </div>
-        <button id="openInlineBtn" class="cliproxy-cache-stats__inline-action" type="button">Open Cache Statistics</button>
-      </div>
-    </section>
-  `;
-
-  const query = (id) => shadow.getElementById(id);
-  const inlineQuery = (id) => inlineShadow.getElementById(id);
-  const openBtn = query('openBtn');
-  const openInlineBtn = inlineQuery('openInlineBtn');
-  const closeBtn = query('closeBtn');
-  const backdrop = query('backdrop');
-  const keyInput = query('managementKey');
-  const daysInput = query('days');
-  const limitInput = query('limit');
-  const modelLimitInput = query('modelLimit');
-  const refreshBtn = query('refreshBtn');
-  const statusEl = query('status');
-  const errorEl = query('error');
-  const cardsEl = query('cards');
-  const chartGridEl = query('chartGrid');
-  const modelsBody = query('modelsBody');
-  const daysBody = query('daysBody');
-  const recentBody = query('recentBody');
-  const presetButtons = Array.from(shadow.querySelectorAll('.cliproxy-cache-stats__preset'));
-  const cacheStatsHash = '#cache-statistics';
-  const autoRefreshMs = 3000;
-  const usageOverviewLabels = ['Usage Overview', '使用概览'];
-  const usageGridMetricLabels = ['Total Requests', '总请求数', 'Total Tokens', '总 Token 数', 'Models Used', '使用模型数', 'RPM', 'TPM'];
-  let autoRefreshHandle = null;
-  let loadInFlight = false;
-  let activePreset = '';
-
-  function fmtInt(v) { return new Intl.NumberFormat().format(Number(v || 0)); }
-  function fmtCompact(v) { return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(v || 0)); }
-  function fmtPct(v) { return `${(Number(v || 0) * 100).toFixed(2)}%`; }
-  function fmtPctValue(v) { return `${Number(v || 0).toFixed(1)}%`; }
-  function fmtMs(v) { return `${Math.round(Number(v || 0))} ms`; }
-  function esc(v) { return String(v ?? '').replace(/[&<>\"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])); }
-  function setStatus(text) { statusEl.textContent = text; }
-  function setError(text) { errorEl.textContent = text || ''; }
-  function daysForPreset(preset) {
-    switch (preset) {
-      case 'today':
-        return 1;
-      case 'last7':
-        return 7;
-      case 'month':
-        return Math.max(new Date().getDate(), 1);
-      default:
-        return null;
-    }
-  }
-  function updatePresetButtons() {
-    for (const button of presetButtons) {
-      button.dataset.active = button.dataset.preset === activePreset ? 'true' : 'false';
-    }
-  }
-  function stopAutoRefresh() {
-    if (autoRefreshHandle !== null) {
-      window.clearInterval(autoRefreshHandle);
-      autoRefreshHandle = null;
-    }
-  }
-  function startAutoRefresh() {
-    stopAutoRefresh();
-    autoRefreshHandle = window.setInterval(() => {
-      if (backdrop.hidden) return;
-      load({ background: true }).catch(err => {
-        setStatus('');
-        setError(err.stack || String(err));
-      });
-    }, autoRefreshMs);
+    `;
+    document.head.appendChild(style);
   }
 
-  function openPanel(loadOnOpen) {
-    backdrop.hidden = false;
-    document.body.style.overflow = 'hidden';
-    startAutoRefresh();
-    if (window.location.hash !== cacheStatsHash) {
-      history.replaceState(null, '', `${window.location.pathname}${window.location.search}${cacheStatsHash}`);
-    }
-    if (loadOnOpen) {
-      load().catch(err => {
-        setStatus('');
-        setError(err.stack || String(err));
-      });
-    }
-    setTimeout(() => keyInput.focus(), 0);
-  }
-
-  function closePanel() {
-    stopAutoRefresh();
-    backdrop.hidden = true;
-    document.body.style.overflow = '';
-    if (window.location.hash === cacheStatsHash) {
-      history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-    }
-    keyInput.value = '';
-  }
-
-  function syncHash() {
-    if (window.location.hash === cacheStatsHash) {
-      openPanel(true);
-      return;
-    }
-    if (!backdrop.hidden) {
-      closePanel();
-    }
-  }
-
-  function normalizeText(value) {
+  function normalize(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
-  function findUsageOverviewAnchor() {
-    const candidates = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], div, span, p');
-    for (const element of candidates) {
-      if (element === host || element === inlineHost) continue;
-      if (element.closest('#cliproxy-cache-stats-host') || element.closest('#cliproxy-cache-stats-inline-host')) continue;
-      const text = normalizeText(element.textContent);
-      if (usageOverviewLabels.includes(text)) {
-        return element;
-      }
-    }
-    return null;
+  function isEnhancerNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (typeof node.id === 'string' && node.id.startsWith('cliproxy-')) return true;
+    return Array.from(node.classList || []).some((className) => String(className || '').startsWith('cliproxy-'));
   }
 
-  function scoreUsageGrid(element) {
-    if (!element || element === inlineHost || element.contains(inlineHost)) {
-      return -1;
-    }
-    const text = normalizeText(element.textContent);
-    let score = 0;
-    for (const label of usageGridMetricLabels) {
-      if (text.includes(label)) score += 1;
-    }
-    if (score < 2) return -1;
-    return score * 10 + element.children.length;
+  function escapeHTML(value) {
+    return String(value == null ? '' : value).replace(/[&<>\"]/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;'
+    }[char]));
   }
 
-  function findUsageOverviewGrid(anchor) {
-    if (!anchor) return null;
-    const roots = [];
-    if (anchor.parentElement) roots.push(anchor.parentElement);
-    if (anchor.parentElement && anchor.parentElement.parentElement) roots.push(anchor.parentElement.parentElement);
-    for (const root of roots) {
-      const candidates = root.querySelectorAll('div, section');
-      let best = null;
-      let bestScore = -1;
-      for (const candidate of candidates) {
-        if (!(anchor.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-          continue;
-        }
-        const score = scoreUsageGrid(candidate);
-        if (score > bestScore) {
-          bestScore = score;
-          best = candidate;
-        }
-      }
-      if (best) return best;
+  function parseJSONStorage(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw == null || raw === '') return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
     }
-    return null;
   }
 
-  function placeInlineLauncher() {
-    const anchor = findUsageOverviewAnchor();
-    if (!anchor || !anchor.parentNode) {
-      inlineHost.hidden = true;
-      inlineHost.dataset.mode = 'fallback';
-      openBtn.hidden = false;
+  function setJSONStorage(key, value) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  }
+
+  function getBoolSetting(key, fallback) {
+    const value = parseJSONStorage(key, fallback);
+    return typeof value === 'boolean' ? value : fallback;
+  }
+
+  function getIntSetting(key, fallback, min, max) {
+    const value = Number(parseJSONStorage(key, fallback));
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(value)));
+  }
+
+  function getUsageAutoEnabled() {
+    return getBoolSetting(STORAGE_KEYS.usageAuto, true);
+  }
+
+  function getUsageIntervalSeconds() {
+    return getIntSetting(STORAGE_KEYS.usageInterval, DEFAULT_USAGE_INTERVAL, 1, 60);
+  }
+
+  function getQuotaAutoEnabled() {
+    return getBoolSetting(STORAGE_KEYS.quotaAuto, false);
+  }
+
+  function getQuotaIntervalSeconds() {
+    return getIntSetting(STORAGE_KEYS.quotaInterval, DEFAULT_QUOTA_INTERVAL, 1, 300);
+  }
+
+  function getQuotaPageSize() {
+    return getIntSetting(STORAGE_KEYS.quotaPageSize, DEFAULT_QUOTA_PAGE_SIZE, 1, 1000);
+  }
+
+  function getMain() {
+    return document.querySelector('main');
+  }
+
+  function getPageLayer() {
+    const main = getMain();
+    if (!main) return null;
+    return main.querySelector('.page-transition__layer') || main.firstElementChild;
+  }
+
+  function getPageContainer() {
+    const layer = getPageLayer();
+    if (!layer) return null;
+    return layer.firstElementChild || layer;
+  }
+
+  function getPageTitle() {
+    const container = getPageContainer();
+    const heading = container ? container.querySelector('h1') : null;
+    return normalize(heading ? heading.textContent : '');
+  }
+
+  function isUsageRoute() {
+    return window.location.hash.startsWith('#/usage');
+  }
+
+  function isQuotaRoute() {
+    return window.location.hash.startsWith('#/quota');
+  }
+
+  function isUsagePageReady() {
+    return isUsageRoute() && getPageTitle() === 'Usage Statistics';
+  }
+
+  function isQuotaPageReady() {
+    return isQuotaRoute() && getPageTitle() === 'Quota Management';
+  }
+
+  function sameOriginManagementURL(input) {
+    try {
+      const url = new URL(input, window.location.origin);
+      return url.origin === window.location.origin && url.pathname.startsWith('/v0/management/');
+    } catch {
       return false;
     }
+  }
 
-    const grid = findUsageOverviewGrid(anchor);
-    inlineHost.hidden = false;
-    if (grid) {
-      inlineHost.dataset.mode = 'grid';
-      openBtn.hidden = true;
-      if (grid.lastElementChild !== inlineHost) {
-        grid.appendChild(inlineHost);
+  function getHeaderValue(headers, name) {
+    if (!headers) return '';
+    const lowerName = name.toLowerCase();
+    if (headers instanceof Headers) return headers.get(name) || headers.get(lowerName) || '';
+    if (Array.isArray(headers)) {
+      const match = headers.find((entry) => String(entry && entry[0] || '').toLowerCase() === lowerName);
+      return match ? String(match[1] || '') : '';
+    }
+    if (typeof headers === 'object') {
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === lowerName) return String(headers[key] || '');
       }
-      return true;
     }
+    return '';
+  }
 
-    inlineHost.dataset.mode = 'fallback';
-    openBtn.hidden = false;
-    if (anchor.nextSibling !== inlineHost) {
-      anchor.insertAdjacentElement('afterend', inlineHost);
+  function captureManagementAuthorization(urlLike, headers) {
+    if (!sameOriginManagementURL(urlLike)) return;
+    const auth = getHeaderValue(headers, 'authorization');
+    if (auth && auth.startsWith('Bearer ')) {
+      managementAuthorization = auth;
     }
+  }
+
+  function patchFetch() {
+    if (!nativeFetch) return;
+    window.fetch = async function patchedFetch(input, init) {
+      try {
+        if (typeof Request !== 'undefined' && input instanceof Request) {
+          captureManagementAuthorization(input.url, input.headers);
+        }
+        captureManagementAuthorization(
+          typeof input === 'string' ? input : (input && input.url) || '',
+          (init && init.headers) || (input && input.headers) || null,
+        );
+      } catch {}
+      return nativeFetch(input, init);
+    };
+  }
+
+  function patchXHR() {
+    if (!window.XMLHttpRequest) return;
+    const open = XMLHttpRequest.prototype.open;
+    const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.open = function patchedOpen(method, url) {
+      this.__cliproxyURL = url;
+      this.__cliproxyHeaders = {};
+      return open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function patchedSetRequestHeader(name, value) {
+      try {
+        if (!this.__cliproxyHeaders) this.__cliproxyHeaders = {};
+        this.__cliproxyHeaders[name] = value;
+        captureManagementAuthorization(this.__cliproxyURL || '', this.__cliproxyHeaders);
+      } catch {}
+      return setRequestHeader.apply(this, arguments);
+    };
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function triggerUsageRefresh() {
+    const container = getPageContainer();
+    if (!container) return false;
+    const button = Array.from(container.querySelectorAll('button')).find((el) => normalize(el.textContent) === 'Refresh');
+    if (!button || button.disabled) return false;
+    button.click();
     return true;
   }
 
-  function renderEmptyChart(title, subtitle) {
-    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><div class="cliproxy-cache-stats__chart-empty">No data for the selected window.</div></div>`;
+  function triggerQuotaRefreshAll() {
+    const container = getPageContainer();
+    if (!container) return false;
+    const buttons = Array.from(container.querySelectorAll('button')).filter((el) => normalize(el.textContent) === 'Refresh all credentials' && !el.disabled);
+    if (!buttons.length) return false;
+    buttons.forEach((button) => button.click());
+    return true;
   }
 
-  function renderBarChart(title, subtitle, labels, values, color) {
-    if (!labels.length || !values.length) return renderEmptyChart(title, subtitle);
-    const width = 520;
-    const height = 220;
-    const top = 18;
-    const right = 12;
-    const bottom = 44;
-    const left = 44;
-    const plotWidth = width - left - right;
-    const plotHeight = height - top - bottom;
-    const maxValue = Math.max(...values, 1);
-    const barGap = 12;
-    const barWidth = Math.max((plotWidth - barGap * (values.length - 1)) / values.length, 8);
-    const bars = values.map((value, index) => {
-      const scaled = maxValue === 0 ? 0 : (value / maxValue) * plotHeight;
-      const x = left + index * (barWidth + barGap);
-      const y = top + (plotHeight - scaled);
-      return `
-        <rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(scaled, 2).toFixed(2)}" rx="6" fill="${color}"></rect>
-        <text x="${(x + barWidth / 2).toFixed(2)}" y="${height - 18}" text-anchor="middle" class="cliproxy-cache-stats__axis-label">${esc(labels[index])}</text>`;
-    }).join('');
-    const ticks = [0, 0.5, 1].map(factor => {
-      const y = top + plotHeight - plotHeight * factor;
-      const value = maxValue * factor;
-      return `
-        <line x1="${left}" y1="${y.toFixed(2)}" x2="${width - right}" y2="${y.toFixed(2)}" class="cliproxy-cache-stats__grid-line"></line>
-        <text x="${left - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end" class="cliproxy-cache-stats__axis-label">${esc(fmtCompact(value))}</text>`;
-    }).join('');
-    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><svg viewBox="0 0 ${width} ${height}" class="cliproxy-cache-stats__chart-svg" role="img" aria-label="${esc(title)} chart">${ticks}${bars}</svg></div>`;
-  }
-
-  function renderLineChart(title, subtitle, labels, values, color) {
-    if (!labels.length || !values.length) return renderEmptyChart(title, subtitle);
-    const width = 520;
-    const height = 220;
-    const top = 18;
-    const right = 12;
-    const bottom = 44;
-    const left = 44;
-    const plotWidth = width - left - right;
-    const plotHeight = height - top - bottom;
-    const maxValue = Math.max(...values, 1);
-    const minValue = 0;
-    const step = values.length > 1 ? plotWidth / (values.length - 1) : 0;
-    const points = values.map((value, index) => {
-      const x = left + step * index;
-      const scaled = maxValue === minValue ? 0.5 : (value - minValue) / (maxValue - minValue);
-      const y = top + plotHeight - scaled * plotHeight;
-      return { x, y, label: labels[index] };
-    });
-    const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
-    const pointMarkup = points.map(point => `
-      <circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="4.5" fill="${color}" class="cliproxy-cache-stats__point"></circle>
-      <text x="${point.x.toFixed(2)}" y="${height - 18}" text-anchor="middle" class="cliproxy-cache-stats__axis-label">${esc(point.label)}</text>`).join('');
-    const ticks = [0, 0.5, 1].map(factor => {
-      const y = top + plotHeight - plotHeight * factor;
-      const value = maxValue * factor;
-      return `
-        <line x1="${left}" y1="${y.toFixed(2)}" x2="${width - right}" y2="${y.toFixed(2)}" class="cliproxy-cache-stats__grid-line"></line>
-        <text x="${left - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end" class="cliproxy-cache-stats__axis-label">${esc(fmtPctValue(value))}</text>`;
-    }).join('');
-    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><svg viewBox="0 0 ${width} ${height}" class="cliproxy-cache-stats__chart-svg" role="img" aria-label="${esc(title)} chart">${ticks}<path d="${path}" stroke="${color}" class="cliproxy-cache-stats__line"></path>${pointMarkup}</svg></div>`;
-  }
-
-  function renderCharts(data) {
-    const byDay = (data.by_day || []).slice(-14);
-    const labels = byDay.map(item => String(item.day || '').slice(5));
-    const cachedTokenValues = byDay.map(item => Number(item.cached_tokens || 0));
-    const cacheRatioValues = byDay.map(item => Number(item.cache_ratio || 0) * 100);
-    chartGridEl.innerHTML = [
-      renderBarChart('Daily Cached Tokens', 'How many input tokens were served from cache each day.', labels, cachedTokenValues, '#60a5fa'),
-      renderLineChart('Daily Cache Ratio', 'Cached input tokens divided by total input tokens for each day.', labels, cacheRatioValues, '#34d399')
-    ].join('');
-  }
-
-  async function load(options = {}) {
-    const { background = false } = options;
-    const key = keyInput.value.trim();
-    if (!key) {
-      if (!background) {
-        setStatus('');
-        setError('Enter a management key first.');
+  async function ensureManagementAuth() {
+    if (managementAuthorization) return true;
+    if (authPrimePromise) return authPrimePromise;
+    authPrimePromise = (async () => {
+      if (isUsagePageReady()) {
+        triggerUsageRefresh();
+      } else if (isQuotaPageReady()) {
+        const container = getPageContainer();
+        const refreshButton = container ? container.querySelector('button[aria-label="Refresh all credentials"]') : null;
+        if (refreshButton && !refreshButton.disabled) refreshButton.click();
       }
-      return;
+      const deadline = Date.now() + 3000;
+      while (!managementAuthorization && Date.now() < deadline) {
+        await wait(100);
+      }
+      return !!managementAuthorization;
+    })().finally(() => {
+      authPrimePromise = null;
+    });
+    return authPrimePromise;
+  }
+
+  function getUsageTimeRange() {
+    let value = parseJSONStorage(TIME_RANGE_KEY, '24h');
+    value = normalize(value).toLowerCase();
+    if (!value) {
+      const container = getPageContainer();
+      const rangeButton = container ? Array.from(container.querySelectorAll('button')).find((el) => {
+        const text = normalize(el.textContent);
+        return text === 'All Time' || text === 'Last 7 Hours' || text === 'Last 24 Hours' || text === 'Last 7 Days';
+      }) : null;
+      value = normalize(rangeButton ? rangeButton.textContent : 'Last 24 Hours').toLowerCase();
     }
-    if (loadInFlight) {
-      return;
+    if (value === '7h' || value === 'last 7 hours') {
+      return { key: '7h', label: 'Last 7 Hours', days: 1, cutoffMs: 7 * 60 * 60 * 1000 };
     }
-    loadInFlight = true;
-    if (!background) {
-      setError('');
-      setStatus('Loading cache statistics...');
+    if (value === '7d' || value === 'last 7 days') {
+      return { key: '7d', label: 'Last 7 Days', days: 7, cutoffMs: 7 * 24 * 60 * 60 * 1000 };
     }
+    if (value === 'all' || value === 'all time') {
+      return { key: 'all', label: 'All Time', days: 3650, cutoffMs: null };
+    }
+    return { key: '24h', label: 'Last 24 Hours', days: 1, cutoffMs: 24 * 60 * 60 * 1000 };
+  }
+
+  async function fetchCacheStatistics(days, limit) {
+    const ready = await ensureManagementAuth();
+    if (!ready || !nativeFetch || !managementAuthorization) return null;
+    const url = new URL('/v0/management/cache-statistics', window.location.origin);
+    url.searchParams.set('days', String(days));
+    url.searchParams.set('limit', String(limit));
+    url.searchParams.set('model_limit', String(MODEL_LIMIT));
+    const response = await nativeFetch(url.toString(), {
+      headers: { Authorization: managementAuthorization },
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return payload && payload.cache_statistics ? payload.cache_statistics : null;
+  }
+
+  function formatInteger(value) {
+    return new Intl.NumberFormat().format(Number(value || 0));
+  }
+
+  function formatCompact(value) {
+    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
+  }
+
+  function formatDateTime(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString();
+  }
+
+  function filterRecentRequests(requests, timeRange) {
+    const list = Array.isArray(requests) ? requests.slice() : [];
+    if (timeRange.cutoffMs == null) return list;
+    const cutoff = Date.now() - timeRange.cutoffMs;
+    return list.filter((item) => {
+      const timestamp = new Date(item && item.timestamp || '').getTime();
+      return Number.isFinite(timestamp) && timestamp >= cutoff;
+    });
+  }
+
+  function findUsageChildBlock(container, needle) {
+    return Array.from(container.children).find((child) => !isEnhancerNode(child) && normalize(child.textContent).includes(needle));
+  }
+
+  function ensureUsageControls(container) {
+    const header = container.querySelector('h1') && container.querySelector('h1').parentElement;
+    if (!header || !header.parentElement) return null;
+    let controls = container.querySelector('#cliproxy-usage-controls');
+    if (!controls) {
+      controls = document.createElement('div');
+      controls.id = 'cliproxy-usage-controls';
+      controls.className = 'cliproxy-enhancer__toolbar';
+      controls.innerHTML = `
+        <label>
+          <input id="cliproxy-usage-auto-refresh-toggle" type="checkbox">
+          Usage auto refresh
+        </label>
+        <label>
+          Every
+          <input id="cliproxy-usage-auto-refresh-interval" type="number" min="1" max="60" step="1">
+          sec
+        </label>
+        <span class="cliproxy-enhancer__hint">Follows the page-global Usage Statistics time filter.</span>
+      `;
+      header.insertAdjacentElement('afterend', controls);
+      const toggle = controls.querySelector('#cliproxy-usage-auto-refresh-toggle');
+      const interval = controls.querySelector('#cliproxy-usage-auto-refresh-interval');
+      toggle.addEventListener('change', () => {
+        setJSONStorage(STORAGE_KEYS.usageAuto, toggle.checked);
+        startUsageTimer();
+      });
+      interval.addEventListener('change', () => {
+        const next = Math.min(60, Math.max(1, Math.round(Number(interval.value) || DEFAULT_USAGE_INTERVAL)));
+        interval.value = String(next);
+        setJSONStorage(STORAGE_KEYS.usageInterval, next);
+        startUsageTimer();
+      });
+    }
+    controls.querySelector('#cliproxy-usage-auto-refresh-toggle').checked = getUsageAutoEnabled();
+    controls.querySelector('#cliproxy-usage-auto-refresh-interval').value = String(getUsageIntervalSeconds());
+    return controls;
+  }
+
+  function ensureServiceHealthRow(container) {
+    let row = container.querySelector('#cliproxy-service-health-row, #cliproxy-usage-service-health');
+    if (!row) {
+      row = document.createElement('div');
+      row.id = 'cliproxy-service-health-row';
+      row.className = 'cliproxy-enhancer__service-row cliproxy-service-health-row';
+    } else {
+      row.id = 'cliproxy-service-health-row';
+      row.className = 'cliproxy-enhancer__service-row cliproxy-service-health-row';
+    }
+    if (!row.isConnected) {
+      const controls = container.querySelector('#cliproxy-usage-controls');
+      if (controls && controls.parentElement) {
+        controls.insertAdjacentElement('afterend', row);
+      } else {
+        container.insertBefore(row, container.children[1] || null);
+      }
+    }
+    return row;
+  }
+
+  function updateServiceHealthRow(row, summary, label) {
+    const total = Number(summary && summary.total_requests || 0);
+    const failed = Number(summary && summary.failed_requests || 0);
+    const success = Math.max(total - failed, 0);
+    const rate = total > 0 ? ((success / total) * 100).toFixed(2) : '0.00';
+    row.innerHTML = `
+      <div class="cliproxy-enhancer__card">
+        <div class="cliproxy-enhancer__label">Service Health</div>
+        <div class="cliproxy-enhancer__hint">${escapeHTML(label)}</div>
+      </div>
+      <div class="cliproxy-enhancer__card">
+        <div class="cliproxy-enhancer__label">Success</div>
+        <div class="cliproxy-enhancer__value">${escapeHTML(formatInteger(success))}</div>
+      </div>
+      <div class="cliproxy-enhancer__card">
+        <div class="cliproxy-enhancer__label">Failure</div>
+        <div class="cliproxy-enhancer__value">${escapeHTML(formatInteger(failed))}</div>
+      </div>
+      <div class="cliproxy-enhancer__card">
+        <div class="cliproxy-enhancer__label">Success Rate</div>
+        <div class="cliproxy-enhancer__value">${escapeHTML(rate)}<span>%</span></div>
+      </div>
+    `;
+  }
+
+  function patchCachedTokensCard(container, summary) {
+    const metricsBlock = Array.from(container.children).find((child) => {
+      const text = normalize(child.textContent);
+      return text.includes('Total Requests') && text.includes('Total Tokens') && text.includes('RPM');
+    });
+    if (!metricsBlock) return;
+    const children = Array.from(metricsBlock.children);
+    const totalCard = children.find((child) => normalize(child.textContent).includes('Total Tokens'));
+    let cachedCard = children.find((child) => normalize(child.textContent).includes('Cached Tokens'));
+    if (!cachedCard) {
+      cachedCard = document.createElement('div');
+      cachedCard.className = totalCard ? totalCard.className : 'cliproxy-enhancer__card';
+      if (totalCard && totalCard.parentElement) {
+        totalCard.insertAdjacentElement('afterend', cachedCard);
+      } else {
+        metricsBlock.appendChild(cachedCard);
+      }
+    }
+    const cachedTokens = Number(summary && summary.cached_tokens || 0);
+    const inputTokens = Number(summary && summary.input_tokens || 0);
+    const percentage = inputTokens > 0 ? ((cachedTokens / inputTokens) * 100).toFixed(2) : '0.00';
+    cachedCard.innerHTML = `
+      <div class="cliproxy-enhancer__label">Cached Tokens</div>
+      <div class="cliproxy-enhancer__value">${escapeHTML(formatCompact(cachedTokens))}<span>${escapeHTML(percentage)}%</span></div>
+      <div class="cliproxy-enhancer__hint">${escapeHTML(formatInteger(cachedTokens))} persisted cached tokens</div>
+    `;
+  }
+
+  function hideUsageBlocks(container) {
+    const linesBlock = findUsageChildBlock(container, 'Lines to display');
+    if (linesBlock) linesBlock.style.display = 'none';
+    const serviceHealthBlock = findUsageChildBlock(container, 'Service Health');
+    if (serviceHealthBlock) serviceHealthBlock.style.display = 'none';
+  }
+
+  function renderRequestEvents(container, stats, timeRange) {
+    const requestBlock = findUsageChildBlock(container, 'Request Events');
+    if (!requestBlock) return;
+    requestBlock.style.display = 'none';
+    let panel = container.querySelector('#cliproxy-request-events');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'cliproxy-request-events';
+      panel.className = 'cliproxy-enhancer__request-events cliproxy-request-events';
+    }
+    if (requestBlock.nextElementSibling !== panel) {
+      requestBlock.insertAdjacentElement('afterend', panel);
+    }
+    const requests = filterRecentRequests(stats && stats.recent_requests || [], timeRange).slice(0, MAX_REQUEST_ROWS);
+    panel.innerHTML = `
+      <div class="cliproxy-enhancer__label">Request Events</div>
+      <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} persisted request events within ${escapeHTML(timeRange.label)}.</div>
+      <div class="cliproxy-enhancer__table-wrap">
+        <table class="cliproxy-enhancer__table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Model Name</th>
+              <th>Reasoning Effort</th>
+              <th>Input Tokens</th>
+              <th>Output Tokens</th>
+              <th>Reasoning Tokens</th>
+              <th>Cached Tokens</th>
+              <th>Total Tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${requests.length ? requests.map((item) => `
+              <tr>
+                <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
+                <td>${escapeHTML(item.model || '')}</td>
+                <td>${escapeHTML(item.reasoning_effort || 'n/a')}</td>
+                <td>${escapeHTML(formatInteger(item.input_tokens))}</td>
+                <td>${escapeHTML(formatInteger(item.output_tokens))}</td>
+                <td>${escapeHTML(formatInteger(item.reasoning_tokens))}</td>
+                <td>${escapeHTML(formatInteger(item.cached_tokens))}</td>
+                <td>${escapeHTML(formatInteger(item.total_tokens))}</td>
+              </tr>
+            `).join('') : `
+              <tr>
+                <td colspan="8" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+              </tr>
+            `}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderUsageStatistics(container, stats, timeRange) {
+    updateServiceHealthRow(ensureServiceHealthRow(container), stats.summary || {}, timeRange.label);
+    patchCachedTokensCard(container, stats.summary || {});
+    renderRequestEvents(container, stats, timeRange);
+  }
+
+  function scheduleUsageRefreshRetry(delayMs) {
+    if (usageRefreshRetryTimer) return;
+    usageRefreshRetryTimer = window.setTimeout(() => {
+      usageRefreshRetryTimer = null;
+      if (!isUsagePageReady() || document.hidden) return;
+      refreshUsagePage(true).catch(() => {});
+    }, Math.max(0, delayMs));
+  }
+
+  async function refreshUsagePage(background) {
+    if (usageRefreshInFlight || !isUsagePageReady()) return;
+    usageRefreshInFlight = true;
     try {
-      const url = new URL('/v0/management/cache-statistics', window.location.origin);
-      url.searchParams.set('days', daysInput.value || '14');
-      url.searchParams.set('limit', limitInput.value || '50');
-      url.searchParams.set('model_limit', modelLimitInput.value || '10');
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
-      if (!resp.ok) {
-        setStatus('');
-        setError(`Request failed: ${resp.status} ${resp.statusText}\n${await resp.text()}`);
+      const container = getPageContainer();
+      if (!container) return;
+      ensureUsageControls(container);
+      hideUsageBlocks(container);
+      const timeRange = getUsageTimeRange();
+      const minIntervalMs = getUsageIntervalSeconds() * 1000;
+      const elapsedMs = Date.now() - lastUsageStatisticsFetchAt;
+      const remainingMs = lastUsageStatisticsFetchAt > 0 ? Math.max(0, minIntervalMs - elapsedMs) : 0;
+      if (remainingMs > 0) {
+        if (lastUsageStatistics) {
+          renderUsageStatistics(container, lastUsageStatistics, timeRange);
+        }
+        scheduleUsageRefreshRetry(remainingMs);
         return;
       }
-      const payload = await resp.json();
-      render(payload.cache_statistics || { enabled: false, summary: {}, by_model: [], by_day: [], recent_requests: [] });
-      setError('');
-      setStatus(`Loaded at ${new Date().toLocaleString()} · auto-refreshing every 3s while open`);
+      const stats = await fetchCacheStatistics(timeRange.days, RECENT_REQUEST_FETCH_LIMIT);
+      if (!stats) return;
+      lastUsageStatisticsFetchAt = Date.now();
+      lastUsageStatistics = stats;
+      renderUsageStatistics(container, stats, timeRange);
     } finally {
-      loadInFlight = false;
+      usageRefreshInFlight = false;
     }
   }
 
-  function render(data) {
-    const summary = data.summary || {};
-    cardsEl.innerHTML = [
-      ['Persistence', data.enabled ? 'enabled' : 'disabled'],
-      ['Requests', fmtInt(summary.total_requests)],
-      ['Failed', fmtInt(summary.failed_requests)],
-      ['Input Tokens', fmtInt(summary.input_tokens)],
-      ['Output Tokens', fmtInt(summary.output_tokens)],
-      ['Cached Tokens', fmtInt(summary.cached_tokens)],
-      ['Cache Ratio', fmtPct(summary.cache_ratio)],
-      ['Avg Latency', fmtMs(summary.avg_latency_ms)]
-    ].map(([label, value]) => `<div class="cliproxy-cache-stats__card"><div class="cliproxy-cache-stats__label">${esc(label)}</div><div class="cliproxy-cache-stats__value">${esc(value)}</div></div>`).join('');
-
-    renderCharts(data);
-
-    modelsBody.innerHTML = (data.by_model || []).map(item => `
-      <tr>
-        <td>${esc(item.model)}</td>
-        <td>${fmtInt(item.requests)}</td>
-        <td>${fmtInt(item.failed_requests)}</td>
-        <td>${fmtInt(item.input_tokens)}</td>
-        <td>${fmtInt(item.cached_tokens)}</td>
-        <td>${fmtPct(item.cache_ratio)}</td>
-        <td>${fmtMs(item.avg_latency_ms)}</td>
-      </tr>`).join('') || '<tr><td colspan="7" class="cliproxy-cache-stats__muted">No data</td></tr>';
-
-    daysBody.innerHTML = (data.by_day || []).map(item => `
-      <tr>
-        <td>${esc(item.day)}</td>
-        <td>${fmtInt(item.requests)}</td>
-        <td>${fmtInt(item.input_tokens)}</td>
-        <td>${fmtInt(item.cached_tokens)}</td>
-        <td>${fmtPct(item.cache_ratio)}</td>
-      </tr>`).join('') || '<tr><td colspan="5" class="cliproxy-cache-stats__muted">No data</td></tr>';
-
-    recentBody.innerHTML = (data.recent_requests || []).map(item => `
-      <tr>
-        <td>${esc(item.timestamp ? new Date(item.timestamp).toLocaleString() : '')}</td>
-        <td>${esc(item.provider)}</td>
-        <td>${esc(item.model)}</td>
-        <td>${fmtMs(item.latency_ms)}</td>
-        <td>${fmtInt(item.input_tokens)}</td>
-        <td>${fmtInt(item.output_tokens)}</td>
-        <td>${fmtInt(item.cached_tokens)}</td>
-        <td>${fmtPct(item.cache_ratio)}</td>
-      </tr>`).join('') || '<tr><td colspan="8" class="cliproxy-cache-stats__muted">No data</td></tr>';
+  function findFiberFromElement(element) {
+    if (!element) return null;
+    const key = Object.keys(element).find((entry) => entry.startsWith('__reactFiber$'));
+    return key ? element[key] : null;
   }
 
-  updatePresetButtons();
+  function findFiberByName(element, name) {
+    let fiber = findFiberFromElement(element);
+    while (fiber) {
+      const fiberName = fiber.elementType && fiber.elementType.name || fiber.type && fiber.type.name || fiber.type;
+      if (fiberName === name) return fiber;
+      fiber = fiber.return;
+    }
+    return null;
+  }
 
-  for (const button of presetButtons) {
-    button.addEventListener('click', () => {
-      const days = daysForPreset(button.dataset.preset);
-      if (days == null) {
+  function getQuotaFiberState(element) {
+    const fiber = findFiberByName(element, 'cf');
+    if (!fiber) return null;
+    let hook = fiber.memoizedState;
+    let viewModeDispatch = null;
+    let warningDispatch = null;
+    let currentPageDispatch = null;
+    let pageSizeDispatch = null;
+    while (hook) {
+      const value = hook.memoizedState;
+      const dispatch = hook.queue && hook.queue.dispatch;
+      if (!viewModeDispatch && value === 'paged' && dispatch) {
+        viewModeDispatch = dispatch;
+      } else if (viewModeDispatch && !warningDispatch && typeof value === 'boolean' && dispatch) {
+        warningDispatch = dispatch;
+      } else if (viewModeDispatch && warningDispatch && !currentPageDispatch && typeof value === 'number' && dispatch) {
+        currentPageDispatch = dispatch;
+      } else if (currentPageDispatch && !pageSizeDispatch && typeof value === 'number' && dispatch) {
+        pageSizeDispatch = dispatch;
+        break;
+      }
+      hook = hook.next;
+    }
+    return {
+      fiber,
+      viewModeDispatch,
+      warningDispatch,
+      currentPageDispatch,
+      pageSizeDispatch,
+    };
+  }
+
+  function getQuotaSectionContexts(container) {
+    return Array.from(container.querySelectorAll('.card')).map((card, index) => {
+      const refreshButton = Array.from(card.querySelectorAll('button')).find((button) => normalize(button.textContent) === 'Refresh all credentials');
+      if (!refreshButton) return null;
+      const state = getQuotaFiberState(refreshButton);
+      if (!state) return null;
+      const props = state.fiber.memoizedProps || {};
+      let count = 0;
+      try {
+        if (Array.isArray(props.files) && props.config && typeof props.config.filterFn === 'function') {
+          count = props.files.filter(props.config.filterFn).length;
+        }
+      } catch {}
+      if (!count) {
+        const badge = card.querySelector('.QuotaPage-module__countBadge___tuPLs');
+        count = Number(badge ? badge.textContent : 0) || 0;
+      }
+      const key = props.config && props.config.i18nPrefix ? String(props.config.i18nPrefix) : `quota-${index}`;
+      return { key, card, refreshButton, count, state };
+    }).filter(Boolean);
+  }
+
+  function applyQuotaMode(context, mode) {
+    const storedPageSize = getQuotaPageSize();
+    const nextPageSize = mode === 'all' ? Math.max(context.count, 1) : storedPageSize;
+    quotaModes.set(context.key, mode);
+    if (context.state.viewModeDispatch) context.state.viewModeDispatch('paged');
+    if (context.state.warningDispatch) context.state.warningDispatch(false);
+    if (context.state.currentPageDispatch) context.state.currentPageDispatch(1);
+    if (context.state.pageSizeDispatch) context.state.pageSizeDispatch(nextPageSize);
+  }
+
+  function hideQuotaWarnings() {
+    Array.from(document.querySelectorAll('.QuotaPage-module__warningOverlay___lVjB7, .QuotaPage-module__warningModal___2pPNd')).forEach((node) => {
+      node.classList.add('cliproxy-enhancer__warning-hidden');
+      node.setAttribute('aria-hidden', 'true');
+      node.style.display = 'none';
+    });
+    const container = getPageContainer();
+    if (!container) return;
+    getQuotaSectionContexts(container).forEach((context) => {
+      if (context.state.warningDispatch) context.state.warningDispatch(false);
+    });
+  }
+
+  function ensureQuotaControls(container) {
+    const header = container.querySelector('h1') && container.querySelector('h1').parentElement;
+    if (!header || !header.parentElement) return null;
+    let controls = container.querySelector('#cliproxy-quota-controls');
+    if (!controls) {
+      controls = document.createElement('div');
+      controls.id = 'cliproxy-quota-controls';
+      controls.className = 'cliproxy-enhancer__toolbar';
+      controls.innerHTML = `
+        <label>
+          <input id="cliproxy-quota-auto-refresh-toggle" type="checkbox">
+          Quota auto refresh
+        </label>
+        <label>
+          Every
+          <input id="cliproxy-quota-auto-refresh-interval" type="number" min="1" max="300" step="1">
+          sec
+        </label>
+        <label>
+          Paged view size
+          <input id="cliproxy-quota-page-size" type="number" min="1" max="1000" step="1">
+        </label>
+      `;
+      header.insertAdjacentElement('afterend', controls);
+      const autoToggle = controls.querySelector('#cliproxy-quota-auto-refresh-toggle');
+      const interval = controls.querySelector('#cliproxy-quota-auto-refresh-interval');
+      const pageSize = controls.querySelector('#cliproxy-quota-page-size');
+      autoToggle.addEventListener('change', () => {
+        setJSONStorage(STORAGE_KEYS.quotaAuto, autoToggle.checked);
+        startQuotaTimer();
+      });
+      interval.addEventListener('change', () => {
+        const next = Math.min(300, Math.max(1, Math.round(Number(interval.value) || DEFAULT_QUOTA_INTERVAL)));
+        interval.value = String(next);
+        setJSONStorage(STORAGE_KEYS.quotaInterval, next);
+        startQuotaTimer();
+      });
+      pageSize.addEventListener('change', () => {
+        const next = Math.min(1000, Math.max(1, Math.round(Number(pageSize.value) || DEFAULT_QUOTA_PAGE_SIZE)));
+        pageSize.value = String(next);
+        setJSONStorage(STORAGE_KEYS.quotaPageSize, next);
+        const contexts = getQuotaSectionContexts(container);
+        contexts.forEach((context) => {
+          if ((quotaModes.get(context.key) || 'paged') !== 'all') {
+            applyQuotaMode(context, 'paged');
+          }
+        });
+      });
+    }
+    controls.querySelector('#cliproxy-quota-auto-refresh-toggle').checked = getQuotaAutoEnabled();
+    controls.querySelector('#cliproxy-quota-auto-refresh-interval').value = String(getQuotaIntervalSeconds());
+    controls.querySelector('#cliproxy-quota-page-size').value = String(getQuotaPageSize());
+    return controls;
+  }
+
+  function installQuotaClickInterceptor() {
+    if (quotaClickInterceptorInstalled) return;
+    quotaClickInterceptorInstalled = true;
+    document.addEventListener('click', (event) => {
+      if (!isQuotaPageReady()) return;
+      const button = event.target && event.target.closest ? event.target.closest('button') : null;
+      if (!button) return;
+      const text = normalize(button.textContent);
+      if (text !== 'Show all' && text !== 'Paged' && text !== 'Confirm') return;
+      const container = getPageContainer();
+      if (!container) return;
+      if (text === 'Confirm') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+        hideQuotaWarnings();
         return;
       }
-      activePreset = button.dataset.preset || '';
-      daysInput.value = String(days);
-      updatePresetButtons();
-      if (!backdrop.hidden) {
-        load().catch(err => { setStatus(''); setError(err.stack || String(err)); });
-      }
-    });
+      const card = button.closest('.card');
+      if (!card) return;
+      const context = getQuotaSectionContexts(container).find((item) => item.card === card);
+      if (!context) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+      applyQuotaMode(context, text === 'Show all' ? 'all' : 'paged');
+      hideQuotaWarnings();
+    }, true);
   }
 
-  daysInput.addEventListener('input', () => {
-    const activeDays = activePreset ? String(daysForPreset(activePreset)) : '';
-    if (activeDays !== String(daysInput.value || '')) {
-      activePreset = '';
-      updatePresetButtons();
+  async function refreshQuotaPage(background) {
+    if (quotaRefreshInFlight || !isQuotaPageReady()) return;
+    quotaRefreshInFlight = true;
+    try {
+      const container = getPageContainer();
+      if (!container) return;
+      ensureQuotaControls(container);
+      installQuotaClickInterceptor();
+      hideQuotaWarnings();
+      const contexts = getQuotaSectionContexts(container);
+      contexts.forEach((context) => {
+        const mode = quotaModes.get(context.key) || 'paged';
+        applyQuotaMode(context, mode);
+      });
+    } finally {
+      quotaRefreshInFlight = false;
     }
-  });
+  }
 
-  for (const control of [daysInput, limitInput, modelLimitInput]) {
-    control.addEventListener('change', () => {
-      if (!backdrop.hidden) {
-        load().catch(err => { setStatus(''); setError(err.stack || String(err)); });
+  function stopUsageTimer() {
+    if (usageTimer) {
+      window.clearInterval(usageTimer);
+      usageTimer = null;
+    }
+    if (usageRefreshRetryTimer) {
+      window.clearTimeout(usageRefreshRetryTimer);
+      usageRefreshRetryTimer = null;
+    }
+  }
+
+  function stopQuotaTimer() {
+    if (quotaTimer) {
+      window.clearInterval(quotaTimer);
+      quotaTimer = null;
+    }
+  }
+
+  function startUsageTimer() {
+    stopUsageTimer();
+    if (!getUsageAutoEnabled()) return;
+    usageTimer = window.setInterval(() => {
+      if (!isUsagePageReady() || document.hidden) return;
+      triggerUsageRefresh();
+      refreshUsagePage(true).catch(() => {});
+    }, getUsageIntervalSeconds() * 1000);
+  }
+
+  function startQuotaTimer() {
+    stopQuotaTimer();
+    if (!getQuotaAutoEnabled()) return;
+    quotaTimer = window.setInterval(() => {
+      if (!isQuotaPageReady() || document.hidden) return;
+      triggerQuotaRefreshAll();
+      refreshQuotaPage(true).catch(() => {});
+    }, getQuotaIntervalSeconds() * 1000);
+  }
+
+  function isEnhancerManagedNode(node) {
+    let current = node && node.nodeType === 3 ? node.parentElement : node;
+    while (current && current !== document.body) {
+      const id = typeof current.id === 'string' ? current.id : '';
+      const className = typeof current.className === 'string' ? current.className : '';
+      if (id.startsWith('cliproxy-') || className.includes('cliproxy-')) {
+        return true;
       }
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function shouldIgnoreRouteSyncMutations(mutations) {
+    return mutations.every((mutation) => {
+      if (!isEnhancerManagedNode(mutation.target)) return false;
+      const addedNodes = Array.from(mutation.addedNodes || []);
+      if (addedNodes.some((node) => !isEnhancerManagedNode(node))) return false;
+      const removedNodes = Array.from(mutation.removedNodes || []);
+      if (removedNodes.some((node) => !isEnhancerManagedNode(node))) return false;
+      return true;
     });
   }
 
-  openBtn.addEventListener('click', () => openPanel(true));
-  openInlineBtn.addEventListener('click', () => openPanel(true));
-  closeBtn.addEventListener('click', closePanel);
-  refreshBtn.addEventListener('click', () => load().catch(err => { setStatus(''); setError(err.stack || String(err)); }));
-  backdrop.addEventListener('click', event => {
-    if (event.target === backdrop) closePanel();
-  });
-  window.addEventListener('hashchange', syncHash);
-  window.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !backdrop.hidden) closePanel();
-  });
-
-  const placementObserver = new MutationObserver(() => {
-    placeInlineLauncher();
-  });
-  placementObserver.observe(document.body, { childList: true, subtree: true });
-  placeInlineLauncher();
-
-  if (window.location.hash === cacheStatsHash) {
-    openPanel(true);
+  function syncRouteSoon() {
+    if (routeSyncTimer) return;
+    routeSyncTimer = window.setTimeout(() => {
+      routeSyncTimer = null;
+      if (window.location.hash === '#cache-statistics') {
+        history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/usage`);
+      }
+      if (isUsagePageReady()) {
+        stopQuotaTimer();
+        refreshUsagePage(false).catch(() => {});
+        startUsageTimer();
+        return;
+      }
+      if (isQuotaPageReady()) {
+        stopUsageTimer();
+        refreshQuotaPage(false).catch(() => {});
+        startQuotaTimer();
+        return;
+      }
+      stopUsageTimer();
+      stopQuotaTimer();
+    }, 50);
   }
+
+  installStyles();
+  patchFetch();
+  patchXHR();
+  window.addEventListener('hashchange', syncRouteSoon);
+  new MutationObserver((mutations) => {
+    if (shouldIgnoreRouteSyncMutations(mutations)) return;
+    syncRouteSoon();
+  }).observe(document.body, { childList: true, subtree: true });
+  syncRouteSoon();
 })();
 </script>

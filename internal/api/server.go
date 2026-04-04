@@ -696,6 +696,9 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", enhanceManagementControlPanelHTML(content))
 }
 

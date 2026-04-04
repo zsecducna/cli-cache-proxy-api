@@ -15,25 +15,29 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+type usageReasoningEffortContextKey struct{}
+
 type UsageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider        string
+	model           string
+	reasoningEffort string
+	authID          string
+	authIndex       string
+	apiKey          string
+	source          string
+	requestedAt     time.Time
+	once            sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
+		provider:        provider,
+		model:           model,
+		reasoningEffort: UsageReasoningEffortFromContext(ctx),
+		requestedAt:     time.Now(),
+		apiKey:          apiKey,
+		source:          resolveUsageSource(auth, apiKey),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -95,16 +99,17 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:        r.provider,
+		Model:           r.model,
+		ReasoningEffort: r.reasoningEffort,
+		Source:          r.source,
+		APIKey:          r.apiKey,
+		AuthID:          r.authID,
+		AuthIndex:       r.authIndex,
+		RequestedAt:     r.requestedAt,
+		Latency:         r.latency(),
+		Failed:          failed,
+		Detail:          detail,
 	}
 }
 
@@ -138,6 +143,46 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func WithUsageReasoningEffort(ctx context.Context, effort string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, usageReasoningEffortContextKey{}, strings.TrimSpace(effort))
+}
+
+func UsageReasoningEffortFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	effort, _ := ctx.Value(usageReasoningEffortContextKey{}).(string)
+	return strings.TrimSpace(effort)
+}
+
+func ExtractReasoningEffortFromRequest(body []byte, format string) string {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return ""
+	}
+
+	trimmedFormat := strings.ToLower(strings.TrimSpace(format))
+	for _, path := range reasoningEffortPathsForFormat(trimmedFormat) {
+		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func reasoningEffortPathsForFormat(format string) []string {
+	switch format {
+	case "claude":
+		return []string{"output_config.effort", "reasoning.effort", "reasoning_effort"}
+	case "codex", "openai-response":
+		return []string{"reasoning.effort", "reasoning_effort", "output_config.effort"}
+	default:
+		return []string{"reasoning.effort", "reasoning_effort", "output_config.effort"}
+	}
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

@@ -179,27 +179,48 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusOK)
 	}
+	if cacheControl := rr.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+		t.Fatalf("management page should disable browser caching, got Cache-Control=%q", cacheControl)
+	}
 	body := rr.Body.String()
 	if !strings.Contains(body, "cliproxy-cache-stats-overlay") {
 		t.Fatalf("management page missing cache stats injection: %s", body)
 	}
-	if !strings.Contains(body, "Prompt Cache Statistics") || !strings.Contains(body, "Open Cache Statistics") {
-		t.Fatalf("management page missing inline cache launcher: %s", body)
+	if !strings.Contains(body, "window.__cliproxyManagementEnhancer") {
+		t.Fatalf("management page missing management enhancer bootstrap: %s", body)
 	}
-	if !strings.Contains(body, "Usage Overview") {
-		t.Fatalf("management page missing targeted Usage Overview attachment hint: %s", body)
+	if !strings.Contains(body, "cliproxy-usage-auto-refresh-toggle") || !strings.Contains(body, "cliproxy-usage-auto-refresh-interval") {
+		t.Fatalf("management page missing usage auto-refresh controls: %s", body)
 	}
-	if !strings.Contains(body, "Daily Cached Tokens") || !strings.Contains(body, "Daily Cache Ratio") {
-		t.Fatalf("management page missing embedded cache charts: %s", body)
+	if !strings.Contains(body, "Usage auto refresh") {
+		t.Fatalf("management page missing usage refresh label copy: %s", body)
 	}
-	if !strings.Contains(body, "Today") || !strings.Contains(body, "Last 7 Days") || !strings.Contains(body, "This Month") {
-		t.Fatalf("management page missing time preset filters: %s", body)
+	if !strings.Contains(body, "cliproxy-quota-auto-refresh-toggle") || !strings.Contains(body, "cliproxy-quota-auto-refresh-interval") || !strings.Contains(body, "cliproxy-quota-page-size") {
+		t.Fatalf("management page missing quota controls: %s", body)
 	}
-	if !strings.Contains(body, "auto-refreshing every 3s while open") {
-		t.Fatalf("management page missing near-real-time refresh status copy: %s", body)
+	if !strings.Contains(body, "Quota auto refresh") || !strings.Contains(body, "Paged view size") {
+		t.Fatalf("management page missing quota control copy: %s", body)
 	}
-	if strings.Contains(body, "localStorage") {
-		t.Fatalf("management page should not persist the management key in browser storage: %s", body)
+	if !strings.Contains(body, "cliproxy-usage-service-health") || !strings.Contains(body, "cliproxy-request-events") {
+		t.Fatalf("management page missing stable custom section markers: %s", body)
+	}
+	if !strings.Contains(body, "Service Health") || !strings.Contains(body, "Cached Tokens") || !strings.Contains(body, "Reasoning Effort") {
+		t.Fatalf("management page missing usage/request-events labels: %s", body)
+	}
+	if strings.Contains(body, "cliproxy-cache-stats-inline-host") {
+		t.Fatalf("management page should not include the removed inline host: %s", body)
+	}
+	if strings.Contains(body, "Prompt Cache Statistics") || strings.Contains(body, "Open Cache Statistics") || strings.Contains(body, "managementKey") {
+		t.Fatalf("management page should not include the legacy overlay launcher or management key field: %s", body)
+	}
+	if strings.Contains(body, "requestBlock.innerHTML") || strings.Contains(body, "removeChild(node)") {
+		t.Fatalf("management enhancer should not mutate React-owned DOM unsafely: %s", body)
+	}
+	if strings.Contains(body, "new MutationObserver(syncRouteSoon)") || strings.Contains(body, "if (!background) triggerUsageRefresh()") || strings.Contains(body, "if (!background) triggerQuotaRefreshAll()") {
+		t.Fatalf("management enhancer should guard against self-triggered refresh loops: %s", body)
+	}
+	if !strings.Contains(body, "const DEFAULT_USAGE_INTERVAL = 5;") || !strings.Contains(body, "scheduleUsageRefreshRetry") || !strings.Contains(body, "lastUsageStatisticsFetchAt") {
+		t.Fatalf("management enhancer should throttle cache statistics fetches to the configured refresh interval: %s", body)
 	}
 }
 
@@ -251,15 +272,16 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "old-cache", ResponseID: "resp-old"},
 		},
 		{
-			Timestamp: now.Add(-2 * time.Hour),
-			Provider:  "codex",
-			Model:     "gpt-5.4",
-			Source:    "recent-a@example.com",
-			AuthID:    "auth-a",
-			AuthIndex: "1",
-			LatencyMs: 1200,
-			Tokens:    usage.TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 900, TotalTokens: 1100},
-			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "cache-a", ResponseID: "resp-a"},
+			Timestamp:       now.Add(-2 * time.Hour),
+			Provider:        "codex",
+			Model:           "gpt-5.4",
+			ReasoningEffort: "medium",
+			Source:          "recent-a@example.com",
+			AuthID:          "auth-a",
+			AuthIndex:       "1",
+			LatencyMs:       1200,
+			Tokens:          usage.TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 900, TotalTokens: 1100},
+			Cache:           &helps.CodexCacheObservability{PromptCacheKey: "cache-a", ResponseID: "resp-a"},
 		},
 		{
 			Timestamp: now.Add(-1 * time.Hour),
@@ -287,7 +309,27 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	var payload struct {
-		CacheStatistics usage.CacheStatisticsSnapshot `json:"cache_statistics"`
+		CacheStatistics struct {
+			DBPath  string `json:"db_path"`
+			Summary struct {
+				TotalRequests int64 `json:"total_requests"`
+				CachedTokens  int64 `json:"cached_tokens"`
+			} `json:"summary"`
+			ByModel []struct {
+				Model string `json:"model"`
+			} `json:"by_model"`
+			RecentRequests []struct {
+				Model                string `json:"model"`
+				ReasoningEffort      string `json:"reasoning_effort"`
+				Source               string `json:"source"`
+				AuthID               string `json:"auth_id"`
+				AuthIndex            string `json:"auth_index"`
+				PromptCacheKey       string `json:"prompt_cache_key"`
+				PreviousResponseID   string `json:"previous_response_id"`
+				ResponseID           string `json:"response_id"`
+				PromptCacheRetention string `json:"prompt_cache_retention"`
+			} `json:"recent_requests"`
+		} `json:"cache_statistics"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -313,6 +355,12 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 	recent := payload.CacheStatistics.RecentRequests[0]
 	if recent.Model != "gpt-5.4-mini" {
 		t.Fatalf("recent model = %q, want gpt-5.4-mini", recent.Model)
+	}
+	if recent.ReasoningEffort != "" {
+		t.Fatalf("recent reasoning_effort = %q, want empty for historical row without value", recent.ReasoningEffort)
+	}
+	if payload.CacheStatistics.ByModel[0].Model != "gpt-5.4" {
+		t.Fatalf("first model = %q, want gpt-5.4", payload.CacheStatistics.ByModel[0].Model)
 	}
 	if recent.Source != "" || recent.AuthID != "" || recent.AuthIndex != "" {
 		t.Fatalf("sensitive auth fields should be redacted: %+v", recent)

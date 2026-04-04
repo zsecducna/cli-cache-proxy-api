@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -60,5 +61,63 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestExtractReasoningEffortFromRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		body   []byte
+		want   string
+	}{
+		{
+			name:   "codex reasoning effort",
+			format: "codex",
+			body:   []byte(`{"reasoning":{"effort":"medium"}}`),
+			want:   "medium",
+		},
+		{
+			name:   "openai chat reasoning effort",
+			format: "openai",
+			body:   []byte(`{"reasoning_effort":"high"}`),
+			want:   "high",
+		},
+		{
+			name:   "claude adaptive effort",
+			format: "claude",
+			body:   []byte(`{"output_config":{"effort":"low"}}`),
+			want:   "low",
+		},
+		{
+			name:   "missing effort",
+			format: "gemini",
+			body:   []byte(`{"generationConfig":{"temperature":0.1}}`),
+			want:   "",
+		},
+		{
+			name:   "invalid json",
+			format: "codex",
+			body:   []byte(`{"reasoning":`),
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExtractReasoningEffortFromRequest(tt.body, tt.format); got != tt.want {
+				t.Fatalf("ExtractReasoningEffortFromRequest() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewUsageReporterIncludesReasoningEffortFromContext(t *testing.T) {
+	ctx := WithUsageReasoningEffort(context.Background(), "xhigh")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ReasoningEffort != "xhigh" {
+		t.Fatalf("reasoning_effort = %q, want %q", record.ReasoningEffort, "xhigh")
 	}
 }

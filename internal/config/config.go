@@ -63,7 +63,7 @@ type Config struct {
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
 	// UsageStatisticsEnabled toggles usage aggregation; when true, request metrics stay in memory and cache statistics are also persisted locally.
-	// When false, usage data is discarded and the cache statistics database is disabled.
+	// This option defaults to true when omitted. When false, usage data is discarded and the cache statistics database is disabled.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
@@ -576,7 +576,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
-	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

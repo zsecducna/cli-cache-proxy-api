@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,15 +34,16 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "cache-old", ResponseID: "resp-old"},
 		},
 		{
-			Timestamp: now.Add(-2 * time.Hour),
-			Provider:  "codex",
-			Model:     "gpt-5.4",
-			Source:    "user@example.com",
-			AuthID:    "auth-1",
-			AuthIndex: "0",
-			LatencyMs: 1200,
-			Tokens:    TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 0, TotalTokens: 1100},
-			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "cache-1", ResponseID: "resp-1"},
+			Timestamp:       now.Add(-2 * time.Hour),
+			Provider:        "codex",
+			Model:           "gpt-5.4",
+			ReasoningEffort: "medium",
+			Source:          "user@example.com",
+			AuthID:          "auth-1",
+			AuthIndex:       "0",
+			LatencyMs:       1200,
+			Tokens:          TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 0, TotalTokens: 1100},
+			Cache:           &helps.CodexCacheObservability{PromptCacheKey: "cache-1", ResponseID: "resp-1"},
 		},
 		{
 			Timestamp: now.Add(-1 * time.Hour),
@@ -86,6 +88,9 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 	if snapshot.RecentRequests[0].ResponseID != "resp-2" {
 		t.Fatalf("recent response_id = %q, want resp-2", snapshot.RecentRequests[0].ResponseID)
 	}
+	if snapshot.RecentRequests[1].ReasoningEffort != "medium" {
+		t.Fatalf("recent reasoning_effort = %q, want medium", snapshot.RecentRequests[1].ReasoningEffort)
+	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -94,5 +99,66 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Fatalf("database permissions = %o, want 600", got)
 		}
+	}
+}
+
+func TestCacheStatisticsStoreMigratesExistingDatabaseWithoutReasoningEffort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	_, err = db.Exec(`
+CREATE TABLE cache_statistics_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    requested_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    source TEXT NOT NULL,
+    auth_id TEXT NOT NULL,
+    auth_index TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    cached_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    prompt_cache_key TEXT NOT NULL,
+    previous_response_id TEXT NOT NULL,
+    response_id TEXT NOT NULL,
+    prompt_cache_retention TEXT NOT NULL
+);
+INSERT INTO cache_statistics_requests (
+    requested_at, provider, model, source, auth_id, auth_index, latency_ms, failed,
+    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention
+) VALUES (
+    ?, 'codex', 'gpt-5.4', 'user@example.com', 'auth-1', '0', 1000, 0,
+    100, 20, 10, 30, 130,
+    'cache-key', 'prev-id', 'resp-id', '24h'
+);`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("seed legacy schema error = %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshot.RecentRequests) != 1 {
+		t.Fatalf("len(RecentRequests) = %d, want 1", len(snapshot.RecentRequests))
+	}
+	if snapshot.RecentRequests[0].ReasoningEffort != "" {
+		t.Fatalf("legacy reasoning_effort = %q, want empty string", snapshot.RecentRequests[0].ReasoningEffort)
 	}
 }
