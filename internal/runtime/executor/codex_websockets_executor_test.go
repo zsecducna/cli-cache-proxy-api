@@ -9,9 +9,30 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
+
+func TestApplyCodexPromptCacheHeadersReusesPreviousResponsePromptCacheKey(t *testing.T) {
+	recordCodexPromptCacheResponse(context.Background(), []byte(`{"type":"response.completed","response":{"id":"resp-1"}}`), "session-cache", codexPromptCache24hTTL)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-1"}`),
+	}
+
+	body, headers, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload)
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "session-cache" {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
+	}
+	if got := headers.Get("Conversation_id"); got != "session-cache" {
+		t.Fatalf("Conversation_id = %q, want %q", got, "session-cache")
+	}
+	if selection.Key != "session-cache" {
+		t.Fatalf("selection.Key = %q, want %q", selection.Key, "session-cache")
+	}
+}
 
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)

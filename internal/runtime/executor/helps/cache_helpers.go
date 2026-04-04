@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,6 +23,8 @@ const codexCacheCleanupInterval = 15 * time.Minute
 
 // codexCacheCleanupOnce ensures the background cleanup goroutine starts only once.
 var codexCacheCleanupOnce sync.Once
+
+const codexResponsePromptCachePrefix = "response:"
 
 // startCodexCacheCleanup launches a background goroutine that periodically
 // removes expired entries from codexCacheMap to prevent memory leaks.
@@ -65,4 +68,31 @@ func SetCodexCache(key string, cache CodexCache) {
 	codexCacheMu.Lock()
 	codexCacheMap[key] = cache
 	codexCacheMu.Unlock()
+}
+
+func GetCodexResponsePromptCacheKey(responseID string) (string, bool) {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return "", false
+	}
+	cache, ok := GetCodexCache(codexResponsePromptCachePrefix + responseID)
+	if !ok || strings.TrimSpace(cache.ID) == "" {
+		return "", false
+	}
+	return cache.ID, true
+}
+
+func SetCodexResponsePromptCacheKey(responseID, promptCacheKey string, ttl time.Duration) {
+	responseID = strings.TrimSpace(responseID)
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if responseID == "" || promptCacheKey == "" {
+		return
+	}
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	SetCodexCache(codexResponsePromptCachePrefix+responseID, CodexCache{
+		ID:     promptCacheKey,
+		Expire: time.Now().Add(ttl),
+	})
 }

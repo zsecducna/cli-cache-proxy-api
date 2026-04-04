@@ -1,0 +1,787 @@
+<!-- cliproxy-cache-stats-overlay -->
+<script>
+(() => {
+  if (window.__cliproxyCacheStatsOverlay) return;
+  window.__cliproxyCacheStatsOverlay = true;
+
+  const host = document.createElement('div');
+  host.id = 'cliproxy-cache-stats-host';
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+
+  const inlineHost = document.createElement('div');
+  inlineHost.id = 'cliproxy-cache-stats-inline-host';
+  inlineHost.hidden = true;
+  const rootMount = document.getElementById('root');
+  document.body.insertBefore(inlineHost, rootMount || host);
+  const inlineShadow = inlineHost.attachShadow({ mode: 'open' });
+
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      .cliproxy-cache-stats__launch {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        z-index: 2147483600;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 16px;
+        background: #2563eb;
+        color: #fff;
+        font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.45);
+        cursor: pointer;
+      }
+      .cliproxy-cache-stats__backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483601;
+        display: flex;
+        justify-content: flex-end;
+        background: rgba(2, 6, 23, 0.62);
+        backdrop-filter: blur(2px);
+      }
+      .cliproxy-cache-stats__backdrop[hidden] { display: none; }
+      .cliproxy-cache-stats__panel {
+        width: min(720px, 100vw);
+        height: 100vh;
+        overflow: auto;
+        box-sizing: border-box;
+        padding: 20px;
+        background: #0b1020;
+        color: #e5e7eb;
+        font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        border-left: 1px solid #1f2937;
+        box-shadow: -16px 0 40px rgba(15, 23, 42, 0.35);
+      }
+      .cliproxy-cache-stats__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .cliproxy-cache-stats__title {
+        font-size: 24px;
+        font-weight: 700;
+        margin: 0;
+      }
+      .cliproxy-cache-stats__subtitle {
+        margin: 0 0 16px;
+        color: #94a3b8;
+      }
+      .cliproxy-cache-stats__toolbar {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .cliproxy-cache-stats__presets {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .cliproxy-cache-stats__toolbar input,
+      .cliproxy-cache-stats__toolbar button,
+      .cliproxy-cache-stats__close {
+        box-sizing: border-box;
+        border-radius: 10px;
+        border: 1px solid #334155;
+        background: #111827;
+        color: #e5e7eb;
+        padding: 10px 12px;
+        font: inherit;
+      }
+      .cliproxy-cache-stats__toolbar button,
+      .cliproxy-cache-stats__close {
+        cursor: pointer;
+        background: #2563eb;
+        border-color: #2563eb;
+      }
+      .cliproxy-cache-stats__toolbar .cliproxy-cache-stats__preset {
+        background: #0f172a;
+        border-color: #334155;
+      }
+      .cliproxy-cache-stats__toolbar .cliproxy-cache-stats__preset[data-active="true"] {
+        background: #2563eb;
+        border-color: #2563eb;
+      }
+      .cliproxy-cache-stats__close {
+        background: transparent;
+        border-color: #334155;
+      }
+      .cliproxy-cache-stats__status {
+        color: #94a3b8;
+        font-size: 12px;
+        min-height: 18px;
+      }
+      .cliproxy-cache-stats__error {
+        color: #fca5a5;
+        white-space: pre-wrap;
+        min-height: 18px;
+        margin-top: 4px;
+      }
+      .cliproxy-cache-stats__cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+        gap: 12px;
+        margin: 18px 0 24px;
+      }
+      .cliproxy-cache-stats__card,
+      .cliproxy-cache-stats__chart,
+      .cliproxy-cache-stats__tablewrap {
+        border: 1px solid #1f2937;
+        border-radius: 16px;
+        background: #111827;
+      }
+      .cliproxy-cache-stats__card {
+        padding: 14px;
+      }
+      .cliproxy-cache-stats__label {
+        color: #93c5fd;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .cliproxy-cache-stats__value {
+        margin-top: 8px;
+        font-size: 24px;
+        font-weight: 700;
+      }
+      .cliproxy-cache-stats__section {
+        margin-top: 28px;
+      }
+      .cliproxy-cache-stats__section h3 {
+        margin: 0 0 10px;
+        font-size: 18px;
+      }
+      .cliproxy-cache-stats__chart-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+      .cliproxy-cache-stats__chart {
+        padding: 14px;
+      }
+      .cliproxy-cache-stats__chart-subtitle {
+        color: #94a3b8;
+        font-size: 12px;
+        margin-bottom: 10px;
+      }
+      .cliproxy-cache-stats__chart-empty {
+        min-height: 180px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px dashed #334155;
+        border-radius: 12px;
+        color: #94a3b8;
+      }
+      .cliproxy-cache-stats__chart-svg {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      .cliproxy-cache-stats__axis-label {
+        fill: #94a3b8;
+        font-size: 11px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+      .cliproxy-cache-stats__grid-line {
+        stroke: #1f2937;
+        stroke-width: 1;
+      }
+      .cliproxy-cache-stats__line {
+        fill: none;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .cliproxy-cache-stats__point {
+        stroke: #0b1020;
+        stroke-width: 2;
+      }
+      .cliproxy-cache-stats__tablewrap {
+        overflow: auto;
+      }
+      .cliproxy-cache-stats__table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 620px;
+      }
+      .cliproxy-cache-stats__table th,
+      .cliproxy-cache-stats__table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #1f2937;
+        text-align: left;
+        vertical-align: top;
+      }
+      .cliproxy-cache-stats__table th {
+        color: #93c5fd;
+        background: #0f172a;
+        position: sticky;
+        top: 0;
+      }
+      .cliproxy-cache-stats__table tr:last-child td {
+        border-bottom: 0;
+      }
+      .cliproxy-cache-stats__muted {
+        color: #94a3b8;
+        font-size: 12px;
+      }
+      @media (max-width: 700px) {
+        .cliproxy-cache-stats__launch {
+          right: 16px;
+          bottom: 16px;
+        }
+        .cliproxy-cache-stats__panel {
+          padding: 16px;
+        }
+      }
+    </style>
+    <button id="openBtn" class="cliproxy-cache-stats__launch" type="button">Cache Stats</button>
+    <div id="backdrop" class="cliproxy-cache-stats__backdrop" hidden>
+      <section class="cliproxy-cache-stats__panel" role="dialog" aria-modal="true" aria-labelledby="cliproxy-cache-stats-title">
+        <div class="cliproxy-cache-stats__header">
+          <div>
+            <h2 id="cliproxy-cache-stats-title" class="cliproxy-cache-stats__title">Caching Statistics</h2>
+            <p class="cliproxy-cache-stats__subtitle">Live cache metrics inside management.html. The management key stays only in memory for this tab.</p>
+          </div>
+          <button id="closeBtn" class="cliproxy-cache-stats__close" type="button">Close</button>
+        </div>
+        <div class="cliproxy-cache-stats__toolbar">
+          <input id="managementKey" type="password" autocomplete="off" placeholder="Management key">
+          <div class="cliproxy-cache-stats__presets" aria-label="Time presets">
+            <button class="cliproxy-cache-stats__preset" data-preset="today" type="button">Today</button>
+            <button class="cliproxy-cache-stats__preset" data-preset="last7" type="button">Last 7 Days</button>
+            <button class="cliproxy-cache-stats__preset" data-preset="month" type="button">This Month</button>
+          </div>
+          <input id="days" type="number" min="1" value="14" placeholder="Days">
+          <input id="limit" type="number" min="1" value="50" placeholder="Recent rows">
+          <input id="modelLimit" type="number" min="1" value="10" placeholder="Model rows">
+          <button id="refreshBtn" type="button">Refresh</button>
+        </div>
+        <div id="status" class="cliproxy-cache-stats__status"></div>
+        <div id="error" class="cliproxy-cache-stats__error"></div>
+        <div id="cards" class="cliproxy-cache-stats__cards"></div>
+        <div class="cliproxy-cache-stats__section">
+          <h3>Charts</h3>
+          <div id="chartGrid" class="cliproxy-cache-stats__chart-grid"></div>
+        </div>
+        <div class="cliproxy-cache-stats__section">
+          <h3>Models</h3>
+          <div class="cliproxy-cache-stats__tablewrap">
+            <table class="cliproxy-cache-stats__table">
+              <thead><tr><th>Model</th><th>Requests</th><th>Failed</th><th>Input</th><th>Cached</th><th>Cache Ratio</th><th>Avg Latency</th></tr></thead>
+              <tbody id="modelsBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="cliproxy-cache-stats__section">
+          <h3>Daily Trend</h3>
+          <div class="cliproxy-cache-stats__tablewrap">
+            <table class="cliproxy-cache-stats__table">
+              <thead><tr><th>Day</th><th>Requests</th><th>Input</th><th>Cached</th><th>Cache Ratio</th></tr></thead>
+              <tbody id="daysBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="cliproxy-cache-stats__section">
+          <h3>Recent Requests</h3>
+          <div class="cliproxy-cache-stats__tablewrap">
+            <table class="cliproxy-cache-stats__table">
+              <thead><tr><th>When</th><th>Provider</th><th>Model</th><th>Latency</th><th>Input</th><th>Output</th><th>Cached</th><th>Cache Ratio</th></tr></thead>
+              <tbody id="recentBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+
+  inlineShadow.innerHTML = `
+    <style>
+      :host {
+        all: initial;
+        display: block;
+        min-width: 0;
+      }
+      :host([data-mode="fallback"]) {
+        margin: 16px 16px 0;
+      }
+      .cliproxy-cache-stats__inline {
+        height: 100%;
+        box-sizing: border-box;
+        padding: 16px;
+        border-radius: 16px;
+        border: 1px solid rgba(37, 99, 235, 0.28);
+        background: linear-gradient(135deg, rgba(37, 99, 235, 0.16), rgba(15, 23, 42, 0.92));
+        color: #e5e7eb;
+        font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+      }
+      .cliproxy-cache-stats__inline-row {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        height: 100%;
+      }
+      .cliproxy-cache-stats__inline-label {
+        color: #93c5fd;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .cliproxy-cache-stats__inline-title {
+        margin: 8px 0 0;
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.25;
+      }
+      .cliproxy-cache-stats__inline-copy {
+        margin: 6px 0 0;
+        color: #cbd5e1;
+        font-size: 13px;
+      }
+      .cliproxy-cache-stats__inline-action {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #2563eb;
+        color: #fff;
+        font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      @media (max-width: 700px) {
+        :host([data-mode="fallback"]) {
+          margin: 12px 12px 0;
+        }
+      }
+    </style>
+    <section class="cliproxy-cache-stats__inline" aria-label="Cache statistics launcher">
+      <div class="cliproxy-cache-stats__inline-row">
+        <div>
+          <div class="cliproxy-cache-stats__inline-label">Prompt Cache</div>
+          <h2 class="cliproxy-cache-stats__inline-title">Prompt Cache Statistics</h2>
+          <p class="cliproxy-cache-stats__inline-copy">Open cache ratio trends, token totals, and recent request rows.</p>
+        </div>
+        <button id="openInlineBtn" class="cliproxy-cache-stats__inline-action" type="button">Open Cache Statistics</button>
+      </div>
+    </section>
+  `;
+
+  const query = (id) => shadow.getElementById(id);
+  const inlineQuery = (id) => inlineShadow.getElementById(id);
+  const openBtn = query('openBtn');
+  const openInlineBtn = inlineQuery('openInlineBtn');
+  const closeBtn = query('closeBtn');
+  const backdrop = query('backdrop');
+  const keyInput = query('managementKey');
+  const daysInput = query('days');
+  const limitInput = query('limit');
+  const modelLimitInput = query('modelLimit');
+  const refreshBtn = query('refreshBtn');
+  const statusEl = query('status');
+  const errorEl = query('error');
+  const cardsEl = query('cards');
+  const chartGridEl = query('chartGrid');
+  const modelsBody = query('modelsBody');
+  const daysBody = query('daysBody');
+  const recentBody = query('recentBody');
+  const presetButtons = Array.from(shadow.querySelectorAll('.cliproxy-cache-stats__preset'));
+  const cacheStatsHash = '#cache-statistics';
+  const autoRefreshMs = 3000;
+  const usageOverviewLabels = ['Usage Overview', '使用概览'];
+  const usageGridMetricLabels = ['Total Requests', '总请求数', 'Total Tokens', '总 Token 数', 'Models Used', '使用模型数', 'RPM', 'TPM'];
+  let autoRefreshHandle = null;
+  let loadInFlight = false;
+  let activePreset = '';
+
+  function fmtInt(v) { return new Intl.NumberFormat().format(Number(v || 0)); }
+  function fmtCompact(v) { return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(v || 0)); }
+  function fmtPct(v) { return `${(Number(v || 0) * 100).toFixed(2)}%`; }
+  function fmtPctValue(v) { return `${Number(v || 0).toFixed(1)}%`; }
+  function fmtMs(v) { return `${Math.round(Number(v || 0))} ms`; }
+  function esc(v) { return String(v ?? '').replace(/[&<>\"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c])); }
+  function setStatus(text) { statusEl.textContent = text; }
+  function setError(text) { errorEl.textContent = text || ''; }
+  function daysForPreset(preset) {
+    switch (preset) {
+      case 'today':
+        return 1;
+      case 'last7':
+        return 7;
+      case 'month':
+        return Math.max(new Date().getDate(), 1);
+      default:
+        return null;
+    }
+  }
+  function updatePresetButtons() {
+    for (const button of presetButtons) {
+      button.dataset.active = button.dataset.preset === activePreset ? 'true' : 'false';
+    }
+  }
+  function stopAutoRefresh() {
+    if (autoRefreshHandle !== null) {
+      window.clearInterval(autoRefreshHandle);
+      autoRefreshHandle = null;
+    }
+  }
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    autoRefreshHandle = window.setInterval(() => {
+      if (backdrop.hidden) return;
+      load({ background: true }).catch(err => {
+        setStatus('');
+        setError(err.stack || String(err));
+      });
+    }, autoRefreshMs);
+  }
+
+  function openPanel(loadOnOpen) {
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    startAutoRefresh();
+    if (window.location.hash !== cacheStatsHash) {
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}${cacheStatsHash}`);
+    }
+    if (loadOnOpen) {
+      load().catch(err => {
+        setStatus('');
+        setError(err.stack || String(err));
+      });
+    }
+    setTimeout(() => keyInput.focus(), 0);
+  }
+
+  function closePanel() {
+    stopAutoRefresh();
+    backdrop.hidden = true;
+    document.body.style.overflow = '';
+    if (window.location.hash === cacheStatsHash) {
+      history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+    keyInput.value = '';
+  }
+
+  function syncHash() {
+    if (window.location.hash === cacheStatsHash) {
+      openPanel(true);
+      return;
+    }
+    if (!backdrop.hidden) {
+      closePanel();
+    }
+  }
+
+  function normalizeText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function findUsageOverviewAnchor() {
+    const candidates = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], div, span, p');
+    for (const element of candidates) {
+      if (element === host || element === inlineHost) continue;
+      if (element.closest('#cliproxy-cache-stats-host') || element.closest('#cliproxy-cache-stats-inline-host')) continue;
+      const text = normalizeText(element.textContent);
+      if (usageOverviewLabels.includes(text)) {
+        return element;
+      }
+    }
+    return null;
+  }
+
+  function scoreUsageGrid(element) {
+    if (!element || element === inlineHost || element.contains(inlineHost)) {
+      return -1;
+    }
+    const text = normalizeText(element.textContent);
+    let score = 0;
+    for (const label of usageGridMetricLabels) {
+      if (text.includes(label)) score += 1;
+    }
+    if (score < 2) return -1;
+    return score * 10 + element.children.length;
+  }
+
+  function findUsageOverviewGrid(anchor) {
+    if (!anchor) return null;
+    const roots = [];
+    if (anchor.parentElement) roots.push(anchor.parentElement);
+    if (anchor.parentElement && anchor.parentElement.parentElement) roots.push(anchor.parentElement.parentElement);
+    for (const root of roots) {
+      const candidates = root.querySelectorAll('div, section');
+      let best = null;
+      let bestScore = -1;
+      for (const candidate of candidates) {
+        if (!(anchor.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          continue;
+        }
+        const score = scoreUsageGrid(candidate);
+        if (score > bestScore) {
+          bestScore = score;
+          best = candidate;
+        }
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  function placeInlineLauncher() {
+    const anchor = findUsageOverviewAnchor();
+    if (!anchor || !anchor.parentNode) {
+      inlineHost.hidden = true;
+      inlineHost.dataset.mode = 'fallback';
+      openBtn.hidden = false;
+      return false;
+    }
+
+    const grid = findUsageOverviewGrid(anchor);
+    inlineHost.hidden = false;
+    if (grid) {
+      inlineHost.dataset.mode = 'grid';
+      openBtn.hidden = true;
+      if (grid.lastElementChild !== inlineHost) {
+        grid.appendChild(inlineHost);
+      }
+      return true;
+    }
+
+    inlineHost.dataset.mode = 'fallback';
+    openBtn.hidden = false;
+    if (anchor.nextSibling !== inlineHost) {
+      anchor.insertAdjacentElement('afterend', inlineHost);
+    }
+    return true;
+  }
+
+  function renderEmptyChart(title, subtitle) {
+    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><div class="cliproxy-cache-stats__chart-empty">No data for the selected window.</div></div>`;
+  }
+
+  function renderBarChart(title, subtitle, labels, values, color) {
+    if (!labels.length || !values.length) return renderEmptyChart(title, subtitle);
+    const width = 520;
+    const height = 220;
+    const top = 18;
+    const right = 12;
+    const bottom = 44;
+    const left = 44;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const maxValue = Math.max(...values, 1);
+    const barGap = 12;
+    const barWidth = Math.max((plotWidth - barGap * (values.length - 1)) / values.length, 8);
+    const bars = values.map((value, index) => {
+      const scaled = maxValue === 0 ? 0 : (value / maxValue) * plotHeight;
+      const x = left + index * (barWidth + barGap);
+      const y = top + (plotHeight - scaled);
+      return `
+        <rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${Math.max(scaled, 2).toFixed(2)}" rx="6" fill="${color}"></rect>
+        <text x="${(x + barWidth / 2).toFixed(2)}" y="${height - 18}" text-anchor="middle" class="cliproxy-cache-stats__axis-label">${esc(labels[index])}</text>`;
+    }).join('');
+    const ticks = [0, 0.5, 1].map(factor => {
+      const y = top + plotHeight - plotHeight * factor;
+      const value = maxValue * factor;
+      return `
+        <line x1="${left}" y1="${y.toFixed(2)}" x2="${width - right}" y2="${y.toFixed(2)}" class="cliproxy-cache-stats__grid-line"></line>
+        <text x="${left - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end" class="cliproxy-cache-stats__axis-label">${esc(fmtCompact(value))}</text>`;
+    }).join('');
+    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><svg viewBox="0 0 ${width} ${height}" class="cliproxy-cache-stats__chart-svg" role="img" aria-label="${esc(title)} chart">${ticks}${bars}</svg></div>`;
+  }
+
+  function renderLineChart(title, subtitle, labels, values, color) {
+    if (!labels.length || !values.length) return renderEmptyChart(title, subtitle);
+    const width = 520;
+    const height = 220;
+    const top = 18;
+    const right = 12;
+    const bottom = 44;
+    const left = 44;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const maxValue = Math.max(...values, 1);
+    const minValue = 0;
+    const step = values.length > 1 ? plotWidth / (values.length - 1) : 0;
+    const points = values.map((value, index) => {
+      const x = left + step * index;
+      const scaled = maxValue === minValue ? 0.5 : (value - minValue) / (maxValue - minValue);
+      const y = top + plotHeight - scaled * plotHeight;
+      return { x, y, label: labels[index] };
+    });
+    const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' ');
+    const pointMarkup = points.map(point => `
+      <circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="4.5" fill="${color}" class="cliproxy-cache-stats__point"></circle>
+      <text x="${point.x.toFixed(2)}" y="${height - 18}" text-anchor="middle" class="cliproxy-cache-stats__axis-label">${esc(point.label)}</text>`).join('');
+    const ticks = [0, 0.5, 1].map(factor => {
+      const y = top + plotHeight - plotHeight * factor;
+      const value = maxValue * factor;
+      return `
+        <line x1="${left}" y1="${y.toFixed(2)}" x2="${width - right}" y2="${y.toFixed(2)}" class="cliproxy-cache-stats__grid-line"></line>
+        <text x="${left - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end" class="cliproxy-cache-stats__axis-label">${esc(fmtPctValue(value))}</text>`;
+    }).join('');
+    return `<div class="cliproxy-cache-stats__chart"><h3>${esc(title)}</h3><div class="cliproxy-cache-stats__chart-subtitle">${esc(subtitle)}</div><svg viewBox="0 0 ${width} ${height}" class="cliproxy-cache-stats__chart-svg" role="img" aria-label="${esc(title)} chart">${ticks}<path d="${path}" stroke="${color}" class="cliproxy-cache-stats__line"></path>${pointMarkup}</svg></div>`;
+  }
+
+  function renderCharts(data) {
+    const byDay = (data.by_day || []).slice(-14);
+    const labels = byDay.map(item => String(item.day || '').slice(5));
+    const cachedTokenValues = byDay.map(item => Number(item.cached_tokens || 0));
+    const cacheRatioValues = byDay.map(item => Number(item.cache_ratio || 0) * 100);
+    chartGridEl.innerHTML = [
+      renderBarChart('Daily Cached Tokens', 'How many input tokens were served from cache each day.', labels, cachedTokenValues, '#60a5fa'),
+      renderLineChart('Daily Cache Ratio', 'Cached input tokens divided by total input tokens for each day.', labels, cacheRatioValues, '#34d399')
+    ].join('');
+  }
+
+  async function load(options = {}) {
+    const { background = false } = options;
+    const key = keyInput.value.trim();
+    if (!key) {
+      if (!background) {
+        setStatus('');
+        setError('Enter a management key first.');
+      }
+      return;
+    }
+    if (loadInFlight) {
+      return;
+    }
+    loadInFlight = true;
+    if (!background) {
+      setError('');
+      setStatus('Loading cache statistics...');
+    }
+    try {
+      const url = new URL('/v0/management/cache-statistics', window.location.origin);
+      url.searchParams.set('days', daysInput.value || '14');
+      url.searchParams.set('limit', limitInput.value || '50');
+      url.searchParams.set('model_limit', modelLimitInput.value || '10');
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+      if (!resp.ok) {
+        setStatus('');
+        setError(`Request failed: ${resp.status} ${resp.statusText}\n${await resp.text()}`);
+        return;
+      }
+      const payload = await resp.json();
+      render(payload.cache_statistics || { enabled: false, summary: {}, by_model: [], by_day: [], recent_requests: [] });
+      setError('');
+      setStatus(`Loaded at ${new Date().toLocaleString()} · auto-refreshing every 3s while open`);
+    } finally {
+      loadInFlight = false;
+    }
+  }
+
+  function render(data) {
+    const summary = data.summary || {};
+    cardsEl.innerHTML = [
+      ['Persistence', data.enabled ? 'enabled' : 'disabled'],
+      ['Requests', fmtInt(summary.total_requests)],
+      ['Failed', fmtInt(summary.failed_requests)],
+      ['Input Tokens', fmtInt(summary.input_tokens)],
+      ['Output Tokens', fmtInt(summary.output_tokens)],
+      ['Cached Tokens', fmtInt(summary.cached_tokens)],
+      ['Cache Ratio', fmtPct(summary.cache_ratio)],
+      ['Avg Latency', fmtMs(summary.avg_latency_ms)]
+    ].map(([label, value]) => `<div class="cliproxy-cache-stats__card"><div class="cliproxy-cache-stats__label">${esc(label)}</div><div class="cliproxy-cache-stats__value">${esc(value)}</div></div>`).join('');
+
+    renderCharts(data);
+
+    modelsBody.innerHTML = (data.by_model || []).map(item => `
+      <tr>
+        <td>${esc(item.model)}</td>
+        <td>${fmtInt(item.requests)}</td>
+        <td>${fmtInt(item.failed_requests)}</td>
+        <td>${fmtInt(item.input_tokens)}</td>
+        <td>${fmtInt(item.cached_tokens)}</td>
+        <td>${fmtPct(item.cache_ratio)}</td>
+        <td>${fmtMs(item.avg_latency_ms)}</td>
+      </tr>`).join('') || '<tr><td colspan="7" class="cliproxy-cache-stats__muted">No data</td></tr>';
+
+    daysBody.innerHTML = (data.by_day || []).map(item => `
+      <tr>
+        <td>${esc(item.day)}</td>
+        <td>${fmtInt(item.requests)}</td>
+        <td>${fmtInt(item.input_tokens)}</td>
+        <td>${fmtInt(item.cached_tokens)}</td>
+        <td>${fmtPct(item.cache_ratio)}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="cliproxy-cache-stats__muted">No data</td></tr>';
+
+    recentBody.innerHTML = (data.recent_requests || []).map(item => `
+      <tr>
+        <td>${esc(item.timestamp ? new Date(item.timestamp).toLocaleString() : '')}</td>
+        <td>${esc(item.provider)}</td>
+        <td>${esc(item.model)}</td>
+        <td>${fmtMs(item.latency_ms)}</td>
+        <td>${fmtInt(item.input_tokens)}</td>
+        <td>${fmtInt(item.output_tokens)}</td>
+        <td>${fmtInt(item.cached_tokens)}</td>
+        <td>${fmtPct(item.cache_ratio)}</td>
+      </tr>`).join('') || '<tr><td colspan="8" class="cliproxy-cache-stats__muted">No data</td></tr>';
+  }
+
+  updatePresetButtons();
+
+  for (const button of presetButtons) {
+    button.addEventListener('click', () => {
+      const days = daysForPreset(button.dataset.preset);
+      if (days == null) {
+        return;
+      }
+      activePreset = button.dataset.preset || '';
+      daysInput.value = String(days);
+      updatePresetButtons();
+      if (!backdrop.hidden) {
+        load().catch(err => { setStatus(''); setError(err.stack || String(err)); });
+      }
+    });
+  }
+
+  daysInput.addEventListener('input', () => {
+    const activeDays = activePreset ? String(daysForPreset(activePreset)) : '';
+    if (activeDays !== String(daysInput.value || '')) {
+      activePreset = '';
+      updatePresetButtons();
+    }
+  });
+
+  for (const control of [daysInput, limitInput, modelLimitInput]) {
+    control.addEventListener('change', () => {
+      if (!backdrop.hidden) {
+        load().catch(err => { setStatus(''); setError(err.stack || String(err)); });
+      }
+    });
+  }
+
+  openBtn.addEventListener('click', () => openPanel(true));
+  openInlineBtn.addEventListener('click', () => openPanel(true));
+  closeBtn.addEventListener('click', closePanel);
+  refreshBtn.addEventListener('click', () => load().catch(err => { setStatus(''); setError(err.stack || String(err)); }));
+  backdrop.addEventListener('click', event => {
+    if (event.target === backdrop) closePanel();
+  });
+  window.addEventListener('hashchange', syncHash);
+  window.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !backdrop.hidden) closePanel();
+  });
+
+  const placementObserver = new MutationObserver(() => {
+    placeInlineLauncher();
+  });
+  placementObserver.observe(document.body, { childList: true, subtree: true });
+  placeInlineLauncher();
+
+  if (window.location.hash === cacheStatsHash) {
+    openPanel(true);
+  }
+})();
+</script>

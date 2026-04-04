@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -45,6 +48,37 @@ func newTestServer(t *testing.T) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func newManagementTestServer(t *testing.T) *Server {
+	t.Helper()
+	t.Setenv("MANAGEMENT_PASSWORD", "test-secret")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	managementPath := filepath.Join(tmpDir, "management.html")
+	if err := os.WriteFile(managementPath, []byte("<!doctype html><html><body><div id=\"root\"></div></body></html>"), 0o644); err != nil {
+		t.Fatalf("failed to write management fixture: %v", err)
+	}
+	t.Setenv("MANAGEMENT_STATIC_PATH", managementPath)
+	cfg := &proxyconfig.Config{
+		SDKConfig:              sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: true,
+	}
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	server := NewServer(cfg, authManager, accessManager, configPath)
+	t.Cleanup(func() { _ = usage.ClosePersistentStore() })
+	return server
 }
 
 func TestHealthz(t *testing.T) {
@@ -132,6 +166,159 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) {
+	server := newManagementTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusOK)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "cliproxy-cache-stats-overlay") {
+		t.Fatalf("management page missing cache stats injection: %s", body)
+	}
+	if !strings.Contains(body, "Prompt Cache Statistics") || !strings.Contains(body, "Open Cache Statistics") {
+		t.Fatalf("management page missing inline cache launcher: %s", body)
+	}
+	if !strings.Contains(body, "Usage Overview") {
+		t.Fatalf("management page missing targeted Usage Overview attachment hint: %s", body)
+	}
+	if !strings.Contains(body, "Daily Cached Tokens") || !strings.Contains(body, "Daily Cache Ratio") {
+		t.Fatalf("management page missing embedded cache charts: %s", body)
+	}
+	if !strings.Contains(body, "Today") || !strings.Contains(body, "Last 7 Days") || !strings.Contains(body, "This Month") {
+		t.Fatalf("management page missing time preset filters: %s", body)
+	}
+	if !strings.Contains(body, "auto-refreshing every 3s while open") {
+		t.Fatalf("management page missing near-real-time refresh status copy: %s", body)
+	}
+	if strings.Contains(body, "localStorage") {
+		t.Fatalf("management page should not persist the management key in browser storage: %s", body)
+	}
+}
+
+func TestCacheStatisticsPageRedirectsToManagement(t *testing.T) {
+	server := newManagementTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/cache-statistics.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusFound)
+	}
+	if location := rr.Header().Get("Location"); location != "/management.html#cache-statistics" {
+		t.Fatalf("redirect location = %q, want %q", location, "/management.html#cache-statistics")
+	}
+}
+
+func TestCacheStatisticsPageRequiresManagementRoutes(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/cache-statistics.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestManagementCacheStatisticsEndpoint(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []usage.CacheStatisticsEvent{
+		{
+			Timestamp: now.AddDate(0, 0, -30),
+			Provider:  "codex",
+			Model:     "old-model",
+			Source:    "old@example.com",
+			AuthID:    "auth-old",
+			AuthIndex: "9",
+			LatencyMs: 3000,
+			Tokens:    usage.TokenStats{InputTokens: 2000, OutputTokens: 200, CachedTokens: 1500, TotalTokens: 2200},
+			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "old-cache", ResponseID: "resp-old"},
+		},
+		{
+			Timestamp: now.Add(-2 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			Source:    "recent-a@example.com",
+			AuthID:    "auth-a",
+			AuthIndex: "1",
+			LatencyMs: 1200,
+			Tokens:    usage.TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 900, TotalTokens: 1100},
+			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "cache-a", ResponseID: "resp-a"},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4-mini",
+			Source:    "recent-b@example.com",
+			AuthID:    "auth-b",
+			AuthIndex: "2",
+			LatencyMs: 800,
+			Tokens:    usage.TokenStats{InputTokens: 500, OutputTokens: 60, CachedTokens: 250, TotalTokens: 560},
+			Cache:     &helps.CodexCacheObservability{PromptCacheKey: "cache-b", ResponseID: "resp-b"},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/cache-statistics?days=7&limit=1&model_limit=1", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var payload struct {
+		CacheStatistics usage.CacheStatisticsSnapshot `json:"cache_statistics"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.CacheStatistics.DBPath != "" {
+		t.Fatalf("db_path = %q, want redacted", payload.CacheStatistics.DBPath)
+	}
+	if payload.CacheStatistics.Summary.TotalRequests != 2 {
+		t.Fatalf("total_requests = %d, want 2", payload.CacheStatistics.Summary.TotalRequests)
+	}
+	if payload.CacheStatistics.Summary.CachedTokens != 1150 {
+		t.Fatalf("cached_tokens = %d, want 1150", payload.CacheStatistics.Summary.CachedTokens)
+	}
+	if len(payload.CacheStatistics.ByModel) != 1 {
+		t.Fatalf("by_model len = %d, want 1", len(payload.CacheStatistics.ByModel))
+	}
+	if payload.CacheStatistics.ByModel[0].Model != "gpt-5.4" {
+		t.Fatalf("first model = %q, want gpt-5.4", payload.CacheStatistics.ByModel[0].Model)
+	}
+	if len(payload.CacheStatistics.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(payload.CacheStatistics.RecentRequests))
+	}
+	recent := payload.CacheStatistics.RecentRequests[0]
+	if recent.Model != "gpt-5.4-mini" {
+		t.Fatalf("recent model = %q, want gpt-5.4-mini", recent.Model)
+	}
+	if recent.Source != "" || recent.AuthID != "" || recent.AuthIndex != "" {
+		t.Fatalf("sensitive auth fields should be redacted: %+v", recent)
+	}
+	if recent.PromptCacheKey != "" || recent.PreviousResponseID != "" || recent.ResponseID != "" || recent.PromptCacheRetention != "" {
+		t.Fatalf("cache identifiers should be redacted: %+v", recent)
 	}
 }
 

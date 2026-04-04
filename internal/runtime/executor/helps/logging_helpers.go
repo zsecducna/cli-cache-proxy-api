@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,16 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
+	cacheSummaryWritten  bool
 	errorWritten         bool
+}
+
+type CodexCacheObservability struct {
+	PromptCacheKey       string `json:"prompt_cache_key,omitempty"`
+	PreviousResponseID   string `json:"previous_response_id,omitempty"`
+	ResponseID           string `json:"response_id,omitempty"`
+	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
+	CachedTokens         int64  `json:"cached_tokens,omitempty"`
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -86,6 +96,12 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 		builder.WriteString(string(info.Body))
 	} else {
 		builder.WriteString("<empty>")
+	}
+	if obs, ok := getCodexCacheObservabilityFromGin(ginCtx); ok {
+		if summary := FormatCodexCacheRequestSummary(obs); summary != "" {
+			builder.WriteString("\n\nCodex Cache:\n")
+			builder.WriteString(summary)
+		}
 	}
 	builder.WriteString("\n\n")
 
@@ -172,6 +188,16 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.headersWritten = true
 		attempt.response.WriteString("\n")
 	}
+	if !attempt.cacheSummaryWritten {
+		if obs, ok := getCodexCacheObservabilityFromGin(ginCtx); ok {
+			if summary := FormatCodexCacheResponseSummary(obs); summary != "" {
+				attempt.response.WriteString("Codex Cache:\n")
+				attempt.response.WriteString(summary)
+				attempt.response.WriteString("\n\n")
+				attempt.cacheSummaryWritten = true
+			}
+		}
+	}
 	if !attempt.bodyStarted {
 		attempt.response.WriteString("Body:\n")
 		attempt.bodyStarted = true
@@ -218,6 +244,12 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 		builder.Write(info.Body)
 	} else {
 		builder.WriteString("<empty>")
+	}
+	if obs, ok := getCodexCacheObservabilityFromGin(ginCtx); ok {
+		if summary := FormatCodexCacheRequestSummary(obs); summary != "" {
+			builder.WriteString("\n\nCodex Cache:\n")
+			builder.WriteString(summary)
+		}
 	}
 	builder.WriteString("\n")
 
@@ -299,6 +331,13 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.response\n")
+	if obs, ok := getCodexCacheObservabilityFromGin(ginCtx); ok {
+		if summary := FormatCodexCacheResponseSummary(obs); summary != "" {
+			builder.WriteString("Codex Cache:\n")
+			builder.WriteString(summary)
+			builder.WriteString("\n")
+		}
+	}
 	builder.Write(data)
 	builder.WriteString("\n")
 
@@ -402,6 +441,102 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		}
 	}
 	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+}
+
+func SetCodexCacheRequestObservability(ctx context.Context, payload []byte, promptCacheKey string) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	obs, _ := getCodexCacheObservabilityFromGin(ginCtx)
+	if promptCacheKey = strings.TrimSpace(promptCacheKey); promptCacheKey != "" {
+		obs.PromptCacheKey = promptCacheKey
+	}
+	if previousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()); previousResponseID != "" {
+		obs.PreviousResponseID = previousResponseID
+	}
+	if retention := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_retention").String()); retention != "" {
+		obs.PromptCacheRetention = retention
+	}
+	ginCtx.Set("CODEX_CACHE_OBSERVABILITY", obs)
+}
+
+func SetCodexCacheResponseObservability(ctx context.Context, payload []byte, promptCacheKey string) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	obs, _ := getCodexCacheObservabilityFromGin(ginCtx)
+	if promptCacheKey = strings.TrimSpace(promptCacheKey); promptCacheKey != "" {
+		obs.PromptCacheKey = promptCacheKey
+	}
+	if responseID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String()); responseID != "" {
+		obs.ResponseID = responseID
+	} else if responseID := strings.TrimSpace(gjson.GetBytes(payload, "id").String()); responseID != "" {
+		obs.ResponseID = responseID
+	}
+	cached := gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens")
+	if !cached.Exists() {
+		cached = gjson.GetBytes(payload, "usage.input_tokens_details.cached_tokens")
+	}
+	if cached.Exists() {
+		obs.CachedTokens = cached.Int()
+	}
+	ginCtx.Set("CODEX_CACHE_OBSERVABILITY", obs)
+}
+
+func GetCodexCacheObservability(ctx context.Context) (CodexCacheObservability, bool) {
+	return getCodexCacheObservabilityFromGin(ginContextFrom(ctx))
+}
+
+func FormatCodexCacheRequestSummary(obs CodexCacheObservability) string {
+	lines := make([]string, 0, 3)
+	if obs.PromptCacheKey != "" {
+		lines = append(lines, "prompt_cache_key: "+obs.PromptCacheKey)
+	}
+	if obs.PreviousResponseID != "" {
+		lines = append(lines, "previous_response_id: "+obs.PreviousResponseID)
+	}
+	if obs.PromptCacheRetention != "" {
+		lines = append(lines, "prompt_cache_retention: "+obs.PromptCacheRetention)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func FormatCodexCacheResponseSummary(obs CodexCacheObservability) string {
+	if obs.ResponseID == "" && obs.CachedTokens == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 5)
+	if obs.PromptCacheKey != "" {
+		lines = append(lines, "prompt_cache_key: "+obs.PromptCacheKey)
+	}
+	if obs.PreviousResponseID != "" {
+		lines = append(lines, "previous_response_id: "+obs.PreviousResponseID)
+	}
+	if obs.ResponseID != "" {
+		lines = append(lines, "response_id: "+obs.ResponseID)
+	}
+	if obs.PromptCacheRetention != "" {
+		lines = append(lines, "prompt_cache_retention: "+obs.PromptCacheRetention)
+	}
+	lines = append(lines, "cached_tokens: "+strconv.FormatInt(obs.CachedTokens, 10))
+	return strings.Join(lines, "\n")
+}
+
+func getCodexCacheObservabilityFromGin(ginCtx *gin.Context) (CodexCacheObservability, bool) {
+	if ginCtx == nil {
+		return CodexCacheObservability{}, false
+	}
+	value, exists := ginCtx.Get("CODEX_CACHE_OBSERVABILITY")
+	if !exists {
+		return CodexCacheObservability{}, false
+	}
+	obs, ok := value.(CodexCacheObservability)
+	if !ok {
+		return CodexCacheObservability{}, false
+	}
+	return obs, true
 }
 
 func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {

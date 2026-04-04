@@ -2,9 +2,13 @@ package usage
 
 import (
 	"context"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -29,6 +33,109 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 	if details[0].LatencyMs != 1500 {
 		t.Fatalf("latency_ms = %d, want 1500", details[0].LatencyMs)
+	}
+}
+
+func TestRequestStatisticsRecordIncludesCodexCacheMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	helps.SetCodexCacheRequestObservability(ctx, []byte(`{"previous_response_id":"resp-prev","prompt_cache_retention":"24h"}`), "session-cache")
+	helps.SetCodexCacheResponseObservability(ctx, []byte(`{"response":{"id":"resp-1","usage":{"input_tokens_details":{"cached_tokens":12}}}}`), "session-cache")
+
+	stats := NewRequestStatistics()
+	stats.Record(ctx, coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 20,
+			CachedTokens: 12,
+			TotalTokens:  30,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].Cache == nil {
+		t.Fatal("cache metadata missing")
+	}
+	if details[0].Cache.PromptCacheKey != "session-cache" {
+		t.Fatalf("prompt_cache_key = %q, want %q", details[0].Cache.PromptCacheKey, "session-cache")
+	}
+	if details[0].Cache.PreviousResponseID != "resp-prev" {
+		t.Fatalf("previous_response_id = %q, want %q", details[0].Cache.PreviousResponseID, "resp-prev")
+	}
+	if details[0].Cache.ResponseID != "resp-1" {
+		t.Fatalf("response_id = %q, want %q", details[0].Cache.ResponseID, "resp-1")
+	}
+	if details[0].Cache.PromptCacheRetention != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", details[0].Cache.PromptCacheRetention, "24h")
+	}
+	if details[0].Cache.CachedTokens != 12 {
+		t.Fatalf("cache.cached_tokens = %d, want 12", details[0].Cache.CachedTokens)
+	}
+}
+
+func TestLoggerPluginPersistsWithDetachedContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store, err := OpenCacheStatisticsStore(filepath.Join(t.TempDir(), "cache-statistics.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+
+	cacheStatisticsStoreMu.Lock()
+	previousStore := cacheStatisticsStore
+	cacheStatisticsStore = store
+	cacheStatisticsStoreMu.Unlock()
+	t.Cleanup(func() {
+		cacheStatisticsStoreMu.Lock()
+		cacheStatisticsStore = previousStore
+		cacheStatisticsStoreMu.Unlock()
+		_ = store.Close()
+	})
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	baseCtx := context.WithValue(context.Background(), "gin", ginCtx)
+	helps.SetCodexCacheRequestObservability(baseCtx, []byte(`{"previous_response_id":"resp-prev","prompt_cache_retention":"24h"}`), "session-cache")
+	helps.SetCodexCacheResponseObservability(baseCtx, []byte(`{"response":{"id":"resp-1","usage":{"input_tokens_details":{"cached_tokens":12}}}}`), "session-cache")
+	ctx, cancel := context.WithCancel(baseCtx)
+	cancel()
+
+	plugin := NewLoggerPlugin()
+	plugin.HandleUsage(ctx, coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Now().UTC(),
+		Source:      "user@example.com",
+		AuthID:      "auth-1",
+		AuthIndex:   "0",
+		Detail: coreusage.Detail{
+			InputTokens:  100,
+			OutputTokens: 20,
+			CachedTokens: 12,
+			TotalTokens:  120,
+		},
+	})
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 1)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.Summary.TotalRequests != 1 {
+		t.Fatalf("total_requests = %d, want 1", snapshot.Summary.TotalRequests)
+	}
+	if len(snapshot.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(snapshot.RecentRequests))
+	}
+	if snapshot.RecentRequests[0].ResponseID != "resp-1" {
+		t.Fatalf("response_id = %q, want resp-1", snapshot.RecentRequests[0].ResponseID)
 	}
 }
 

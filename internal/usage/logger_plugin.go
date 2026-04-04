@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -48,6 +50,16 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	p.stats.Record(ctx, record)
+	store := GetCacheStatisticsStore()
+	if store == nil {
+		return
+	}
+	event := buildCacheStatisticsEvent(ctx, record)
+	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.InsertEvent(persistCtx, event); err != nil {
+		log.WithError(err).Warn("failed to persist cache statistics event")
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -89,12 +101,13 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp time.Time                      `json:"timestamp"`
+	LatencyMs int64                          `json:"latency_ms"`
+	Source    string                         `json:"source"`
+	AuthIndex string                         `json:"auth_index"`
+	Tokens    TokenStats                     `json:"tokens"`
+	Cache     *helps.CodexCacheObservability `json:"cache,omitempty"`
+	Failed    bool                           `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -159,36 +172,19 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if !statisticsEnabled.Load() {
 		return
 	}
-	timestamp := record.RequestedAt
-	if timestamp.IsZero() {
-		timestamp = time.Now()
-	}
-	detail := normaliseDetail(record.Detail)
-	totalTokens := detail.TotalTokens
-	statsKey := record.APIKey
-	if statsKey == "" {
-		statsKey = resolveAPIIdentifier(ctx, record)
-	}
-	failed := record.Failed
-	if !failed {
-		failed = !resolveSuccess(ctx)
-	}
-	success := !failed
-	modelName := record.Model
-	if modelName == "" {
-		modelName = "unknown"
-	}
-	dayKey := timestamp.Format("2006-01-02")
-	hourKey := timestamp.Hour()
+	statsKey, modelName, detail := prepareRequestDetail(ctx, record)
+	totalTokens := detail.Tokens.TotalTokens
+	dayKey := detail.Timestamp.Format("2006-01-02")
+	hourKey := detail.Timestamp.Hour()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.totalRequests++
-	if success {
-		s.successCount++
-	} else {
+	if detail.Failed {
 		s.failureCount++
+	} else {
+		s.successCount++
 	}
 	s.totalTokens += totalTokens
 
@@ -197,14 +193,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
-	})
+	s.updateAPIStats(stats, modelName, detail)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -383,8 +372,15 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
+	cachePromptKey, cachePreviousResponseID, cacheResponseID, cacheRetention := "", "", "", ""
+	if detail.Cache != nil {
+		cachePromptKey = detail.Cache.PromptCacheKey
+		cachePreviousResponseID = detail.Cache.PreviousResponseID
+		cacheResponseID = detail.Cache.ResponseID
+		cacheRetention = detail.Cache.PromptCacheRetention
+	}
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%s|%s|%s|%s",
 		apiName,
 		modelName,
 		timestamp,
@@ -396,7 +392,59 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		tokens.ReasoningTokens,
 		tokens.CachedTokens,
 		tokens.TotalTokens,
+		cachePromptKey,
+		cachePreviousResponseID,
+		cacheResponseID,
+		cacheRetention,
 	)
+}
+
+func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string, string, RequestDetail) {
+	timestamp := record.RequestedAt
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	detail := RequestDetail{
+		Timestamp: timestamp,
+		LatencyMs: normaliseLatency(record.Latency),
+		Source:    record.Source,
+		AuthIndex: record.AuthIndex,
+		Tokens:    normaliseDetail(record.Detail),
+		Cache:     resolveCodexCacheMetadata(ctx),
+	}
+	statsKey := record.APIKey
+	if statsKey == "" {
+		statsKey = resolveAPIIdentifier(ctx, record)
+	}
+	detail.Failed = record.Failed
+	if !detail.Failed {
+		detail.Failed = !resolveSuccess(ctx)
+	}
+	modelName := strings.TrimSpace(record.Model)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	return statsKey, modelName, detail
+}
+
+func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) CacheStatisticsEvent {
+	_, modelName, detail := prepareRequestDetail(ctx, record)
+	provider := strings.TrimSpace(record.Provider)
+	if provider == "" {
+		provider = "unknown"
+	}
+	return CacheStatisticsEvent{
+		Timestamp: detail.Timestamp,
+		Provider:  provider,
+		Model:     modelName,
+		Source:    detail.Source,
+		AuthID:    record.AuthID,
+		AuthIndex: detail.AuthIndex,
+		LatencyMs: detail.LatencyMs,
+		Failed:    detail.Failed,
+		Tokens:    detail.Tokens,
+		Cache:     detail.Cache,
+	}
 }
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
@@ -473,6 +521,14 @@ func normaliseLatency(latency time.Duration) int64 {
 		return 0
 	}
 	return latency.Milliseconds()
+}
+
+func resolveCodexCacheMetadata(ctx context.Context) *helps.CodexCacheObservability {
+	obs, ok := helps.GetCodexCacheObservability(ctx)
+	if !ok {
+		return nil
+	}
+	return &obs
 }
 
 func formatHour(hour int) string {
