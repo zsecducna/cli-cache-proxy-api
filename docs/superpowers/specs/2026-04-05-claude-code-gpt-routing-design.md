@@ -133,8 +133,6 @@ V1 explicit exclusions:
 
 - non-stream Claude requests
 - explicit Claude thinking or adaptive reasoning controls
-- more than one `tool_use` block in a single assistant turn
-- more than one `tool_result` block in the corresponding user turn
 
 Syntax-pass rejection candidates:
 
@@ -145,7 +143,8 @@ Syntax-pass rejection candidates:
 - assistant messages that mix text content blocks and `tool_use` blocks in the same message
 - turns with empty content arrays
 - multiple `tool_result` blocks referencing the same `tool_use_id`
-- orphaned `tool_result` blocks that do not reference the immediately preceding assistant `tool_use`
+- `tool_result` blocks that do not reference a `tool_use` from the immediately preceding assistant turn
+- assistant tool-use turns whose `tool_use` ids are not unique within the turn
 - request structures that require semantic approximation
 - Claude beta features with no defined GPT path
 
@@ -155,6 +154,12 @@ Backend-pass requirements:
 - backend must support either Responses or the narrower Chat-Completions-safe subset
 - backend must support tools when tool definitions or tool-use/tool-result blocks are present
 - tool-result JSON objects must be serialized canonically with stable key ordering before translation for deterministic downstream output and stable test assertions only
+- tool turns must satisfy the v1 transcript invariant:
+  - one assistant turn may contain one or more `tool_use` blocks and no text content blocks
+  - the immediately following user turn may contain one or more `tool_result` blocks and no text content blocks
+  - every `tool_result.tool_use_id` must map to exactly one `tool_use.id` from the immediately preceding assistant turn
+  - result order must match the order of the referenced `tool_use` blocks
+  - every `tool_use` in the assistant turn must have exactly one matching `tool_result` in the following user turn
 
 Chat-Completions-safe subset:
 
@@ -266,7 +271,7 @@ Interface:
 - output: Claude-compatible stream
 - success criteria:
   - event ordering remains valid for Claude Code consumption
-  - tool call and tool result adjacency is preserved
+  - tool call order, tool result order, and tool/result pairing are preserved
   - no response-shape downgrade is hidden from the client
   - successful Claude-compatible terminal output must include a stable final message shape for the supported subset
   - `stop_reason` must be synthesized from upstream terminal metadata via a fixed mapping table
@@ -376,7 +381,7 @@ Fallback behavior by stage:
 ### Translator Tests
 
 - Claude request -> OpenAI-family request for supported subset
-- tool-call and tool-result sequencing
+- single-tool and multi-tool sequencing with deterministic pairing
 - rejection coverage for non-representable structures
 
 ### Executor / Integration Tests
@@ -392,12 +397,8 @@ Fallback behavior by stage:
 Concrete end-to-end fixtures required:
 
 - plain text streaming turn over Responses-capable backend
-- tool call plus tool result turn over Responses-capable backend
+- multi-tool assistant turn with matching multi-tool result turn over Responses-capable backend
 - pre-upstream rejection turn that returns Anthropic-compatible error output
-- Chat-Completions-safe request that is accepted by the fallback path
-- request rejected because it exceeds the Chat-Completions-safe subset on a Chat-Completions-only backend
-- multi-candidate route where the first backend returns explicit model unsupported and the second backend succeeds
-- post-stream-start upstream failure after one emitted success event, proving no retry occurs
 - Chat-Completions-safe request that is accepted by the fallback path
 - request rejected because it exceeds the Chat-Completions-safe subset on a Chat-Completions-only backend
 - multi-candidate route where the first backend returns explicit model unsupported and the second backend succeeds
@@ -449,14 +450,13 @@ This should make real Claude Code failures actionable without reading raw upstre
 - V1 considers the existing response translation path acceptable only for the approved subset and must be covered by contract tests. If a backend surface fails those tests, that surface is not eligible for Claude-via-GPT routing.
 - V1 requires streaming-capable backend surfaces. No silent downgrade from streaming to non-streaming is allowed.
 - V1 rejects all explicit Claude thinking or adaptive reasoning controls for Claude-via-GPT routing.
-- V1 supports at most one assistant `tool_use` block followed by at most one matching user `tool_result` block in the immediately following turn.
+- V1 supports multi-tool turns only under the exact transcript invariant defined in the backend-pass validator.
 
 ## Deferred Work
 
 - dedicated Claude -> OpenAI Responses translator for richer GPT-5 semantics
 - richer learned backend capability persistence beyond static metadata
 - expansion beyond text-only Claude content once translator fidelity is proven with tests
-- multi-tool turns
 - explicit Claude reasoning/thinking control support
 - non-stream Claude-via-GPT execution
 
