@@ -608,6 +608,7 @@
               <th>Timestamp</th>
               <th>Model Name</th>
               <th>Reasoning Effort</th>
+              <th>Cache Policy</th>
               <th>Input Tokens</th>
               <th>Output Tokens</th>
               <th>Reasoning Tokens</th>
@@ -618,6 +619,14 @@
           </thead>
           <tbody>
             ${requests.length ? requests.map((item) => {
+              const policy = item.anthropic_rewrite_applied
+                ? [
+                    item.anthropic_cache_ttl || 'n/a',
+                    item.anthropic_breakpoints || 'none',
+                    item.anthropic_overwrote_client_layout ? 'overwrite' : 'preserve',
+                    item.anthropic_matched_agentic_loop ? 'agentic' : 'general',
+                  ].join(' · ')
+                : 'n/a';
               const anthropicCacheRead = Number(item.anthropic_cache_read_input_tokens || 0);
               const anthropicCacheWrite = Number(item.anthropic_cache_creation_input_tokens || 0);
               const isAnthropicRow = item.anthropic_rewrite_applied || anthropicCacheRead > 0 || anthropicCacheWrite > 0;
@@ -631,6 +640,7 @@
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
                 <td>${escapeHTML(item.model || '')}</td>
                 <td>${escapeHTML(item.reasoning_effort || 'n/a')}</td>
+                <td>${escapeHTML(policy)}</td>
                 <td>${escapeHTML(formatInteger(item.input_tokens))}</td>
                 <td>${escapeHTML(formatInteger(item.output_tokens))}</td>
                 <td>${escapeHTML(formatInteger(item.reasoning_tokens))}</td>
@@ -638,9 +648,9 @@
                 <td>${escapeHTML(formatInteger(cacheWrite))}</td>
                 <td>${escapeHTML(formatInteger(totalInput))}</td>
               </tr>
-            `}).join('') : `
+            `; }).join('') : `
               <tr>
-                <td colspan="9" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+                <td colspan="10" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
               </tr>
             `}
           </tbody>

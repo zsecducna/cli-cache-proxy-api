@@ -143,6 +143,60 @@ func TestLoggerPluginPersistsWithDetachedContext(t *testing.T) {
 	}
 }
 
+func TestLoggerPluginPersistsAnthropicCacheObservability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store, err := OpenCacheStatisticsStore(filepath.Join(t.TempDir(), "cache-statistics.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+
+	cacheStatisticsStoreMu.Lock()
+	previousStore := cacheStatisticsStore
+	cacheStatisticsStore = store
+	cacheStatisticsStoreMu.Unlock()
+	t.Cleanup(func() {
+		cacheStatisticsStoreMu.Lock()
+		cacheStatisticsStore = previousStore
+		cacheStatisticsStoreMu.Unlock()
+		_ = store.Close()
+	})
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	helps.SetAnthropicCacheObservability(ctx, []byte(`{"usage":{"cache_creation_input_tokens":31,"cache_read_input_tokens":22000}}`))
+
+	plugin := NewLoggerPlugin()
+	plugin.HandleUsage(ctx, coreusage.Record{
+		Provider:    "claude",
+		Model:       "claude-3-5-sonnet",
+		RequestedAt: time.Now().UTC(),
+		Source:      "user@example.com",
+		AuthID:      "auth-1",
+		AuthIndex:   "0",
+		Detail: coreusage.Detail{
+			InputTokens:  100,
+			OutputTokens: 20,
+			CachedTokens: 22000,
+			TotalTokens:  120,
+		},
+	})
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 1)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshot.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(snapshot.RecentRequests))
+	}
+	if snapshot.RecentRequests[0].AnthropicCacheCreationInputTokens != 31 {
+		t.Fatalf("anthropic_cache_creation_input_tokens = %d, want 31", snapshot.RecentRequests[0].AnthropicCacheCreationInputTokens)
+	}
+	if snapshot.RecentRequests[0].AnthropicCacheReadInputTokens != 22000 {
+		t.Fatalf("anthropic_cache_read_input_tokens = %d, want 22000", snapshot.RecentRequests[0].AnthropicCacheReadInputTokens)
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	stats := NewRequestStatistics()
 	timestamp := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)

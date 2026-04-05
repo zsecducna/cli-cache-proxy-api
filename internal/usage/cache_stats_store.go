@@ -34,6 +34,7 @@ type CacheStatisticsEvent struct {
 	Failed          bool
 	Tokens          TokenStats
 	Cache           *helps.CodexCacheObservability
+	AnthropicCache  helps.AnthropicCacheObservability
 }
 
 type CacheStatisticsSummary struct {
@@ -72,26 +73,33 @@ type CacheStatisticsDaySummary struct {
 }
 
 type CacheStatisticsRequest struct {
-	ID                   int64     `json:"id"`
-	Timestamp            time.Time `json:"timestamp"`
-	Provider             string    `json:"provider"`
-	Model                string    `json:"model"`
-	ReasoningEffort      string    `json:"reasoning_effort,omitempty"`
-	Source               string    `json:"source"`
-	AuthID               string    `json:"auth_id"`
-	AuthIndex            string    `json:"auth_index"`
-	LatencyMs            int64     `json:"latency_ms"`
-	Failed               bool      `json:"failed"`
-	InputTokens          int64     `json:"input_tokens"`
-	OutputTokens         int64     `json:"output_tokens"`
-	ReasoningTokens      int64     `json:"reasoning_tokens"`
-	CachedTokens         int64     `json:"cached_tokens"`
-	TotalTokens          int64     `json:"total_tokens"`
-	PromptCacheKey       string    `json:"prompt_cache_key,omitempty"`
-	PreviousResponseID   string    `json:"previous_response_id,omitempty"`
-	ResponseID           string    `json:"response_id,omitempty"`
-	PromptCacheRetention string    `json:"prompt_cache_retention,omitempty"`
-	CacheRatio           float64   `json:"cache_ratio"`
+	ID                                int64     `json:"id"`
+	Timestamp                         time.Time `json:"timestamp"`
+	Provider                          string    `json:"provider"`
+	Model                             string    `json:"model"`
+	ReasoningEffort                   string    `json:"reasoning_effort,omitempty"`
+	Source                            string    `json:"source"`
+	AuthID                            string    `json:"auth_id"`
+	AuthIndex                         string    `json:"auth_index"`
+	LatencyMs                         int64     `json:"latency_ms"`
+	Failed                            bool      `json:"failed"`
+	InputTokens                       int64     `json:"input_tokens"`
+	OutputTokens                      int64     `json:"output_tokens"`
+	ReasoningTokens                   int64     `json:"reasoning_tokens"`
+	CachedTokens                      int64     `json:"cached_tokens"`
+	TotalTokens                       int64     `json:"total_tokens"`
+	PromptCacheKey                    string    `json:"prompt_cache_key,omitempty"`
+	PreviousResponseID                string    `json:"previous_response_id,omitempty"`
+	ResponseID                        string    `json:"response_id,omitempty"`
+	PromptCacheRetention              string    `json:"prompt_cache_retention,omitempty"`
+	AnthropicRewriteApplied           bool      `json:"anthropic_rewrite_applied"`
+	AnthropicOverwroteClientLayout    bool      `json:"anthropic_overwrote_client_layout"`
+	AnthropicMatchedAgenticLoop       bool      `json:"anthropic_matched_agentic_loop"`
+	AnthropicCacheTTL                 string    `json:"anthropic_cache_ttl,omitempty"`
+	AnthropicBreakpoints              string    `json:"anthropic_breakpoints,omitempty"`
+	AnthropicCacheCreationInputTokens int64     `json:"anthropic_cache_creation_input_tokens"`
+	AnthropicCacheReadInputTokens     int64     `json:"anthropic_cache_read_input_tokens"`
+	CacheRatio                        float64   `json:"cache_ratio"`
 }
 
 type CacheStatisticsSnapshot struct {
@@ -256,7 +264,14 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     prompt_cache_key TEXT NOT NULL,
     previous_response_id TEXT NOT NULL,
     response_id TEXT NOT NULL,
-    prompt_cache_retention TEXT NOT NULL
+    prompt_cache_retention TEXT NOT NULL,
+    anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0,
+    anthropic_overwrote_client_layout INTEGER NOT NULL DEFAULT 0,
+    anthropic_matched_agentic_loop INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_ttl TEXT NOT NULL DEFAULT '',
+    anthropic_breakpoints TEXT NOT NULL DEFAULT '',
+    anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_requested_at ON cache_statistics_requests(requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_requests(model);
@@ -265,6 +280,27 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "reasoning_effort", "ALTER TABLE cache_statistics_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_rewrite_applied", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_overwrote_client_layout", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_overwrote_client_layout INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_matched_agentic_loop", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_matched_agentic_loop INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_cache_ttl", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_cache_ttl TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_breakpoints", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_breakpoints TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_cache_creation_input_tokens", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_cache_read_input_tokens", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := s.initPromptCacheIndex(); err != nil {
@@ -290,8 +326,10 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 INSERT INTO cache_statistics_requests (
     requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
+    anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
 		strings.TrimSpace(event.Model),
@@ -310,6 +348,13 @@ INSERT INTO cache_statistics_requests (
 		cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.PreviousResponseID }),
 		cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.ResponseID }),
 		cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.PromptCacheRetention }),
+		boolToInt(event.AnthropicCache.RewriteApplied),
+		boolToInt(event.AnthropicCache.OverwroteClientLayout),
+		boolToInt(event.AnthropicCache.MatchedAgenticCodingLoop),
+		strings.TrimSpace(event.AnthropicCache.TTL),
+		anthropicBreakpointSummary(event.AnthropicCache),
+		anthropicCacheCreationTokens(event.AnthropicCache),
+		anthropicCacheReadTokens(event.AnthropicCache),
 	)
 	if err != nil {
 		return fmt.Errorf("cache statistics store: insert event: %w", err)
@@ -412,7 +457,9 @@ SELECT
     prompt_cache_key,
     previous_response_id,
     response_id,
-    prompt_cache_retention
+    prompt_cache_retention,
+    anthropic_cache_creation_input_tokens,
+    anthropic_cache_read_input_tokens
 FROM cache_statistics_requests
 ORDER BY requested_at ASC, id ASC`)
 	if err != nil {
@@ -422,23 +469,25 @@ ORDER BY requested_at ASC, id ASC`)
 
 	for rows.Next() {
 		var (
-			requestedAt           string
-			provider              string
-			model                 string
-			source                string
-			authID                string
-			authIndex             string
-			latencyMs             int64
-			failedInt             int
-			inputTokens           int64
-			outputTokens          int64
-			reasoningTokens       int64
-			cachedTokens          int64
-			totalTokens           int64
-			promptCacheKey        string
-			previousResponseID    string
-			responseID            string
-			promptCacheRetention  string
+			requestedAt                  string
+			provider                     string
+			model                        string
+			source                       string
+			authID                       string
+			authIndex                    string
+			latencyMs                    int64
+			failedInt                    int
+			inputTokens                  int64
+			outputTokens                 int64
+			reasoningTokens              int64
+			cachedTokens                 int64
+			totalTokens                  int64
+			promptCacheKey               string
+			previousResponseID           string
+			responseID                   string
+			promptCacheRetention         string
+			anthropicCacheCreationTokens int64
+			anthropicCacheReadTokens     int64
 		)
 		if err := rows.Scan(
 			&requestedAt,
@@ -458,6 +507,8 @@ ORDER BY requested_at ASC, id ASC`)
 			&previousResponseID,
 			&responseID,
 			&promptCacheRetention,
+			&anthropicCacheCreationTokens,
+			&anthropicCacheReadTokens,
 		); err != nil {
 			return result, fmt.Errorf("cache statistics store: usage snapshot scan: %w", err)
 		}
@@ -501,6 +552,12 @@ ORDER BY requested_at ASC, id ASC`)
 				PreviousResponseID:   previousResponseID,
 				ResponseID:           responseID,
 				PromptCacheRetention: promptCacheRetention,
+			}
+		}
+		if anthropicCacheCreationTokens != 0 || anthropicCacheReadTokens != 0 {
+			detail.AnthropicCache = &helps.AnthropicCacheObservability{
+				CacheCreationInputTokens: anthropicCacheCreationTokens,
+				CacheReadInputTokens:     anthropicCacheReadTokens,
 			}
 		}
 
@@ -651,7 +708,9 @@ func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit in
 SELECT
     id, requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
+    anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
 FROM cache_statistics_requests
 WHERE requested_at >= ?
 ORDER BY requested_at DESC, id DESC
@@ -685,6 +744,13 @@ LIMIT ?`, since, limit)
 			&item.PreviousResponseID,
 			&item.ResponseID,
 			&item.PromptCacheRetention,
+			&item.AnthropicRewriteApplied,
+			&item.AnthropicOverwroteClientLayout,
+			&item.AnthropicMatchedAgenticLoop,
+			&item.AnthropicCacheTTL,
+			&item.AnthropicBreakpoints,
+			&item.AnthropicCacheCreationInputTokens,
+			&item.AnthropicCacheReadInputTokens,
 		); err != nil {
 			return nil, fmt.Errorf("cache statistics store: scan recent request: %w", err)
 		}
@@ -771,4 +837,26 @@ func cacheString(cache *helps.CodexCacheObservability, extract func(*helps.Codex
 		return ""
 	}
 	return strings.TrimSpace(extract(cache))
+}
+
+func anthropicBreakpointSummary(obs helps.AnthropicCacheObservability) string {
+	parts := make([]string, 0, 3)
+	if obs.ToolsBreakpoint {
+		parts = append(parts, "tools")
+	}
+	if obs.SystemBreakpoint {
+		parts = append(parts, "system")
+	}
+	if obs.MessagesBreakpoint {
+		parts = append(parts, "messages")
+	}
+	return strings.Join(parts, ",")
+}
+
+func anthropicCacheCreationTokens(obs helps.AnthropicCacheObservability) int64 {
+	return normaliseNonNegative(obs.CacheCreationInputTokens)
+}
+
+func anthropicCacheReadTokens(obs helps.AnthropicCacheObservability) int64 {
+	return normaliseNonNegative(obs.CacheReadInputTokens)
 }

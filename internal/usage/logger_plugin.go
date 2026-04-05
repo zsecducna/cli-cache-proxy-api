@@ -101,13 +101,14 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time                      `json:"timestamp"`
-	LatencyMs int64                          `json:"latency_ms"`
-	Source    string                         `json:"source"`
-	AuthIndex string                         `json:"auth_index"`
-	Tokens    TokenStats                     `json:"tokens"`
-	Cache     *helps.CodexCacheObservability `json:"cache,omitempty"`
-	Failed    bool                           `json:"failed"`
+	Timestamp      time.Time                           `json:"timestamp"`
+	LatencyMs      int64                               `json:"latency_ms"`
+	Source         string                              `json:"source"`
+	AuthIndex      string                              `json:"auth_index"`
+	Tokens         TokenStats                          `json:"tokens"`
+	Cache          *helps.CodexCacheObservability      `json:"cache,omitempty"`
+	AnthropicCache *helps.AnthropicCacheObservability  `json:"anthropic_cache,omitempty"`
+	Failed         bool                                `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -409,8 +410,9 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 		LatencyMs: normaliseLatency(record.Latency),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
-		Tokens:    normaliseDetail(record.Detail),
-		Cache:     resolveCodexCacheMetadata(ctx),
+		Tokens:         normaliseDetail(record.Detail),
+		Cache:          resolveCodexCacheMetadata(ctx),
+		AnthropicCache: resolveAnthropicCacheMetadata(ctx),
 	}
 	statsKey := record.APIKey
 	if statsKey == "" {
@@ -445,6 +447,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Failed:          detail.Failed,
 		Tokens:          detail.Tokens,
 		Cache:           detail.Cache,
+		AnthropicCache:  valueOrZeroAnthropic(detail.AnthropicCache),
 	}
 }
 
@@ -530,6 +533,21 @@ func resolveCodexCacheMetadata(ctx context.Context) *helps.CodexCacheObservabili
 		return nil
 	}
 	return &obs
+}
+
+func resolveAnthropicCacheMetadata(ctx context.Context) *helps.AnthropicCacheObservability {
+	obs, ok := helps.GetAnthropicCacheObservability(ctx)
+	if !ok {
+		return nil
+	}
+	return &obs
+}
+
+func valueOrZeroAnthropic(obs *helps.AnthropicCacheObservability) helps.AnthropicCacheObservability {
+	if obs == nil {
+		return helps.AnthropicCacheObservability{}
+	}
+	return *obs
 }
 
 func formatHour(hour int) string {

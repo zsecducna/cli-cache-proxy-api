@@ -29,20 +29,15 @@ const (
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
 type UpstreamRequestLog struct {
-	URL              string
-	Method           string
-	Headers          http.Header
-	Body             []byte
-	Provider         string
-	AuthID           string
-	AuthLabel        string
-	AuthType         string
-	AuthValue        string
-	RouteClass       string
-	SelectedProvider string
-	SelectedSurface  string
-	ValidationReason string
-	SkipReason       string
+	URL       string
+	Method    string
+	Headers   http.Header
+	Body      []byte
+	Provider  string
+	AuthID    string
+	AuthLabel string
+	AuthType  string
+	AuthValue string
 }
 
 type upstreamAttempt struct {
@@ -65,6 +60,18 @@ type CodexCacheObservability struct {
 	ResponseID           string `json:"response_id,omitempty"`
 	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
 	CachedTokens         int64  `json:"cached_tokens,omitempty"`
+}
+
+type AnthropicCacheObservability struct {
+	RewriteApplied           bool   `json:"rewrite_applied,omitempty"`
+	OverwroteClientLayout    bool   `json:"overwrote_client_layout,omitempty"`
+	MatchedAgenticCodingLoop bool   `json:"matched_agentic_coding_loop,omitempty"`
+	TTL                      string `json:"ttl,omitempty"`
+	ToolsBreakpoint          bool   `json:"tools_breakpoint,omitempty"`
+	SystemBreakpoint         bool   `json:"system_breakpoint,omitempty"`
+	MessagesBreakpoint       bool   `json:"messages_breakpoint,omitempty"`
+	CacheCreationInputTokens int64  `json:"anthropic_cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int64  `json:"anthropic_cache_read_input_tokens,omitempty"`
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -93,11 +100,6 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 	if auth := formatAuthInfo(info); auth != "" {
 		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
-	}
-	if routing := formatRoutingInfo(info); routing != "" {
-		builder.WriteString("Routing:\n")
-		builder.WriteString(routing)
-		builder.WriteString("\n")
 	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
@@ -499,6 +501,56 @@ func GetCodexCacheObservability(ctx context.Context) (CodexCacheObservability, b
 	return getCodexCacheObservabilityFromGin(ginContextFrom(ctx))
 }
 
+func SetAnthropicCacheObservability(ctx context.Context, value any) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	obs, _ := getAnthropicCacheObservabilityFromGin(ginCtx)
+	switch typed := value.(type) {
+	case AnthropicCacheObservability:
+		if typed.RewriteApplied {
+			obs.RewriteApplied = true
+		}
+		if typed.OverwroteClientLayout {
+			obs.OverwroteClientLayout = true
+		}
+		if typed.MatchedAgenticCodingLoop {
+			obs.MatchedAgenticCodingLoop = true
+		}
+		if strings.TrimSpace(typed.TTL) != "" {
+			obs.TTL = strings.TrimSpace(typed.TTL)
+		}
+		if typed.ToolsBreakpoint {
+			obs.ToolsBreakpoint = true
+		}
+		if typed.SystemBreakpoint {
+			obs.SystemBreakpoint = true
+		}
+		if typed.MessagesBreakpoint {
+			obs.MessagesBreakpoint = true
+		}
+		if typed.CacheCreationInputTokens != 0 {
+			obs.CacheCreationInputTokens = typed.CacheCreationInputTokens
+		}
+		if typed.CacheReadInputTokens != 0 {
+			obs.CacheReadInputTokens = typed.CacheReadInputTokens
+		}
+	case []byte:
+		if creation := gjson.GetBytes(typed, "usage.cache_creation_input_tokens"); creation.Exists() {
+			obs.CacheCreationInputTokens = creation.Int()
+		}
+		if read := gjson.GetBytes(typed, "usage.cache_read_input_tokens"); read.Exists() {
+			obs.CacheReadInputTokens = read.Int()
+		}
+	}
+	ginCtx.Set("ANTHROPIC_CACHE_OBSERVABILITY", obs)
+}
+
+func GetAnthropicCacheObservability(ctx context.Context) (AnthropicCacheObservability, bool) {
+	return getAnthropicCacheObservabilityFromGin(ginContextFrom(ctx))
+}
+
 func FormatCodexCacheRequestSummary(obs CodexCacheObservability) string {
 	lines := make([]string, 0, 3)
 	if obs.PromptCacheKey != "" {
@@ -545,6 +597,21 @@ func getCodexCacheObservabilityFromGin(ginCtx *gin.Context) (CodexCacheObservabi
 	obs, ok := value.(CodexCacheObservability)
 	if !ok {
 		return CodexCacheObservability{}, false
+	}
+	return obs, true
+}
+
+func getAnthropicCacheObservabilityFromGin(ginCtx *gin.Context) (AnthropicCacheObservability, bool) {
+	if ginCtx == nil {
+		return AnthropicCacheObservability{}, false
+	}
+	value, exists := ginCtx.Get("ANTHROPIC_CACHE_OBSERVABILITY")
+	if !exists {
+		return AnthropicCacheObservability{}, false
+	}
+	obs, ok := value.(AnthropicCacheObservability)
+	if !ok {
+		return AnthropicCacheObservability{}, false
 	}
 	return obs, true
 }
@@ -643,26 +710,6 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 	}
 
 	return strings.Join(parts, ", ")
-}
-
-func formatRoutingInfo(info UpstreamRequestLog) string {
-	lines := make([]string, 0, 5)
-	if trimmed := strings.TrimSpace(info.RouteClass); trimmed != "" {
-		lines = append(lines, "route_class: "+trimmed)
-	}
-	if trimmed := strings.TrimSpace(info.SelectedProvider); trimmed != "" {
-		lines = append(lines, "selected_provider: "+trimmed)
-	}
-	if trimmed := strings.TrimSpace(info.SelectedSurface); trimmed != "" {
-		lines = append(lines, "selected_surface: "+trimmed)
-	}
-	if trimmed := strings.TrimSpace(info.ValidationReason); trimmed != "" {
-		lines = append(lines, "validation_reason: "+trimmed)
-	}
-	if trimmed := strings.TrimSpace(info.SkipReason); trimmed != "" {
-		lines = append(lines, "skip_reason: "+trimmed)
-	}
-	return strings.Join(lines, "\n")
 }
 
 func SummarizeErrorBody(contentType string, body []byte) string {

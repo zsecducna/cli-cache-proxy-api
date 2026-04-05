@@ -142,6 +142,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	decision := decideAnthropicCachePolicy(body)
 	body = rewriteAnthropicCacheControl(body, decision)
+	helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+		RewriteApplied:           decision.RewriteApplied,
+		OverwroteClientLayout:    decision.OverwroteClientLayout,
+		MatchedAgenticCodingLoop: decision.MatchedAgenticCodingLoop,
+		TTL:                      decision.Breakpoints.TTL,
+		ToolsBreakpoint:          decision.Breakpoints.Tools,
+		SystemBreakpoint:         decision.Breakpoints.System,
+		MessagesBreakpoint:       decision.Breakpoints.Messages,
+	})
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -302,6 +311,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	decision := decideAnthropicCachePolicy(body)
 	body = rewriteAnthropicCacheControl(body, decision)
+	helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+		RewriteApplied:           decision.RewriteApplied,
+		OverwroteClientLayout:    decision.OverwroteClientLayout,
+		MatchedAgenticCodingLoop: decision.MatchedAgenticCodingLoop,
+		TTL:                      decision.Breakpoints.TTL,
+		ToolsBreakpoint:          decision.Breakpoints.Tools,
+		SystemBreakpoint:         decision.Breakpoints.System,
+		MessagesBreakpoint:       decision.Breakpoints.Messages,
+	})
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -474,6 +492,15 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Keep count_tokens requests compatible with the same Anthropic cache rewrite policy.
 	decision := decideAnthropicCachePolicy(body)
 	body = rewriteAnthropicCacheControl(body, decision)
+	helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+		RewriteApplied:           decision.RewriteApplied,
+		OverwroteClientLayout:    decision.OverwroteClientLayout,
+		MatchedAgenticCodingLoop: decision.MatchedAgenticCodingLoop,
+		TTL:                      decision.Breakpoints.TTL,
+		ToolsBreakpoint:          decision.Breakpoints.Tools,
+		SystemBreakpoint:         decision.Breakpoints.System,
+		MessagesBreakpoint:       decision.Breakpoints.Messages,
+	})
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
