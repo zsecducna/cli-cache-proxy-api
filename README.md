@@ -68,6 +68,22 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Interactive Installer
+
+You can install CLIProxyAPI with the interactive macOS installer:
+
+```bash
+./install.sh
+```
+
+The installer:
+
+- builds the binary from source
+- defaults the install root to `~/.cli-cache-proxy`
+- defaults the auth folder to `~/.cli-cache-proxy/auth`
+- can detect and migrate existing config, auth files, and cache-statistics data
+- can optionally install and start a `launchd` user service
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
