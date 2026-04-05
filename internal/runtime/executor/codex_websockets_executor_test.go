@@ -34,6 +34,21 @@ func TestApplyCodexPromptCacheHeadersReusesPreviousResponsePromptCacheKey(t *tes
 	}
 }
 
+func TestApplyCodexPromptCacheHeadersStripsPromptCacheRetentionForWebsocketRequests(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"24h"}`),
+	}
+
+	body, _, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload)
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "" {
+		t.Fatalf("prompt_cache_retention = %q, want empty", got)
+	}
+	if selection.TTL != codexPromptCacheDefaultTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCacheDefaultTTL)
+	}
+}
+
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 

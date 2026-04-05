@@ -106,6 +106,175 @@ func TestCodexExecutorCacheHelper_ReusesPromptCacheKeyFromPreviousResponseID(t *
 	}
 }
 
+func TestCodexExecutorCacheHelper_OverridesPromptCacheRetentionForSupportedModels(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"1h"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+	if selection.TTL != codexPromptCache24hTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCache24hTTL)
+	}
+}
+
+func TestCodexExecutorCacheHelper_AddsPromptCacheRetentionWhenMissingForSupportedModels(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+	if selection.TTL != codexPromptCache24hTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCache24hTTL)
+	}
+}
+
+func TestCodexExecutorCacheHelper_StripsExtendedPromptCacheRetentionForUnsupportedModels(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","prompt_cache_retention":"24h"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "" {
+		t.Fatalf("prompt_cache_retention = %q, want empty", got)
+	}
+	if selection.TTL != codexPromptCacheDefaultTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCacheDefaultTTL)
+	}
+}
+
+func TestCodexExecutorCacheHelper_LeavesPromptCacheRetentionUnsetWhenMissingForUnsupportedModels(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "" {
+		t.Fatalf("prompt_cache_retention = %q, want empty", got)
+	}
+	if selection.TTL != codexPromptCacheDefaultTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCacheDefaultTTL)
+	}
+}
+
+func TestCodexExecutorCacheHelper_StripsPromptCacheRetentionForChatGPTCodexBackend(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"24h"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://chatgpt.com/backend-api/codex/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "" {
+		t.Fatalf("prompt_cache_retention = %q, want empty", got)
+	}
+	if selection.TTL != codexPromptCacheDefaultTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCacheDefaultTTL)
+	}
+}
+
+func TestCodexExecutorCacheHelper_NormalizesPromptCacheRetentionFormattingForSupportedModels(t *testing.T) {
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"24H"}`),
+	}
+
+	httpReq, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+}
+
+func TestCodexExecutorExecuteAddsPromptCacheRetentionForSupportedModels(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := &CodexExecutor{}
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+	}
+	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(capturedBody, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+}
+
 func TestCodexExecutorExecutePreservesResponseCacheFields(t *testing.T) {
 	var capturedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

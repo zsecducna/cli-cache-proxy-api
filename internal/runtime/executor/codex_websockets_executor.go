@@ -768,7 +768,7 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 }
 
 func applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header, codexPromptCacheSelection) {
-	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Conversation_id")
+	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Conversation_id", false)
 	return selection.Body, selection.Hdrs, selection
 }
 
