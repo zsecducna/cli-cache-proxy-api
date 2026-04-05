@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -14,7 +15,23 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 	days := readPositiveIntQuery(c, "days", 14)
 
 	store := usage.GetCacheStatisticsStore()
-	snapshot, err := store.Snapshot(c.Request.Context(), limit, modelLimit, days)
+	var (
+		snapshot usage.CacheStatisticsSnapshot
+		err      error
+	)
+	if sinceRaw := c.Query("since"); sinceRaw != "" {
+		since, errParse := time.Parse(time.RFC3339Nano, sinceRaw)
+		if errParse != nil {
+			since, errParse = time.Parse(time.RFC3339, sinceRaw)
+		}
+		if errParse != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid since parameter"})
+			return
+		}
+		snapshot, err = store.SnapshotSince(c.Request.Context(), limit, modelLimit, since)
+	} else {
+		snapshot, err = store.Snapshot(c.Request.Context(), limit, modelLimit, days)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

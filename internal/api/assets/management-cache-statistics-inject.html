@@ -31,6 +31,7 @@
   let usageRefreshInFlight = false;
   let lastUsageStatisticsFetchAt = 0;
   let lastUsageStatistics = null;
+  let lastUsageStatisticsRangeKey = '';
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
   const quotaModes = new Map();
@@ -373,34 +374,45 @@
     return authPrimePromise;
   }
 
-  function getUsageTimeRange() {
-    let value = parseJSONStorage(TIME_RANGE_KEY, '24h');
-    value = normalize(value).toLowerCase();
-    if (!value) {
-      const container = getPageContainer();
-      const rangeButton = container ? Array.from(container.querySelectorAll('button')).find((el) => {
-        const text = normalize(el.textContent);
-        return text === 'All Time' || text === 'Last 7 Hours' || text === 'Last 24 Hours' || text === 'Last 7 Days';
-      }) : null;
-      value = normalize(rangeButton ? rangeButton.textContent : 'Last 24 Hours').toLowerCase();
-    }
-    if (value === '7h' || value === 'last 7 hours') {
-      return { key: '7h', label: 'Last 7 Hours', days: 1, cutoffMs: 7 * 60 * 60 * 1000 };
-    }
-    if (value === '7d' || value === 'last 7 days') {
-      return { key: '7d', label: 'Last 7 Days', days: 7, cutoffMs: 7 * 24 * 60 * 60 * 1000 };
-    }
-    if (value === 'all' || value === 'all time') {
-      return { key: 'all', label: 'All Time', days: 3650, cutoffMs: null };
-    }
-    return { key: '24h', label: 'Last 24 Hours', days: 1, cutoffMs: 24 * 60 * 60 * 1000 };
+  function readUsageTimeRangeValue(container) {
+    if (!container) return '';
+    const rangeButton = container.querySelector('button[aria-label="Time Range"]') || Array.from(container.querySelectorAll('button')).find((el) => {
+      const text = normalize(el.textContent);
+      return text === 'All Time' || text === 'Last 7 Hours' || text === 'Last 24 Hours' || text === 'Last 7 Days';
+    });
+    return normalize(rangeButton ? rangeButton.textContent : '');
   }
 
-  async function fetchCacheStatistics(days, limit) {
+  function getUsageTimeRange() {
+    const container = getPageContainer();
+    let value = readUsageTimeRangeValue(container);
+    if (value) {
+      setJSONStorage(TIME_RANGE_KEY, value);
+    } else {
+      value = parseJSONStorage(TIME_RANGE_KEY, 'Last 24 Hours');
+    }
+    value = normalize(value).toLowerCase();
+    if (value === '7h' || value === 'last 7 hours') {
+      return { key: '7h', label: 'Last 7 Hours', days: 1, cutoffMs: 7 * 60 * 60 * 1000, since: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() };
+    }
+    if (value === '7d' || value === 'last 7 days') {
+      return { key: '7d', label: 'Last 7 Days', days: 7, cutoffMs: 7 * 24 * 60 * 60 * 1000, since: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() };
+    }
+    if (value === 'all' || value === 'all time') {
+      return { key: 'all', label: 'All Time', days: 3650, cutoffMs: null, since: '' };
+    }
+    return { key: '24h', label: 'Last 24 Hours', days: 1, cutoffMs: 24 * 60 * 60 * 1000, since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() };
+  }
+
+  async function fetchCacheStatistics(timeRange, limit) {
     const ready = await ensureManagementAuth();
     if (!ready || !nativeFetch || !managementAuthorization) return null;
     const url = new URL('/v0/management/cache-statistics', window.location.origin);
-    url.searchParams.set('days', String(days));
+    if (timeRange && timeRange.since) {
+      url.searchParams.set('since', String(timeRange.since));
+    } else {
+      url.searchParams.set('days', String(timeRange && timeRange.days || 14));
+    }
     url.searchParams.set('limit', String(limit));
     url.searchParams.set('model_limit', String(MODEL_LIMIT));
     const response = await nativeFetch(url.toString(), {
@@ -500,12 +512,22 @@
     return row;
   }
 
+  function setEnhancerMarkup(node, signature, html) {
+    if (!node) return false;
+    const nextSignature = String(signature || '');
+    if (node.dataset.cliproxySignature === nextSignature) return false;
+    node.dataset.cliproxySignature = nextSignature;
+    node.innerHTML = html;
+    return true;
+  }
+
   function updateServiceHealthRow(row, summary, label) {
     const total = Number(summary && summary.total_requests || 0);
     const failed = Number(summary && summary.failed_requests || 0);
     const success = Math.max(total - failed, 0);
     const rate = total > 0 ? ((success / total) * 100).toFixed(2) : '0.00';
-    row.innerHTML = `
+    const signature = ['service-health', label, total, failed, rate].join(':');
+    setEnhancerMarkup(row, signature, `
       <div class="cliproxy-enhancer__card">
         <div class="cliproxy-enhancer__label">Service Health</div>
         <div class="cliproxy-enhancer__hint">${escapeHTML(label)}</div>
@@ -522,7 +544,7 @@
         <div class="cliproxy-enhancer__label">Success Rate</div>
         <div class="cliproxy-enhancer__value">${escapeHTML(rate)}<span>%</span></div>
       </div>
-    `;
+    `);
   }
 
   function patchCachedTokensCard(container, summary) {
@@ -546,11 +568,12 @@
     const cachedTokens = Number(summary && summary.cached_tokens || 0);
     const inputTokens = Number(summary && summary.input_tokens || 0);
     const percentage = inputTokens > 0 ? ((cachedTokens / inputTokens) * 100).toFixed(2) : '0.00';
-    cachedCard.innerHTML = `
+    const signature = ['cached-card', cachedTokens, inputTokens, percentage].join(':');
+    setEnhancerMarkup(cachedCard, signature, `
       <div class="cliproxy-enhancer__label">Cached Tokens</div>
       <div class="cliproxy-enhancer__value">${escapeHTML(formatCompact(cachedTokens))}<span>${escapeHTML(percentage)}%</span></div>
       <div class="cliproxy-enhancer__hint">${escapeHTML(formatInteger(cachedTokens))} persisted cached tokens</div>
-    `;
+    `);
   }
 
   function hideUsageBlocks(container) {
@@ -574,7 +597,8 @@
       requestBlock.insertAdjacentElement('afterend', panel);
     }
     const requests = filterRecentRequests(stats && stats.recent_requests || [], timeRange).slice(0, MAX_REQUEST_ROWS);
-    panel.innerHTML = `
+    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}`).join('|')].join(':');
+    setEnhancerMarkup(panel, signature, `
       <div class="cliproxy-enhancer__label">Request Events</div>
       <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} persisted request events within ${escapeHTML(timeRange.label)}.</div>
       <div class="cliproxy-enhancer__table-wrap">
@@ -611,7 +635,7 @@
           </tbody>
         </table>
       </div>
-    `;
+    `);
   }
 
   function renderUsageStatistics(container, stats, timeRange) {
@@ -640,18 +664,20 @@
       const timeRange = getUsageTimeRange();
       const minIntervalMs = getUsageIntervalSeconds() * 1000;
       const elapsedMs = Date.now() - lastUsageStatisticsFetchAt;
-      const remainingMs = lastUsageStatisticsFetchAt > 0 ? Math.max(0, minIntervalMs - elapsedMs) : 0;
+      const sameRange = lastUsageStatisticsRangeKey === timeRange.key;
+      const remainingMs = lastUsageStatisticsFetchAt > 0 && sameRange ? Math.max(0, minIntervalMs - elapsedMs) : 0;
       if (remainingMs > 0) {
-        if (lastUsageStatistics) {
+        if (lastUsageStatistics && sameRange) {
           renderUsageStatistics(container, lastUsageStatistics, timeRange);
         }
         scheduleUsageRefreshRetry(remainingMs);
         return;
       }
-      const stats = await fetchCacheStatistics(timeRange.days, RECENT_REQUEST_FETCH_LIMIT);
+      const stats = await fetchCacheStatistics(timeRange, RECENT_REQUEST_FETCH_LIMIT);
       if (!stats) return;
       lastUsageStatisticsFetchAt = Date.now();
       lastUsageStatistics = stats;
+      lastUsageStatisticsRangeKey = timeRange.key;
       renderUsageStatistics(container, stats, timeRange);
     } finally {
       usageRefreshInFlight = false;

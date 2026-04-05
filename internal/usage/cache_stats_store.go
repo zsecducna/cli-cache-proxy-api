@@ -267,6 +267,9 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "reasoning_effort", "ALTER TABLE cache_statistics_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := s.initPromptCacheIndex(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -315,6 +318,20 @@ INSERT INTO cache_statistics_requests (
 }
 
 func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelLimit, days int) (CacheStatisticsSnapshot, error) {
+	if days <= 0 {
+		days = defaultCacheStatisticsDays
+	}
+	return s.snapshotSince(ctx, recentLimit, modelLimit, snapshotSince(days))
+}
+
+func (s *CacheStatisticsStore) SnapshotSince(ctx context.Context, recentLimit, modelLimit int, since time.Time) (CacheStatisticsSnapshot, error) {
+	if since.IsZero() {
+		return s.Snapshot(ctx, recentLimit, modelLimit, defaultCacheStatisticsDays)
+	}
+	return s.snapshotSince(ctx, recentLimit, modelLimit, since.UTC().Format(time.RFC3339Nano))
+}
+
+func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, modelLimit int, since string) (CacheStatisticsSnapshot, error) {
 	result := CacheStatisticsSnapshot{Enabled: s != nil && s.db != nil}
 	if ctx == nil {
 		ctx = context.Background()
@@ -328,10 +345,6 @@ func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelL
 	if modelLimit <= 0 {
 		modelLimit = defaultCacheStatisticsModelLimit
 	}
-	if days <= 0 {
-		days = defaultCacheStatisticsDays
-	}
-	since := snapshotSince(days)
 	result.DBPath = s.path
 
 	summary, err := s.querySummary(ctx, since)
@@ -364,6 +377,164 @@ func snapshotSince(days int) string {
 	since := time.Now().UTC().AddDate(0, 0, -(days - 1))
 	since = since.Truncate(24 * time.Hour)
 	return since.Format(time.RFC3339Nano)
+}
+
+func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
+	result := StatisticsSnapshot{
+		APIs:           make(map[string]APISnapshot),
+		RequestsByDay:  make(map[string]int64),
+		RequestsByHour: make(map[string]int64),
+		TokensByDay:    make(map[string]int64),
+		TokensByHour:   make(map[string]int64),
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s == nil || s.db == nil {
+		return result, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT
+    requested_at,
+    provider,
+    model,
+    source,
+    auth_id,
+    auth_index,
+    latency_ms,
+    failed,
+    input_tokens,
+    output_tokens,
+    reasoning_tokens,
+    cached_tokens,
+    total_tokens,
+    prompt_cache_key,
+    previous_response_id,
+    response_id,
+    prompt_cache_retention
+FROM cache_statistics_requests
+ORDER BY requested_at ASC, id ASC`)
+	if err != nil {
+		return result, fmt.Errorf("cache statistics store: usage snapshot query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			requestedAt           string
+			provider              string
+			model                 string
+			source                string
+			authID                string
+			authIndex             string
+			latencyMs             int64
+			failedInt             int
+			inputTokens           int64
+			outputTokens          int64
+			reasoningTokens       int64
+			cachedTokens          int64
+			totalTokens           int64
+			promptCacheKey        string
+			previousResponseID    string
+			responseID            string
+			promptCacheRetention  string
+		)
+		if err := rows.Scan(
+			&requestedAt,
+			&provider,
+			&model,
+			&source,
+			&authID,
+			&authIndex,
+			&latencyMs,
+			&failedInt,
+			&inputTokens,
+			&outputTokens,
+			&reasoningTokens,
+			&cachedTokens,
+			&totalTokens,
+			&promptCacheKey,
+			&previousResponseID,
+			&responseID,
+			&promptCacheRetention,
+		); err != nil {
+			return result, fmt.Errorf("cache statistics store: usage snapshot scan: %w", err)
+		}
+
+		timestamp, err := time.Parse(time.RFC3339Nano, requestedAt)
+		if err != nil {
+			continue
+		}
+		model = strings.TrimSpace(model)
+		if model == "" {
+			model = "unknown"
+		}
+		apiKey := strings.TrimSpace(authID)
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(authIndex)
+		}
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(provider)
+		}
+		if apiKey == "" {
+			apiKey = "persisted"
+		}
+		tokens := normaliseTokenStats(TokenStats{
+			InputTokens:     inputTokens,
+			OutputTokens:    outputTokens,
+			ReasoningTokens: reasoningTokens,
+			CachedTokens:    cachedTokens,
+			TotalTokens:     totalTokens,
+		})
+		detail := RequestDetail{
+			Timestamp: timestamp,
+			LatencyMs: latencyMs,
+			Source:    source,
+			AuthIndex: authIndex,
+			Tokens:    tokens,
+			Failed:    failedInt != 0,
+		}
+		if promptCacheKey != "" || previousResponseID != "" || responseID != "" || promptCacheRetention != "" {
+			detail.Cache = &helps.CodexCacheObservability{
+				PromptCacheKey:       promptCacheKey,
+				PreviousResponseID:   previousResponseID,
+				ResponseID:           responseID,
+				PromptCacheRetention: promptCacheRetention,
+			}
+		}
+
+		result.TotalRequests++
+		if detail.Failed {
+			result.FailureCount++
+		} else {
+			result.SuccessCount++
+		}
+		result.TotalTokens += tokens.TotalTokens
+		dayKey := timestamp.Format("2006-01-02")
+		hourKey := formatHour(timestamp.Hour())
+		result.RequestsByDay[dayKey]++
+		result.RequestsByHour[hourKey]++
+		result.TokensByDay[dayKey] += tokens.TotalTokens
+		result.TokensByHour[hourKey] += tokens.TotalTokens
+
+		apiSnapshot := result.APIs[apiKey]
+		if apiSnapshot.Models == nil {
+			apiSnapshot.Models = make(map[string]ModelSnapshot)
+		}
+		apiSnapshot.TotalRequests++
+		apiSnapshot.TotalTokens += tokens.TotalTokens
+		modelSnapshot := apiSnapshot.Models[model]
+		modelSnapshot.TotalRequests++
+		modelSnapshot.TotalTokens += tokens.TotalTokens
+		modelSnapshot.Details = append(modelSnapshot.Details, detail)
+		apiSnapshot.Models[model] = modelSnapshot
+		result.APIs[apiKey] = apiSnapshot
+	}
+	if err := rows.Err(); err != nil {
+		return result, fmt.Errorf("cache statistics store: usage snapshot iterate: %w", err)
+	}
+	return result, nil
 }
 
 func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string) (CacheStatisticsSummary, error) {

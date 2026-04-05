@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,8 +220,11 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if strings.Contains(body, "new MutationObserver(syncRouteSoon)") || strings.Contains(body, "if (!background) triggerUsageRefresh()") || strings.Contains(body, "if (!background) triggerQuotaRefreshAll()") {
 		t.Fatalf("management enhancer should guard against self-triggered refresh loops: %s", body)
 	}
-	if !strings.Contains(body, "const DEFAULT_USAGE_INTERVAL = 5;") || !strings.Contains(body, "scheduleUsageRefreshRetry") || !strings.Contains(body, "lastUsageStatisticsFetchAt") {
-		t.Fatalf("management enhancer should throttle cache statistics fetches to the configured refresh interval: %s", body)
+	if !strings.Contains(body, "const DEFAULT_USAGE_INTERVAL = 5;") || !strings.Contains(body, "scheduleUsageRefreshRetry") || !strings.Contains(body, "lastUsageStatisticsFetchAt") || !strings.Contains(body, "lastUsageStatisticsRangeKey") {
+		t.Fatalf("management enhancer should throttle cache statistics fetches to the configured refresh interval and refetch when the selected time range changes: %s", body)
+	}
+	if !strings.Contains(body, "button[aria-label=\"Time Range\"]") || !strings.Contains(body, "setEnhancerMarkup") || !strings.Contains(body, "node.dataset.cliproxySignature") {
+		t.Fatalf("management enhancer should follow the live time-range control and avoid rewriting unchanged custom usage sections: %s", body)
 	}
 }
 
@@ -367,6 +371,110 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 	}
 	if recent.PromptCacheKey != "" || recent.PreviousResponseID != "" || recent.ResponseID != "" || recent.PromptCacheRetention != "" {
 		t.Fatalf("cache identifiers should be redacted: %+v", recent)
+	}
+
+	sinceReq := httptest.NewRequest(http.MethodGet, "/v0/management/cache-statistics?since="+url.QueryEscape(now.Add(-90*time.Minute).Format(time.RFC3339Nano))+"&limit=10&model_limit=10", nil)
+	sinceReq.Header.Set("Authorization", "Bearer test-secret")
+	sinceRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(sinceRR, sinceReq)
+	if sinceRR.Code != http.StatusOK {
+		t.Fatalf("unexpected status code for since filter: got %d want %d; body=%s", sinceRR.Code, http.StatusOK, sinceRR.Body.String())
+	}
+	var sincePayload struct {
+		CacheStatistics usage.CacheStatisticsSnapshot `json:"cache_statistics"`
+	}
+	if err := json.Unmarshal(sinceRR.Body.Bytes(), &sincePayload); err != nil {
+		t.Fatalf("failed to decode since response: %v", err)
+	}
+	if sincePayload.CacheStatistics.Summary.TotalRequests != 1 {
+		t.Fatalf("since total_requests = %d, want 1", sincePayload.CacheStatistics.Summary.TotalRequests)
+	}
+	if len(sincePayload.CacheStatistics.RecentRequests) != 1 || sincePayload.CacheStatistics.RecentRequests[0].Model != "gpt-5.4-mini" {
+		t.Fatalf("since recent requests = %+v, want only gpt-5.4-mini", sincePayload.CacheStatistics.RecentRequests)
+	}
+}
+
+func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []usage.CacheStatisticsEvent{
+		{
+			Timestamp:       now.Add(-2 * time.Hour),
+			Provider:        "codex",
+			Model:           "gpt-5.4",
+			ReasoningEffort: "medium",
+			Source:          "user-a@example.com",
+			AuthID:          "codex-user-a.json",
+			AuthIndex:       "idx-a",
+			LatencyMs:       1200,
+			Tokens:          usage.TokenStats{InputTokens: 1000, OutputTokens: 100, CachedTokens: 900, TotalTokens: 1100},
+			Cache:           &helps.CodexCacheObservability{PromptCacheKey: "cache-a", ResponseID: "resp-a"},
+		},
+		{
+			Timestamp:       now.Add(-1 * time.Hour),
+			Provider:        "codex",
+			Model:           "gpt-5.4-mini",
+			ReasoningEffort: "high",
+			Source:          "user-b@example.com",
+			AuthID:          "codex-user-b.json",
+			AuthIndex:       "idx-b",
+			LatencyMs:       800,
+			Failed:          true,
+			Tokens:          usage.TokenStats{InputTokens: 500, OutputTokens: 60, CachedTokens: 250, TotalTokens: 560},
+			Cache:           &helps.CodexCacheObservability{PromptCacheKey: "cache-b", ResponseID: "resp-b"},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var payload struct {
+		Usage          usage.StatisticsSnapshot `json:"usage"`
+		FailedRequests int64                    `json:"failed_requests"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Usage.TotalRequests != 2 {
+		t.Fatalf("total_requests = %d, want 2", payload.Usage.TotalRequests)
+	}
+	if payload.Usage.TotalTokens != 1660 {
+		t.Fatalf("total_tokens = %d, want 1660", payload.Usage.TotalTokens)
+	}
+	if payload.Usage.SuccessCount != 1 || payload.Usage.FailureCount != 1 || payload.FailedRequests != 1 {
+		t.Fatalf("success/failure counts = %+v failed_requests=%d, want 1/1/1", payload.Usage, payload.FailedRequests)
+	}
+	if len(payload.Usage.APIs) != 2 {
+		t.Fatalf("apis len = %d, want 2", len(payload.Usage.APIs))
+	}
+	apiSnapshot, ok := payload.Usage.APIs["codex-user-a.json"]
+	if !ok {
+		t.Fatalf("missing persisted api bucket for auth id")
+	}
+	if apiSnapshot.TotalRequests != 1 || apiSnapshot.TotalTokens != 1100 {
+		t.Fatalf("api snapshot = %+v, want 1 request and 1100 tokens", apiSnapshot)
+	}
+	modelSnapshot, ok := apiSnapshot.Models["gpt-5.4"]
+	if !ok || modelSnapshot.TotalRequests != 1 || len(modelSnapshot.Details) != 1 {
+		t.Fatalf("model snapshot = %+v, want gpt-5.4 with one detail", modelSnapshot)
+	}
+	dayKey := now.Format("2006-01-02")
+	if payload.Usage.RequestsByDay[dayKey] != 2 {
+		t.Fatalf("requests_by_day[%q] = %d, want 2", dayKey, payload.Usage.RequestsByDay[dayKey])
 	}
 }
 

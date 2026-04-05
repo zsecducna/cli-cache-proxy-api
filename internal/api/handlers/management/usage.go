@@ -20,12 +20,21 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
-// GetUsageStatistics returns the in-memory request statistics snapshot.
-func (h *Handler) GetUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+func (h *Handler) currentUsageSnapshot(ctx *gin.Context) usage.StatisticsSnapshot {
+	if store := usage.GetCacheStatisticsStore(); store != nil {
+		if snapshot, err := store.StatisticsSnapshot(ctx.Request.Context()); err == nil {
+			return snapshot
+		}
 	}
+	if h != nil && h.usageStats != nil {
+		return h.usageStats.Snapshot()
+	}
+	return usage.StatisticsSnapshot{}
+}
+
+// GetUsageStatistics returns the request statistics snapshot, preferring persisted cache-statistics history when available.
+func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	snapshot := h.currentUsageSnapshot(c)
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
@@ -34,10 +43,7 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
-	}
+	snapshot := h.currentUsageSnapshot(c)
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),
