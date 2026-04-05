@@ -438,6 +438,21 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	return []string{resolved}
 }
 
+func (m *Manager) executionModelCandidatesForAudit(auth *Auth, routeModel string) []string {
+	requestedModel := rewriteModelForAuth(routeModel, auth)
+	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		out := make([]string, len(pool))
+		copy(out, pool)
+		return out
+	}
+	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
+	if strings.TrimSpace(resolved) == "" {
+		resolved = requestedModel
+	}
+	return []string{resolved}
+}
+
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
@@ -1101,9 +1116,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, m.normalizeRouteExecutionError(lastErr, normalized, req.Model, opts)
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, m.normalizeRouteExecutionError(&Error{Code: "auth_not_found", Message: "no auth available"}, normalized, req.Model, opts)
 }
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
@@ -1132,9 +1147,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, m.normalizeRouteExecutionError(lastErr, normalized, req.Model, opts)
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, m.normalizeRouteExecutionError(&Error{Code: "auth_not_found", Message: "no auth available"}, normalized, req.Model, opts)
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -1163,9 +1178,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, m.normalizeRouteExecutionError(lastErr, normalized, req.Model, opts)
 	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return nil, m.normalizeRouteExecutionError(&Error{Code: "auth_not_found", Message: "no auth available"}, normalized, req.Model, opts)
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
@@ -1423,6 +1438,142 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+func requestRouteFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.RequestRouteMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func isClaudeViaGPTRoute(meta map[string]any) bool {
+	return requestRouteFromMetadata(meta) == "claude_via_openai_compat"
+}
+
+func (m *Manager) normalizeRouteExecutionError(err error, providers []string, routeModel string, opts cliproxyexecutor.Options) error {
+	if err == nil || !isClaudeViaGPTRoute(opts.Metadata) {
+		return err
+	}
+	if isModelSupportError(err) || m.allClaudeViaGPTCandidatesModelUnsupported(providers, routeModel, opts) {
+		return &Error{
+			Code:       "claude_via_gpt_model_not_supported",
+			Message:    "no eligible OpenAI-compatible backend supports the requested Claude-via-GPT model",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch authErr.Code {
+		case "auth_not_found", "auth_unavailable", "executor_not_found":
+			return &Error{
+				Code:       "claude_via_gpt_backend_not_available",
+				Message:    "no eligible OpenAI-compatible backend is currently available for Claude-via-GPT routing",
+				HTTPStatus: http.StatusBadGateway,
+			}
+		}
+	}
+	return err
+}
+
+func (m *Manager) allClaudeViaGPTCandidatesModelUnsupported(providers []string, routeModel string, opts cliproxyexecutor.Options) bool {
+	if m == nil {
+		return false
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
+		if providerKey == "" {
+			continue
+		}
+		providerSet[providerKey] = struct{}{}
+	}
+	if len(providerSet) == 0 {
+		return false
+	}
+
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+
+	m.mu.RLock()
+	candidates := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		if _, ok := m.executors[providerKey]; !ok {
+			continue
+		}
+		candidates = append(candidates, auth.Clone())
+	}
+	m.mu.RUnlock()
+
+	considered := false
+	for _, auth := range candidates {
+		considered = true
+		if !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+			continue
+		}
+
+		upstreamModels := m.executionModelCandidatesForAudit(auth, routeModel)
+		if len(upstreamModels) == 0 {
+			return false
+		}
+		pooled := len(upstreamModels) > 1
+		for _, upstreamModel := range upstreamModels {
+			stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			if !isModelSupportBlocked(auth, stateModel, now) {
+				return false
+			}
+		}
+	}
+
+	return considered
+}
+
+func isModelSupportBlocked(auth *Auth, model string, now time.Time) bool {
+	state := lookupModelState(auth, model)
+	if state == nil || !state.Unavailable {
+		return false
+	}
+	if !state.NextRetryAfter.IsZero() && !state.NextRetryAfter.After(now) {
+		return false
+	}
+	return isModelSupportResultError(state.LastError)
+}
+
+func lookupModelState(auth *Auth, model string) *ModelState {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	if state := auth.ModelStates[model]; state != nil {
+		return state
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel == "" || baseModel == model {
+		return nil
+	}
+	return auth.ModelStates[baseModel]
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
@@ -2493,7 +2644,29 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	return authCopy, executor, nil
 }
 
+func (m *Manager) pickNextOrderedProviders(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	var lastErr error
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
+		if providerKey == "" {
+			continue
+		}
+		auth, executor, errPick := m.pickNext(ctx, providerKey, model, opts, tried)
+		if errPick == nil {
+			return auth, executor, providerKey, nil
+		}
+		lastErr = errPick
+	}
+	if lastErr != nil {
+		return nil, nil, "", lastErr
+	}
+	return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if isClaudeViaGPTRoute(opts.Metadata) {
+		return m.pickNextOrderedProviders(ctx, providers, model, opts, tried)
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -2582,6 +2755,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if isClaudeViaGPTRoute(opts.Metadata) {
+		return m.pickNextOrderedProviders(ctx, providers, model, opts, tried)
+	}
 	if !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}

@@ -205,6 +205,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	if requestID := logging.GetRequestID(ctx); requestID != "" {
+		meta[coreexecutor.RequestIDMetadataKey] = requestID
+	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
@@ -475,18 +478,19 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	details, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
 	req := coreexecutor.Request{
-		Model:   normalizedModel,
+		Model:   details.NormalizedModel,
 		Payload: payload,
 	}
 	opts := coreexecutor.Options{
@@ -497,7 +501,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	opts.Metadata = reqMeta
 	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	resp, err := h.AuthManager.Execute(ctx, details.Providers, req, opts)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -522,18 +526,19 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	details, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
 	req := coreexecutor.Request{
-		Model:   normalizedModel,
+		Model:   details.NormalizedModel,
 		Payload: payload,
 	}
 	opts := coreexecutor.Options{
@@ -544,7 +549,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	opts.Metadata = reqMeta
 	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+	resp, err := h.AuthManager.ExecuteCount(ctx, details.Providers, req, opts)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -570,7 +575,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	details, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -578,13 +583,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
 	req := coreexecutor.Request{
-		Model:   normalizedModel,
+		Model:   details.NormalizedModel,
 		Payload: payload,
 	}
 	opts := coreexecutor.Options{
@@ -595,7 +601,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	opts.Metadata = reqMeta
 	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	streamResult, err := h.AuthManager.ExecuteStream(ctx, details.Providers, req, opts)
 	if err != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
@@ -698,7 +704,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, details.Providers, req, opts)
 							if retryErr == nil {
 								if passthroughHeadersEnabled {
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
@@ -784,7 +790,17 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (requestDetails, *interfaces.ErrorMessage) {
+	route := classifyRequestRoute(handlerType, modelName)
+	if route.Route == RequestRouteClaudeViaOpenAICompat {
+		return requestDetails{
+			Providers:       append([]string(nil), claudeViaGPTProviders...),
+			NormalizedModel: route.RequestedModel,
+			RequestedModel:  route.RequestedModel,
+			Route:           route.Route,
+		}, nil
+	}
+
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -801,7 +817,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	providers = util.GetProviderName(baseModel)
+	providers := util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
@@ -812,12 +828,17 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		return requestDetails{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
-	return providers, resolvedModelName, nil
+	return requestDetails{
+		Providers:       providers,
+		NormalizedModel: resolvedModelName,
+		RequestedModel:  strings.TrimSpace(modelName),
+		Route:           route.Route,
+	}, nil
 }
 
 func cloneBytes(src []byte) []byte {

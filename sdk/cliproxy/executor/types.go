@@ -10,6 +10,12 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// RequestRouteMetadataKey stores the classified handler route in Options.Metadata.
+const RequestRouteMetadataKey = "request_route"
+
+// RequestIDMetadataKey stores the request correlation identifier in Options.Metadata.
+const RequestIDMetadataKey = "request_id"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"

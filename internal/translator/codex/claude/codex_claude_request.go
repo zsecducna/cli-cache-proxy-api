@@ -280,6 +280,24 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Add additional configuration parameters for the Codex API.
 	template, _ = sjson.SetBytes(template, "parallel_tool_calls", parallelToolCalls)
 
+	if outputFormat := rootResult.Get("output_config.format"); outputFormat.Exists() && outputFormat.IsObject() {
+		switch strings.ToLower(strings.TrimSpace(outputFormat.Get("type").String())) {
+		case "text":
+			template, _ = sjson.SetBytes(template, "text.format.type", "text")
+		case "json_schema":
+			template, _ = sjson.SetBytes(template, "text.format.type", "json_schema")
+			if name := outputFormat.Get("name"); name.Exists() {
+				template, _ = sjson.SetBytes(template, "text.format.name", name.Value())
+			}
+			if strict := outputFormat.Get("strict"); strict.Exists() {
+				template, _ = sjson.SetBytes(template, "text.format.strict", strict.Value())
+			}
+			if schema := outputFormat.Get("schema"); schema.Exists() {
+				template, _ = sjson.SetRawBytes(template, "text.format.schema", []byte(schema.Raw))
+			}
+		}
+	}
+
 	// Convert thinking.budget_tokens to reasoning.effort.
 	reasoningEffort := "medium"
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {

@@ -13,6 +13,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	openaiclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/claude"
+	responsefmt "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -27,6 +29,22 @@ import (
 type OpenAICompatExecutor struct {
 	provider string
 	cfg      *config.Config
+}
+
+const (
+	openAICompatClaudeViaGPTRouteClass = "claude_via_openai_compat"
+	openAICompatSurfaceResponses       = "responses"
+	openAICompatSurfaceChatCompletions = "chat_completions"
+)
+
+type openAICompatExecutionPlan struct {
+	routeClass       string
+	selectedProvider string
+	selectedSurface  string
+	targetFormat     sdktranslator.Format
+	endpoint         string
+	originalPayload  []byte
+	translated       []byte
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -83,34 +101,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
-	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
-	}
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	if opts.Alt == "responses/compact" {
-		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
-			translated = updated
-		}
-	}
-
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	plan, err := e.buildExecutionPlan(req, opts, auth, false)
 	if err != nil {
 		return resp, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(plan.translated))
 	if err != nil {
 		return resp, err
 	}
@@ -131,15 +128,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:              url,
+		Method:           http.MethodPost,
+		Headers:          httpReq.Header.Clone(),
+		Body:             plan.translated,
+		Provider:         e.Identifier(),
+		AuthID:           authID,
+		AuthLabel:        authLabel,
+		AuthType:         authType,
+		AuthValue:        authValue,
+		RouteClass:       plan.routeClass,
+		SelectedProvider: plan.selectedProvider,
+		SelectedSurface:  plan.selectedSurface,
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -171,8 +171,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := e.translateResponseNonStream(ctx, plan, from, req.Model, body)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -190,28 +189,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	plan, err := e.buildExecutionPlan(req, opts, auth, true)
 	if err != nil {
 		return nil, err
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	if plan.targetFormat == sdktranslator.FormatOpenAI {
+		plan.translated, _ = sjson.SetBytes(plan.translated, "stream_options.include_usage", true)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(plan.translated))
 	if err != nil {
 		return nil, err
 	}
@@ -234,15 +224,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+		URL:              url,
+		Method:           http.MethodPost,
+		Headers:          httpReq.Header.Clone(),
+		Body:             plan.translated,
+		Provider:         e.Identifier(),
+		AuthID:           authID,
+		AuthLabel:        authLabel,
+		AuthType:         authType,
+		AuthValue:        authValue,
+		RouteClass:       plan.routeClass,
+		SelectedProvider: plan.selectedProvider,
+		SelectedSurface:  plan.selectedSurface,
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -289,7 +282,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
+			chunks := e.translateResponseStream(ctx, plan, from, req.Model, bytes.Clone(line), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
@@ -332,6 +325,268 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	usageJSON := helps.BuildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
+}
+
+func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, auth *cliproxyauth.Auth, stream bool) (openAICompatExecutionPlan, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	from := opts.SourceFormat
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+
+	plan := openAICompatExecutionPlan{
+		routeClass:       requestRouteClassFromMetadata(opts.Metadata),
+		selectedProvider: e.selectedProvider(auth),
+		targetFormat:     sdktranslator.FormatOpenAI,
+		endpoint:         "/chat/completions",
+		originalPayload:  originalPayload,
+	}
+
+	if opts.Alt == "responses/compact" {
+		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, originalPayload, stream)
+		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, req.Payload, stream)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
+			translated = updated
+		}
+		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAIResponse.String(), e.Identifier())
+		if err != nil {
+			return openAICompatExecutionPlan{}, err
+		}
+		plan.targetFormat = sdktranslator.FormatOpenAIResponse
+		plan.endpoint = "/responses/compact"
+		plan.translated = translated
+		return plan, nil
+	}
+
+	if plan.routeClass == openAICompatClaudeViaGPTRouteClass && from == sdktranslator.FormatClaude {
+		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, originalPayload, auth, stream, plan)
+	}
+
+	originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, originalPayload, stream)
+	translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, req.Payload, stream)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel)
+	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAI.String(), e.Identifier())
+	if err != nil {
+		return openAICompatExecutionPlan{}, err
+	}
+	plan.translated = translated
+	return plan, nil
+}
+
+func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, auth *cliproxyauth.Auth, stream bool, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, error) {
+	caps := e.claudeViaGPTCapabilities(auth)
+
+	responsePlan, responseCompatErr, responseErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, stream, caps, openaiclaude.BackendSurfaceResponses, plan)
+	if responseErr != nil {
+		return openAICompatExecutionPlan{}, responseErr
+	}
+	if responseCompatErr == nil {
+		return responsePlan, nil
+	}
+
+	chatPlan, chatCompatErr, chatErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, stream, caps, openaiclaude.BackendSurfaceChatCompletions, plan)
+	if chatErr != nil {
+		return openAICompatExecutionPlan{}, chatErr
+	}
+	if chatCompatErr == nil {
+		return chatPlan, nil
+	}
+
+	if chatCompatErr != nil {
+		return openAICompatExecutionPlan{}, compatibilityStatusErr(chatCompatErr)
+	}
+	return openAICompatExecutionPlan{}, compatibilityStatusErr(responseCompatErr)
+}
+
+func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, stream bool, caps openaiclaude.BackendCapabilities, surface openaiclaude.BackendSurface, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, *openaiclaude.CompatibilityError, error) {
+	validatedOriginal, compatErr := openaiclaude.ValidateClaudeRequestForSurface(originalPayload, caps, surface)
+	if compatErr != nil {
+		if typed, ok := compatErr.(*openaiclaude.CompatibilityError); ok {
+			return openAICompatExecutionPlan{}, typed, nil
+		}
+		return openAICompatExecutionPlan{}, nil, compatErr
+	}
+
+	currentPayload := req.Payload
+	if len(currentPayload) == 0 {
+		currentPayload = originalPayload
+	}
+	validatedPayload, compatErr := openaiclaude.ValidateClaudeRequestForSurface(currentPayload, caps, surface)
+	if compatErr != nil {
+		if typed, ok := compatErr.(*openaiclaude.CompatibilityError); ok {
+			return openAICompatExecutionPlan{}, typed, nil
+		}
+		return openAICompatExecutionPlan{}, nil, compatErr
+	}
+
+	next := plan
+	next.originalPayload = validatedOriginal
+
+	switch surface {
+	case openaiclaude.BackendSurfaceResponses:
+		chatOriginal := openaiclaude.ConvertClaudeRequestToOpenAIWithTools(baseModel, validatedOriginal, stream)
+		chatPayload := openaiclaude.ConvertClaudeRequestToOpenAIWithTools(baseModel, validatedPayload, stream)
+		originalTranslated := responsefmt.LiftOpenAIChatCompletionsRequestToOpenAIResponses(baseModel, chatOriginal)
+		translated := responsefmt.LiftOpenAIChatCompletionsRequestToOpenAIResponses(baseModel, chatPayload)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAIResponse.String(), e.Identifier())
+		if err != nil {
+			return openAICompatExecutionPlan{}, nil, err
+		}
+		next.selectedSurface = openAICompatSurfaceResponses
+		next.targetFormat = sdktranslator.FormatOpenAIResponse
+		next.endpoint = "/responses"
+		next.translated = translated
+		return next, nil, nil
+	case openaiclaude.BackendSurfaceChatCompletions:
+		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, validatedOriginal, stream)
+		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, validatedPayload, stream)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel)
+		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAI.String(), e.Identifier())
+		if err != nil {
+			return openAICompatExecutionPlan{}, nil, err
+		}
+		next.selectedSurface = openAICompatSurfaceChatCompletions
+		next.targetFormat = sdktranslator.FormatOpenAI
+		next.endpoint = "/chat/completions"
+		next.translated = translated
+		return next, nil, nil
+	default:
+		return openAICompatExecutionPlan{}, &openaiclaude.CompatibilityError{
+			Class:   openaiclaude.CompatibilityClassSurfaceNotSupported,
+			Reason:  "unknown_surface",
+			Stage:   "executor",
+			Surface: surface,
+			Message: fmt.Sprintf("Claude-via-GPT routing rejected: unknown backend surface %q.", surface),
+		}, nil
+	}
+}
+
+func (e *OpenAICompatExecutor) translateResponseNonStream(ctx context.Context, plan openAICompatExecutionPlan, from sdktranslator.Format, model string, body []byte) []byte {
+	if plan.routeClass == openAICompatClaudeViaGPTRouteClass && from == sdktranslator.FormatClaude {
+		switch plan.selectedSurface {
+		case openAICompatSurfaceResponses:
+			return adaptOpenAIResponsesNonStreamToClaude(ctx, model, plan.originalPayload, plan.translated, body, nil)
+		case openAICompatSurfaceChatCompletions:
+			return adaptOpenAIChatCompletionsNonStreamToClaude(ctx, model, plan.originalPayload, plan.translated, body, nil)
+		}
+	}
+	var param any
+	return sdktranslator.TranslateNonStream(ctx, plan.targetFormat, from, model, plan.originalPayload, plan.translated, body, &param)
+}
+
+func (e *OpenAICompatExecutor) translateResponseStream(ctx context.Context, plan openAICompatExecutionPlan, from sdktranslator.Format, model string, line []byte, param *any) [][]byte {
+	if plan.routeClass == openAICompatClaudeViaGPTRouteClass && from == sdktranslator.FormatClaude {
+		switch plan.selectedSurface {
+		case openAICompatSurfaceResponses:
+			return adaptOpenAIResponsesStreamChunkToClaude(ctx, model, plan.originalPayload, plan.translated, line, param)
+		case openAICompatSurfaceChatCompletions:
+			return adaptOpenAIChatCompletionsStreamChunkToClaude(ctx, model, plan.originalPayload, plan.translated, line, param)
+		}
+	}
+	return sdktranslator.TranslateStream(ctx, plan.targetFormat, from, model, plan.originalPayload, plan.translated, line, param)
+}
+
+func requestRouteClassFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.RequestRouteMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func (e *OpenAICompatExecutor) selectedProvider(auth *cliproxyauth.Auth) string {
+	if auth != nil && auth.Attributes != nil {
+		if provider := strings.TrimSpace(auth.Attributes["provider_key"]); provider != "" {
+			return provider
+		}
+		if compatName := strings.TrimSpace(auth.Attributes["compat_name"]); compatName != "" {
+			return compatName
+		}
+	}
+	if trimmed := strings.TrimSpace(e.Identifier()); trimmed != "" {
+		return trimmed
+	}
+	if auth != nil {
+		return strings.TrimSpace(auth.Provider)
+	}
+	return ""
+}
+
+func (e *OpenAICompatExecutor) claudeViaGPTCapabilities(auth *cliproxyauth.Auth) openaiclaude.BackendCapabilities {
+	caps := openaiclaude.BackendCapabilities{
+		SupportsChatCompletions: true,
+		SupportsTools:           true,
+		SupportsStreaming:       true,
+	}
+	if auth == nil || auth.Attributes == nil {
+		return caps
+	}
+	if value, ok := parseOptionalBoolAttr(auth.Attributes, "supports_openai_responses"); ok {
+		caps.SupportsOpenAIResponses = value
+	}
+	if value, ok := parseOptionalBoolAttr(auth.Attributes, "supports_chat_completions"); ok {
+		caps.SupportsChatCompletions = value
+	}
+	if value, ok := parseOptionalBoolAttr(auth.Attributes, "supports_tools"); ok {
+		caps.SupportsTools = value
+	}
+	if value, ok := parseOptionalBoolAttr(auth.Attributes, "supports_streaming"); ok {
+		caps.SupportsStreaming = value
+	}
+	return caps
+}
+
+func parseOptionalBoolAttr(attrs map[string]string, key string) (bool, bool) {
+	if len(attrs) == 0 {
+		return false, false
+	}
+	value, ok := attrs[key]
+	if !ok {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func compatibilityStatusErr(err *openaiclaude.CompatibilityError) error {
+	if err == nil {
+		return nil
+	}
+	return statusErr{code: compatibilityStatusCode(err), msg: err.Message}
+}
+
+func compatibilityStatusCode(err *openaiclaude.CompatibilityError) int {
+	if err == nil {
+		return http.StatusBadRequest
+	}
+	switch err.Class {
+	case openaiclaude.CompatibilityClassBackendNotAvailable:
+		return http.StatusServiceUnavailable
+	case openaiclaude.CompatibilityClassTranslationFailed:
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

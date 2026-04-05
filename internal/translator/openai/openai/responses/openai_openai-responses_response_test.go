@@ -303,3 +303,30 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CompletedCarriesStopReason(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_stop_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello","reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`,
+		`data: {"id":"resp_stop_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":"length"}],"usage":{"completion_tokens":10,"total_tokens":20,"prompt_tokens":10}}`,
+	}
+
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var got string
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" {
+			got = data.Get("response.stop_reason").String()
+		}
+	}
+
+	if got != "length" {
+		t.Fatalf("response.completed stop_reason = %q, want %q", got, "length")
+	}
+}

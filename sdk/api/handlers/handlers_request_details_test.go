@@ -100,19 +100,41 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+			details, errMsg := handler.getRequestDetails("", tt.inputModel)
 			if (errMsg != nil) != tt.wantErr {
 				t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
 			}
 			if errMsg != nil {
 				return
 			}
-			if !reflect.DeepEqual(providers, tt.wantProviders) {
-				t.Fatalf("getRequestDetails() providers = %v, want %v", providers, tt.wantProviders)
+			if !reflect.DeepEqual(details.Providers, tt.wantProviders) {
+				t.Fatalf("getRequestDetails() providers = %v, want %v", details.Providers, tt.wantProviders)
 			}
-			if model != tt.wantModel {
-				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
+			if details.NormalizedModel != tt.wantModel {
+				t.Fatalf("getRequestDetails() model = %v, want %v", details.NormalizedModel, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_ClassifiesClaudeViaOpenAICompat(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	details, errMsg := handler.getRequestDetails("claude", "  gpt-5.4-custom  ")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v, want nil", errMsg)
+	}
+
+	if got, want := details.Route, RequestRouteClaudeViaOpenAICompat; got != want {
+		t.Fatalf("getRequestDetails() route = %q, want %q", got, want)
+	}
+	if got, want := details.RequestedModel, "gpt-5.4-custom"; got != want {
+		t.Fatalf("getRequestDetails() requested model = %q, want %q", got, want)
+	}
+	if got, want := details.NormalizedModel, "gpt-5.4-custom"; got != want {
+		t.Fatalf("getRequestDetails() normalized model = %q, want %q", got, want)
+	}
+	if got, want := details.Providers, []string{CodexProvider, OpenAICompatibilityProvider}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", got, want)
 	}
 }

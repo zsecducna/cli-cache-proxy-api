@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -67,11 +69,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
+		h.writeClaudeErrorResponse(c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("Invalid request: %v", err),
 		})
 		return
 	}
@@ -96,11 +96,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
+		h.writeClaudeErrorResponse(c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("Invalid request: %v", err),
 		})
 		return
 	}
@@ -114,7 +112,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 
 	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClaudeErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -165,11 +163,17 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
+	if h.RequestRouteClass(h.HandlerType(), modelName) == "claude_via_openai_compat" {
+		stopKeepAlive()
+		writeClaudeLocalJSONError(c, http.StatusBadRequest, claudeRequestID(c), "non-stream Claude-via-GPT requests are not supported in Phase 1")
+		cliCancel(fmt.Errorf("claude_via_gpt_non_stream_not_supported"))
+		return
+	}
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClaudeErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -282,6 +286,41 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	}
 }
 
+func claudeRequestID(c *gin.Context) string {
+	if requestID := logging.GetGinRequestID(c); requestID != "" {
+		return requestID
+	}
+	if c != nil && c.Request != nil {
+		if requestID := logging.GetRequestID(c.Request.Context()); requestID != "" {
+			logging.SetGinRequestID(c, requestID)
+			return requestID
+		}
+	}
+	requestID := logging.GenerateRequestID()
+	logging.SetGinRequestID(c, requestID)
+	return requestID
+}
+
+func writeClaudeLocalJSONError(c *gin.Context, status int, requestID, message string) {
+	if c == nil {
+		return
+	}
+	body, err := json.Marshal(gin.H{
+		"type":       "error",
+		"request_id": strings.TrimSpace(requestID),
+		"error": gin.H{
+			"type":    "invalid_request_error",
+			"message": message,
+		},
+	})
+	if err != nil {
+		body = []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"invalid request"}}`)
+	}
+	c.Header("Content-Type", "application/json")
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
+}
+
 func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
@@ -317,11 +356,52 @@ type claudeErrorResponse struct {
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	message := http.StatusText(status)
+	if msg != nil && msg.Error != nil && msg.Error.Error() != "" {
+		message = msg.Error.Error()
+	}
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
-			Type:    "api_error",
-			Message: msg.Error.Error(),
+			Type:    claudeErrorType(status),
+			Message: message,
 		},
+	}
+}
+
+func (h *ClaudeCodeAPIHandler) writeClaudeErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	body, err := json.Marshal(h.toClaudeError(msg))
+	if err != nil {
+		body = []byte(`{"type":"error","error":{"type":"api_error","message":"internal error"}}`)
+	}
+	c.Header("Content-Type", "application/json")
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
+}
+
+func claudeErrorType(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case 529:
+		return "overloaded_error"
+	default:
+		return "api_error"
 	}
 }

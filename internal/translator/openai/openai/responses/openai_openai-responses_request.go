@@ -7,6 +7,120 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// LiftOpenAIChatCompletionsRequestToOpenAIResponses converts an OpenAI Chat Completions
+// request into an OpenAI Responses request without registering it as a default translator path.
+// It is intentionally scoped to the Phase 1 Claude-via-GPT supported subset:
+// text-only turns plus tool calls / tool results that preserve ordering.
+func LiftOpenAIChatCompletionsRequestToOpenAIResponses(modelName string, inputRawJSON []byte) []byte {
+	root := gjson.ParseBytes(inputRawJSON)
+	out := []byte(`{"model":"","input":[]}`)
+	out, _ = sjson.SetBytes(out, "model", modelName)
+
+	if v := root.Get("max_tokens"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "max_output_tokens", v.Int())
+	}
+	if v := root.Get("parallel_tool_calls"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "parallel_tool_calls", v.Bool())
+	}
+	if v := root.Get("stream"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "stream", v.Bool())
+	}
+	if v := root.Get("temperature"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "temperature", v.Float())
+	}
+	if v := root.Get("top_p"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "top_p", v.Float())
+	}
+	if v := root.Get("user"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "user", v.Value())
+	}
+	if v := root.Get("reasoning_effort"); v.Exists() {
+		effort := strings.ToLower(strings.TrimSpace(v.String()))
+		if effort != "" {
+			out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
+		}
+	}
+	if v := root.Get("tool_choice"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "tool_choice", v.Value())
+	}
+
+	var instructions []string
+	appendInput := func(raw []byte) {
+		out, _ = sjson.SetRawBytes(out, "input.-1", raw)
+	}
+
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := strings.TrimSpace(message.Get("role").String())
+			if role == "" {
+				return true
+			}
+
+			if role == "system" {
+				if text := collectChatCompletionsMessageText(message.Get("content")); text != "" {
+					instructions = append(instructions, text)
+				}
+				return true
+			}
+
+			if role == "tool" {
+				output := collectToolMessageOutput(message.Get("content"))
+				item := []byte(`{"type":"function_call_output","call_id":"","output":""}`)
+				item, _ = sjson.SetBytes(item, "call_id", message.Get("tool_call_id").String())
+				item, _ = sjson.SetBytes(item, "output", output)
+				appendInput(item)
+				return true
+			}
+
+			if textParts := buildResponsesMessageContent(role, message.Get("content")); len(textParts) > 0 {
+				msg := []byte(`{"type":"message","role":"","content":[]}`)
+				msg, _ = sjson.SetBytes(msg, "role", role)
+				for _, part := range textParts {
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+				}
+				appendInput(msg)
+			}
+
+			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+					item := []byte(`{"type":"function_call","call_id":"","name":"","arguments":""}`)
+					item, _ = sjson.SetBytes(item, "call_id", toolCall.Get("id").String())
+					item, _ = sjson.SetBytes(item, "name", toolCall.Get("function.name").String())
+					item, _ = sjson.SetBytes(item, "arguments", toolCall.Get("function.arguments").String())
+					appendInput(item)
+					return true
+				})
+			}
+
+			return true
+		})
+	}
+
+	if len(instructions) > 0 {
+		out, _ = sjson.SetBytes(out, "instructions", strings.Join(instructions, "\n\n"))
+	}
+
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			function := tool.Get("function")
+			if !function.Exists() {
+				return true
+			}
+
+			respTool := []byte(`{"type":"function","name":"","description":"","parameters":{}}`)
+			respTool, _ = sjson.SetBytes(respTool, "name", function.Get("name").String())
+			respTool, _ = sjson.SetBytes(respTool, "description", function.Get("description").String())
+			if parameters := function.Get("parameters"); parameters.Exists() {
+				respTool, _ = sjson.SetRawBytes(respTool, "parameters", []byte(parameters.Raw))
+			}
+			out, _ = sjson.SetRawBytes(out, "tools.-1", respTool)
+			return true
+		})
+	}
+
+	return out
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -211,4 +325,98 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func collectChatCompletionsMessageText(content gjson.Result) string {
+	if !content.Exists() {
+		return ""
+	}
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if !content.IsArray() {
+		return ""
+	}
+
+	var parts []string
+	content.ForEach(func(_, item gjson.Result) bool {
+		text := strings.TrimSpace(item.Get("text").String())
+		if text != "" {
+			parts = append(parts, text)
+		}
+		return true
+	})
+	return strings.Join(parts, "\n\n")
+}
+
+func buildResponsesMessageContent(role string, content gjson.Result) [][]byte {
+	partType := "input_text"
+	if role == "assistant" {
+		partType = "output_text"
+	}
+
+	var parts [][]byte
+	appendText := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		part := []byte(`{"type":"","text":""}`)
+		part, _ = sjson.SetBytes(part, "type", partType)
+		part, _ = sjson.SetBytes(part, "text", text)
+		parts = append(parts, part)
+	}
+
+	if !content.Exists() {
+		return parts
+	}
+	if content.Type == gjson.String {
+		appendText(content.String())
+		return parts
+	}
+	if !content.IsArray() {
+		return parts
+	}
+
+	content.ForEach(func(_, item gjson.Result) bool {
+		switch {
+		case item.Type == gjson.String:
+			appendText(item.String())
+		case item.Get("type").String() == "text":
+			appendText(item.Get("text").String())
+		}
+		return true
+	})
+	return parts
+}
+
+func collectToolMessageOutput(content gjson.Result) string {
+	if !content.Exists() {
+		return ""
+	}
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		var parts []string
+		content.ForEach(func(_, item gjson.Result) bool {
+			switch {
+			case item.Type == gjson.String:
+				parts = append(parts, item.String())
+			case item.Get("type").String() == "text":
+				parts = append(parts, item.Get("text").String())
+			default:
+				parts = append(parts, item.Raw)
+			}
+			return true
+		})
+		return strings.Join(parts, "\n\n")
+	}
+	if content.IsObject() {
+		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
+			return text.String()
+		}
+		return content.Raw
+	}
+	return content.String()
 }

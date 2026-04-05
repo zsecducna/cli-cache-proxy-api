@@ -51,6 +51,7 @@ type oaiToResponsesState struct {
 	TotalTokens      int64
 	ReasoningTokens  int64
 	UsageSeen        bool
+	StopReason       string
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -165,6 +166,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
+		st.StopReason = ""
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -377,6 +379,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			// finish_reason triggers finalization, including text done/content done/item done,
 			// reasoning done/part.done, function args done/item done, and completed
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
+				st.StopReason = fr.String()
 				// Emit message done events for all indices that started a message
 				if len(st.MsgItemAdded) > 0 {
 					// sort indices for deterministic order
@@ -468,6 +471,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 				completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 				completed, _ = sjson.SetBytes(completed, "response.created_at", st.Created)
+				if st.StopReason != "" {
+					completed, _ = sjson.SetBytes(completed, "response.stop_reason", st.StopReason)
+				}
 				// Inject original request fields into response as per docs/response.completed.json
 				if requestRawJSON != nil {
 					req := gjson.ParseBytes(requestRawJSON)

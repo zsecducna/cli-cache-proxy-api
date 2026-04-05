@@ -108,13 +108,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 		p := (*param).(*ConvertCodexResponseToClaudeParams).HasToolCall
 		stopReason := rootResult.Get("response.stop_reason").String()
-		if p {
-			template, _ = sjson.SetBytes(template, "delta.stop_reason", "tool_use")
-		} else if stopReason == "max_tokens" || stopReason == "stop" {
-			template, _ = sjson.SetBytes(template, "delta.stop_reason", stopReason)
-		} else {
-			template, _ = sjson.SetBytes(template, "delta.stop_reason", "end_turn")
-		}
+		template, _ = sjson.SetBytes(template, "delta.stop_reason", mapResponsesStopReasonToClaude(stopReason, p))
 		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(rootResult.Get("response.usage"))
 		template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
 		template, _ = sjson.SetBytes(template, "usage.output_tokens", outputTokens)
@@ -312,13 +306,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		})
 	}
 
-	if stopReason := responseData.Get("stop_reason"); stopReason.Exists() && stopReason.String() != "" {
-		out, _ = sjson.SetBytes(out, "stop_reason", stopReason.String())
-	} else if hasToolCall {
-		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
-	} else {
-		out, _ = sjson.SetBytes(out, "stop_reason", "end_turn")
-	}
+	out, _ = sjson.SetBytes(out, "stop_reason", mapResponsesStopReasonToClaude(responseData.Get("stop_reason").String(), hasToolCall))
 
 	if stopSequence := responseData.Get("stop_sequence"); stopSequence.Exists() && stopSequence.String() != "" {
 		out, _ = sjson.SetRawBytes(out, "stop_sequence", []byte(stopSequence.Raw))
@@ -345,6 +333,23 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	}
 
 	return inputTokens, outputTokens, cachedTokens
+}
+
+func mapResponsesStopReasonToClaude(stopReason string, hasToolCall bool) string {
+	if hasToolCall {
+		return "tool_use"
+	}
+
+	switch strings.TrimSpace(stopReason) {
+	case "tool_use", "tool_calls", "function_call":
+		return "tool_use"
+	case "length", "max_tokens":
+		return "max_tokens"
+	case "stop", "end_turn", "":
+		return "end_turn"
+	default:
+		return "end_turn"
+	}
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

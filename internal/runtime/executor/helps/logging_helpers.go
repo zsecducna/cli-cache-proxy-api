@@ -29,15 +29,20 @@ const (
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
 type UpstreamRequestLog struct {
-	URL       string
-	Method    string
-	Headers   http.Header
-	Body      []byte
-	Provider  string
-	AuthID    string
-	AuthLabel string
-	AuthType  string
-	AuthValue string
+	URL              string
+	Method           string
+	Headers          http.Header
+	Body             []byte
+	Provider         string
+	AuthID           string
+	AuthLabel        string
+	AuthType         string
+	AuthValue        string
+	RouteClass       string
+	SelectedProvider string
+	SelectedSurface  string
+	ValidationReason string
+	SkipReason       string
 }
 
 type upstreamAttempt struct {
@@ -88,6 +93,11 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 	if auth := formatAuthInfo(info); auth != "" {
 		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
+	}
+	if routing := formatRoutingInfo(info); routing != "" {
+		builder.WriteString("Routing:\n")
+		builder.WriteString(routing)
+		builder.WriteString("\n")
 	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
@@ -633,6 +643,26 @@ func formatAuthInfo(info UpstreamRequestLog) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+func formatRoutingInfo(info UpstreamRequestLog) string {
+	lines := make([]string, 0, 5)
+	if trimmed := strings.TrimSpace(info.RouteClass); trimmed != "" {
+		lines = append(lines, "route_class: "+trimmed)
+	}
+	if trimmed := strings.TrimSpace(info.SelectedProvider); trimmed != "" {
+		lines = append(lines, "selected_provider: "+trimmed)
+	}
+	if trimmed := strings.TrimSpace(info.SelectedSurface); trimmed != "" {
+		lines = append(lines, "selected_surface: "+trimmed)
+	}
+	if trimmed := strings.TrimSpace(info.ValidationReason); trimmed != "" {
+		lines = append(lines, "validation_reason: "+trimmed)
+	}
+	if trimmed := strings.TrimSpace(info.SkipReason); trimmed != "" {
+		lines = append(lines, "skip_reason: "+trimmed)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func SummarizeErrorBody(contentType string, body []byte) string {

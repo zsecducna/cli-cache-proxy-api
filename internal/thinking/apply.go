@@ -118,13 +118,13 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
 	}
 	if modelInfo.Thinking == nil {
-		config := extractThinkingConfig(body, providerFormat)
+		config := extractThinkingConfigForFormats(body, fromFormat, providerFormat)
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"model":    baseModel,
 				"provider": providerFormat,
 			}).Debug("thinking: model does not support thinking, stripping config |")
-			return StripThinkingConfig(body, providerFormat), nil
+			return stripThinkingConfigForFormats(body, fromFormat, providerFormat), nil
 		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -145,7 +145,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"level":    config.Level,
 		}).Debug("thinking: config from model suffix |")
 	} else {
-		config = extractThinkingConfig(body, providerFormat)
+		config = extractThinkingConfigForFormats(body, fromFormat, providerFormat)
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
@@ -197,6 +197,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
+	body = stripThinkingConfigForFormats(body, fromFormat, providerFormat)
 	return applier.Apply(body, *validated, modelInfo)
 }
 
@@ -257,10 +258,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, toFormat, modelID)
 	} else {
-		config = extractThinkingConfig(body, fromFormat)
-		if !hasThinkingConfig(config) && fromFormat != toFormat {
-			config = extractThinkingConfig(body, toFormat)
-		}
+		config = extractThinkingConfigForFormats(body, fromFormat, toFormat)
 	}
 
 	if !hasThinkingConfig(config) {
@@ -289,6 +287,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	}).Debug("thinking: applying config for user-defined model (skip validation)")
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	body = stripThinkingConfigForFormats(body, fromFormat, toFormat)
 	return applier.Apply(body, config, modelInfo)
 }
 
@@ -343,6 +342,36 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 
 func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
+}
+
+func extractThinkingConfigForFormats(body []byte, fromFormat, toFormat string) ThinkingConfig {
+	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
+	toFormat = strings.ToLower(strings.TrimSpace(toFormat))
+
+	if config := extractThinkingConfig(body, fromFormat); hasThinkingConfig(config) {
+		return config
+	}
+	if toFormat != "" && toFormat != fromFormat {
+		return extractThinkingConfig(body, toFormat)
+	}
+	return ThinkingConfig{}
+}
+
+func stripThinkingConfigForFormats(body []byte, formats ...string) []byte {
+	result := body
+	seen := make(map[string]struct{}, len(formats))
+	for _, format := range formats {
+		key := strings.ToLower(strings.TrimSpace(format))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = StripThinkingConfig(result, key)
+	}
+	return result
 }
 
 // extractClaudeConfig extracts thinking configuration from Claude format request body.

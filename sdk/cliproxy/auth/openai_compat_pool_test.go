@@ -210,6 +210,14 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 	return string(payload)
 }
 
+func claudeViaGPTRouteOptions() cliproxyexecutor.Options {
+	return cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	}
+}
+
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
@@ -231,6 +239,92 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 		t.Fatalf("count calls = %v, want only first invalid model", got)
 	}
 }
+
+func TestManagerExecute_ClaudeViaGPTRouteReturnsModelNotSupported(t *testing.T) {
+	alias := "gpt-5.4-custom"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id: "pool",
+		executeErrors: map[string]error{
+			"qwen3.5-plus": modelSupportErr,
+			"glm-5":        modelSupportErr,
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, claudeViaGPTRouteOptions())
+	if err == nil {
+		t.Fatal("expected Claude-via-GPT model-not-supported error")
+	}
+	authErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if authErr.Code != "claude_via_gpt_model_not_supported" {
+		t.Fatalf("error code = %q, want %q", authErr.Code, "claude_via_gpt_model_not_supported")
+	}
+	if got := executor.ExecuteModels(); len(got) != 2 || got[0] != "qwen3.5-plus" || got[1] != "glm-5" {
+		t.Fatalf("execute calls = %v, want both upstream candidates attempted", got)
+	}
+}
+
+func TestManagerExecute_ClaudeViaGPTRouteReturnsModelNotSupportedForSuspendedCandidates(t *testing.T) {
+	alias := "gpt-5.4-custom"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, &openAICompatPoolExecutor{id: "pool"})
+
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	for _, upstreamModel := range []string{"qwen3.5-plus", "glm-5"} {
+		m.MarkResult(context.Background(), Result{
+			AuthID:   "pool-auth-" + t.Name(),
+			Provider: "pool",
+			Model:    upstreamModel,
+			Success:  false,
+			Error:    modelSupportErr,
+		})
+	}
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, claudeViaGPTRouteOptions())
+	if err == nil {
+		t.Fatal("expected Claude-via-GPT model-not-supported error")
+	}
+	authErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if authErr.Code != "claude_via_gpt_model_not_supported" {
+		t.Fatalf("error code = %q, want %q", authErr.Code, "claude_via_gpt_model_not_supported")
+	}
+}
+
+func TestManagerExecute_ClaudeViaGPTRouteReturnsBackendNotAvailable(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(&openAICompatPoolExecutor{id: "pool"})
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: "gpt-5.4-custom"}, claudeViaGPTRouteOptions())
+	if err == nil {
+		t.Fatal("expected Claude-via-GPT backend-not-available error")
+	}
+	authErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if authErr.Code != "claude_via_gpt_backend_not_available" {
+		t.Fatalf("error code = %q, want %q", authErr.Code, "claude_via_gpt_backend_not_available")
+	}
+}
+
 func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	models := []modelAliasEntry{
 		internalconfig.OpenAICompatibilityModel{Name: "qwen3.5-plus", Alias: "claude-opus-4.66"},
