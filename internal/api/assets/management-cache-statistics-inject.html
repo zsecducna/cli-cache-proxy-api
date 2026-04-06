@@ -611,12 +611,22 @@
               <th>Input Tokens</th>
               <th>Output Tokens</th>
               <th>Reasoning Tokens</th>
-              <th>Cached Tokens</th>
-              <th>Total Tokens</th>
+              <th>Cache Read</th>
+              <th>Cache Write</th>
+              <th>Total Input</th>
             </tr>
           </thead>
           <tbody>
-            ${requests.length ? requests.map((item) => `
+            ${requests.length ? requests.map((item) => {
+              const anthropicCacheRead = Number(item.anthropic_cache_read_input_tokens || 0);
+              const anthropicCacheWrite = Number(item.anthropic_cache_creation_input_tokens || 0);
+              const isAnthropicRow = item.anthropic_rewrite_applied || anthropicCacheRead > 0 || anthropicCacheWrite > 0;
+              const cacheRead = isAnthropicRow ? anthropicCacheRead : Number(item.cached_tokens || 0);
+              const cacheWrite = isAnthropicRow ? anthropicCacheWrite : 0;
+              const totalInput = isAnthropicRow
+                ? Number(item.input_tokens || 0) + anthropicCacheRead + anthropicCacheWrite
+                : Number(item.total_tokens || 0);
+              return `
               <tr>
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
                 <td>${escapeHTML(item.model || '')}</td>
@@ -624,12 +634,13 @@
                 <td>${escapeHTML(formatInteger(item.input_tokens))}</td>
                 <td>${escapeHTML(formatInteger(item.output_tokens))}</td>
                 <td>${escapeHTML(formatInteger(item.reasoning_tokens))}</td>
-                <td>${escapeHTML(formatInteger(item.cached_tokens))}</td>
-                <td>${escapeHTML(formatInteger(item.total_tokens))}</td>
+                <td>${escapeHTML(formatInteger(cacheRead))}</td>
+                <td>${escapeHTML(formatInteger(cacheWrite))}</td>
+                <td>${escapeHTML(formatInteger(totalInput))}</td>
               </tr>
-            `).join('') : `
+            `}).join('') : `
               <tr>
-                <td colspan="8" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+                <td colspan="9" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
               </tr>
             `}
           </tbody>

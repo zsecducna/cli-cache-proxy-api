@@ -208,6 +208,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "Service Health") || !strings.Contains(body, "Cached Tokens") || !strings.Contains(body, "Reasoning Effort") {
 		t.Fatalf("management page missing usage/request-events labels: %s", body)
 	}
+	if !strings.Contains(body, "Cache Read") || !strings.Contains(body, "Cache Write") || !strings.Contains(body, "Total Input") || !strings.Contains(body, "anthropic_cache_read_input_tokens") || !strings.Contains(body, "anthropic_cache_creation_input_tokens") {
+		t.Fatalf("management page missing anthropic cache accounting labels/fields: %s", body)
+	}
 	if strings.Contains(body, "cliproxy-cache-stats-inline-host") {
 		t.Fatalf("management page should not include the removed inline host: %s", body)
 	}
