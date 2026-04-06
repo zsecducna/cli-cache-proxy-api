@@ -60,6 +60,11 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
+	if !filepath.IsAbs(logsDir) {
+		if wd, err := os.Getwd(); err == nil {
+			logsDir = filepath.Join(wd, logsDir)
+		}
+	}
 	return logging.NewFileRequestLogger(config.EffectiveRequestLogEnabled(cfg), logsDir, configDir, cfg.ErrorLogsMaxFiles)
 }
 

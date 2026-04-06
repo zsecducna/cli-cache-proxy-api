@@ -633,3 +633,112 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultRequestLoggerFactory_KeepsWritableRepoLogsDirectory(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	tmpDir := t.TempDir()
+	if errChdir := os.Chdir(tmpDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	repoLogsDir := filepath.Join(tmpDir, "logs")
+	if errMkdirLogs := os.MkdirAll(repoLogsDir, 0o755); errMkdirLogs != nil {
+		t.Fatalf("failed to create repo logs dir: %v", errMkdirLogs)
+	}
+
+	configDir := filepath.Join(tmpDir, "config")
+	if errMkdirConfig := os.MkdirAll(configDir, 0o755); errMkdirConfig != nil {
+		t.Fatalf("failed to create config dir: %v", errMkdirConfig)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdirAuth := os.MkdirAll(authDir, 0o700); errMkdirAuth != nil {
+		t.Fatalf("failed to create auth dir: %v", errMkdirAuth)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: proxyconfig.SDKConfig{
+			RequestLog: false,
+		},
+		AuthDir:           authDir,
+		ErrorLogsMaxFiles: 10,
+	}
+
+	logger := defaultRequestLoggerFactory(cfg, configPath)
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+
+	errLog := fileLogger.LogRequestWithOptions(
+		"/v1/messages",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusBadGateway,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"error":"upstream failure"}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		true,
+		"repo-logs",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("failed to write forced error request log: %v", errLog)
+	}
+
+	repoEntries, errReadRepoDir := os.ReadDir(repoLogsDir)
+	if errReadRepoDir != nil {
+		t.Fatalf("failed to read repo logs dir %s: %v", repoLogsDir, errReadRepoDir)
+	}
+	foundErrorLogInRepoDir := false
+	for _, entry := range repoEntries {
+		if strings.HasPrefix(entry.Name(), "error-v1-messages-") && strings.HasSuffix(entry.Name(), ".log") {
+			foundErrorLogInRepoDir = true
+			break
+		}
+	}
+	if !foundErrorLogInRepoDir {
+		t.Fatalf("expected forced error log in repo logs dir %s, got entries: %+v", repoLogsDir, repoEntries)
+	}
+
+	configLogsDir := filepath.Join(configDir, "logs")
+	configEntries, errReadConfigDir := os.ReadDir(configLogsDir)
+	if errReadConfigDir != nil && !os.IsNotExist(errReadConfigDir) {
+		t.Fatalf("failed to inspect config logs dir %s: %v", configLogsDir, errReadConfigDir)
+	}
+	for _, entry := range configEntries {
+		if strings.HasPrefix(entry.Name(), "error-v1-messages-") && strings.HasSuffix(entry.Name(), ".log") {
+			t.Fatalf("unexpected forced error log in config logs dir %s", configLogsDir)
+		}
+	}
+
+	authLogsDir := filepath.Join(authDir, "logs")
+	authEntries, errReadAuthDir := os.ReadDir(authLogsDir)
+	if errReadAuthDir != nil && !os.IsNotExist(errReadAuthDir) {
+		t.Fatalf("failed to inspect auth logs dir %s: %v", authLogsDir, errReadAuthDir)
+	}
+	for _, entry := range authEntries {
+		if strings.HasPrefix(entry.Name(), "error-v1-messages-") && strings.HasSuffix(entry.Name(), ".log") {
+			t.Fatalf("unexpected forced error log in auth logs dir %s", authLogsDir)
+		}
+	}
+}

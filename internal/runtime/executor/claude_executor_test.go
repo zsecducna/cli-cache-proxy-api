@@ -107,6 +107,33 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_StripsContext1MBetaWithoutExplicitOptIn(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	auth := &cliproxyauth.Auth{
+		ID: "auth-strip-context-1m",
+		Attributes: map[string]string{
+			"api_key": "key-strip-context-1m",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"Anthropic-Beta": []string{"claude-code-20250219,context-1m-2025-08-07,context-management-2025-06-27"},
+	})
+	applyClaudeHeaders(req, auth, "key-strip-context-1m", false, nil, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	if strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, expected context-1m-2025-08-07 to be stripped without explicit opt-in", got)
+	}
+	if !strings.Contains(got, "claude-code-20250219") {
+		t.Fatalf("Anthropic-Beta = %q, expected base Claude beta to remain", got)
+	}
+	if !strings.Contains(got, "context-management-2025-06-27") {
+		t.Fatalf("Anthropic-Beta = %q, expected unrelated beta to remain", got)
+	}
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
