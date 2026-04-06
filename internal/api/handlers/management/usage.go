@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,8 +22,9 @@ type usageImportPayload struct {
 }
 
 func (h *Handler) currentUsageSnapshot(ctx *gin.Context) usage.StatisticsSnapshot {
+	provider := strings.TrimSpace(ctx.Query("provider"))
 	if store := usage.GetCacheStatisticsStore(); store != nil {
-		if snapshot, err := store.StatisticsSnapshot(ctx.Request.Context()); err == nil {
+		if snapshot, err := store.StatisticsSnapshotByProvider(ctx.Request.Context(), provider); err == nil {
 			return snapshot
 		}
 	}

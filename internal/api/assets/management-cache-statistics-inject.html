@@ -32,6 +32,9 @@
 
   let managementAuthorization = '';
   let nativeFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+  const AUTH_STORAGE_KEY = 'managementKey';
+  const SESSION_AUTH_STORAGE_KEY = 'cliproxy-management-key-v1';
+  const API_BASE_STORAGE_KEYS = ['apiBase', 'apiUrl'];
   let usageTimer = null;
   let usageRefreshRetryTimer = null;
   let quotaTimer = null;
@@ -297,27 +300,149 @@
     return '';
   }
 
+  function decodeStoredAuthValue(value) {
+    if (!value) return '';
+    const prefix = 'enc::v1::';
+    if (!String(value).startsWith(prefix)) return String(value);
+    try {
+      const host = window.location.host;
+      const userAgent = navigator.userAgent;
+      const keySource = `cli-proxy-api-webui::secure-storage|${host}|${userAgent}`;
+      const keyBytes = new TextEncoder().encode(keySource);
+      const encoded = String(value).slice(prefix.length);
+      const raw = atob(encoded);
+      const data = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 1) data[i] = raw.charCodeAt(i);
+      for (let i = 0; i < data.length; i += 1) data[i] = data[i] ^ keyBytes[i % keyBytes.length];
+      return new TextDecoder().decode(data);
+    } catch {
+      return '';
+    }
+  }
+
+  function readStoredJSONValue(key) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) return null;
+      const decoded = decodeStoredAuthValue(raw);
+      return JSON.parse(decoded);
+    } catch {
+      return null;
+    }
+  }
+
+  function readStoredStringValue(key) {
+    const parsed = readStoredJSONValue(key);
+    if (typeof parsed === 'string') return parsed.trim();
+    return '';
+  }
+
+  function writeSessionManagementKey(authKey) {
+    try {
+      const value = String(authKey || '').trim();
+      if (!value) {
+        window.sessionStorage.removeItem(SESSION_AUTH_STORAGE_KEY);
+        return;
+      }
+      window.sessionStorage.setItem('cliproxy-management-key-v1', JSON.stringify(value));
+    } catch {}
+  }
+
+  function readSessionManagementKey() {
+    try {
+      const raw = window.sessionStorage.getItem(SESSION_AUTH_STORAGE_KEY);
+      if (!raw) return '';
+      const parsed = JSON.parse(raw);
+      return typeof parsed === 'string' ? parsed.trim() : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function readStoredManagementAuthorization() {
+    const authKey = readSessionManagementKey() || readStoredStringValue(AUTH_STORAGE_KEY);
+    if (!authKey) return '';
+    return `Bearer ${authKey}`;
+  }
+
+  function captureManagementAuthFromLoginPage() {
+    const input = document.querySelector('input[type="password"], input[name="managementKey"], input[id="managementKey"]');
+    if (!(input instanceof HTMLInputElement)) return;
+    const persist = () => {
+      const value = String(input.value || '').trim();
+      if (!value) return;
+      writeSessionManagementKey(value);
+      managementAuthorization = `Bearer ${value}`;
+    };
+    if (input.dataset.cliproxyCaptureInstalled !== 'true') {
+      input.dataset.cliproxyCaptureInstalled = 'true';
+      input.addEventListener('input', persist);
+      input.addEventListener('change', persist);
+    }
+    const form = input.form || input.closest('form');
+    if (form instanceof HTMLFormElement && form.dataset.cliproxyCaptureInstalled !== 'true') {
+      form.dataset.cliproxyCaptureInstalled = 'true';
+      form.addEventListener('submit', persist);
+    }
+    persist();
+  }
+
   function captureManagementAuthorization(urlLike, headers) {
     if (!sameOriginManagementURL(urlLike)) return;
     const auth = getHeaderValue(headers, 'authorization');
     if (auth && auth.startsWith('Bearer ')) {
       managementAuthorization = auth;
+      writeSessionManagementKey(auth.slice('Bearer '.length));
+    }
+  }
+
+  function getUsageProviderFilter() {
+    const select = document.querySelector('#cliproxy-usage-provider-filter');
+    if (!(select instanceof HTMLSelectElement)) return '';
+    return String(select.value || '').trim();
+  }
+
+  function appendUsageProviderFilter(urlLike) {
+    try {
+      const url = new URL(urlLike, window.location.origin);
+      if (!isUsageRoute() || url.origin !== window.location.origin || url.pathname !== '/v0/management/usage') {
+        return urlLike;
+      }
+      const provider = getUsageProviderFilter();
+      if (provider) {
+        url.searchParams.set('provider', provider);
+      } else {
+        url.searchParams.delete('provider');
+      }
+      return url.toString();
+    } catch {
+      return urlLike;
     }
   }
 
   function patchFetch() {
     if (!nativeFetch) return;
     window.fetch = async function patchedFetch(input, init) {
+      let nextInput = input;
       try {
+        const originalURL = typeof input === 'string' ? input : (input && input.url) || '';
+        const rewrittenURL = appendUsageProviderFilter(originalURL);
         if (typeof Request !== 'undefined' && input instanceof Request) {
-          captureManagementAuthorization(input.url, input.headers);
+          if (rewrittenURL && rewrittenURL !== input.url) {
+            nextInput = new Request(rewrittenURL, input);
+          }
+          captureManagementAuthorization(nextInput.url, nextInput.headers);
+        } else {
+          if (typeof input === 'string') {
+            nextInput = rewrittenURL;
+          }
+          captureManagementAuthorization(
+            rewrittenURL,
+            (init && init.headers) || (input && input.headers) || null,
+          );
         }
-        captureManagementAuthorization(
-          typeof input === 'string' ? input : (input && input.url) || '',
-          (init && init.headers) || (input && input.headers) || null,
-        );
       } catch {}
-      return nativeFetch(input, init);
+      return nativeFetch(nextInput, init);
     };
   }
 
@@ -326,9 +451,12 @@
     const open = XMLHttpRequest.prototype.open;
     const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
     XMLHttpRequest.prototype.open = function patchedOpen(method, url) {
-      this.__cliproxyURL = url;
+      const rewrittenURL = appendUsageProviderFilter(url);
+      this.__cliproxyURL = rewrittenURL;
       this.__cliproxyHeaders = {};
-      return open.apply(this, arguments);
+      const args = Array.from(arguments);
+      args[1] = rewrittenURL;
+      return open.apply(this, args);
     };
     XMLHttpRequest.prototype.setRequestHeader = function patchedSetRequestHeader(name, value) {
       try {
@@ -363,6 +491,10 @@
   }
 
   async function ensureManagementAuth() {
+    captureManagementAuthFromLoginPage();
+    if (!managementAuthorization) {
+      managementAuthorization = readStoredManagementAuthorization();
+    }
     if (managementAuthorization) return true;
     if (authPrimePromise) return authPrimePromise;
     authPrimePromise = (async () => {
@@ -375,6 +507,9 @@
       }
       const deadline = Date.now() + 3000;
       while (!managementAuthorization && Date.now() < deadline) {
+        captureManagementAuthFromLoginPage();
+        managementAuthorization = readStoredManagementAuthorization() || managementAuthorization;
+        if (managementAuthorization) break;
         await wait(100);
       }
       return !!managementAuthorization;
@@ -1011,6 +1146,7 @@
   }
 
   installStyles();
+  captureManagementAuthFromLoginPage();
   patchFetch();
   patchXHR();
   window.addEventListener('hashchange', syncRouteSoon);

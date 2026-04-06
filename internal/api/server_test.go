@@ -219,17 +219,20 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if strings.Contains(body, "Total Input") {
 		t.Fatalf("management page should not render the removed Total Input column: %s", body)
 	}
-	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI Compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") {
-		t.Fatalf("management page missing provider filter controls/options: %s", body)
+	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI Compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") || !strings.Contains(body, "function getUsageProviderFilter()") || !strings.Contains(body, "appendUsageProviderFilter") {
+		t.Fatalf("management page missing provider filter controls/options and usage request rewrite: %s", body)
 	}
 	if !strings.Contains(body, "const sameFilter = lastUsageStatisticsProvider === getUsageProviderFilter();") || !strings.Contains(body, "lastUsageStatisticsProvider = getUsageProviderFilter();") {
 		t.Fatalf("management page should invalidate cached usage stats when provider filter changes: %s", body)
 	}
+	if !strings.Contains(body, "readStoredManagementAuthorization") || !strings.Contains(body, "captureManagementAuthFromLoginPage") || !strings.Contains(body, "sessionStorage.setItem('cliproxy-management-key-v1'") {
+		t.Fatalf("management page should persist the login key for same-tab usage stats requests when request sniffing does not capture Authorization headers: %s", body)
+	}
 	if strings.Contains(body, "cliproxy-cache-stats-inline-host") {
 		t.Fatalf("management page should not include the removed inline host: %s", body)
 	}
-	if strings.Contains(body, "Prompt Cache Statistics") || strings.Contains(body, "Open Cache Statistics") || strings.Contains(body, "managementKey") {
-		t.Fatalf("management page should not include the legacy overlay launcher or management key field: %s", body)
+	if strings.Contains(body, "Prompt Cache Statistics") || strings.Contains(body, "Open Cache Statistics") {
+		t.Fatalf("management page should not include the legacy overlay launcher: %s", body)
 	}
 	if strings.Contains(body, "requestBlock.innerHTML") || strings.Contains(body, "removeChild(node)") {
 		t.Fatalf("management enhancer should not mutate React-owned DOM unsafely: %s", body)
@@ -549,20 +552,28 @@ func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
-	req.Header.Set("Authorization", "Bearer test-secret")
-	rr := httptest.NewRecorder()
-	server.engine.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
-	}
-	var payload struct {
+	decodeUsage := func(path string) struct {
 		Usage          usage.StatisticsSnapshot `json:"usage"`
 		FailedRequests int64                    `json:"failed_requests"`
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-secret")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", path, rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var payload struct {
+			Usage          usage.StatisticsSnapshot `json:"usage"`
+			FailedRequests int64                    `json:"failed_requests"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response for %s: %v", path, err)
+		}
+		return payload
 	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+
+	payload := decodeUsage("/v0/management/usage")
 	if payload.Usage.TotalRequests != 2 {
 		t.Fatalf("total_requests = %d, want 2", payload.Usage.TotalRequests)
 	}
@@ -589,6 +600,14 @@ func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
 	dayKey := now.Format("2006-01-02")
 	if payload.Usage.RequestsByDay[dayKey] != 2 {
 		t.Fatalf("requests_by_day[%q] = %d, want 2", dayKey, payload.Usage.RequestsByDay[dayKey])
+	}
+
+	filtered := decodeUsage("/v0/management/usage?provider=claude")
+	if filtered.Usage.TotalRequests != 0 || filtered.Usage.TotalTokens != 0 || filtered.FailedRequests != 0 {
+		t.Fatalf("filtered usage = %+v, want empty snapshot for unmatched provider", filtered)
+	}
+	if len(filtered.Usage.APIs) != 0 {
+		t.Fatalf("filtered apis len = %d, want 0", len(filtered.Usage.APIs))
 	}
 }
 

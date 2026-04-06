@@ -435,6 +435,10 @@ func snapshotSince(days int) string {
 }
 
 func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
+	return s.StatisticsSnapshotByProvider(ctx, "")
+}
+
+func (s *CacheStatisticsStore) StatisticsSnapshotByProvider(ctx context.Context, provider string) (StatisticsSnapshot, error) {
 	result := StatisticsSnapshot{
 		APIs:           make(map[string]APISnapshot),
 		RequestsByDay:  make(map[string]int64),
@@ -449,7 +453,7 @@ func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (Statisti
 		return result, nil
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 SELECT
     requested_at,
     provider,
@@ -471,7 +475,13 @@ SELECT
     anthropic_cache_creation_input_tokens,
     anthropic_cache_read_input_tokens
 FROM cache_statistics_requests
-ORDER BY requested_at ASC, id ASC`)
+WHERE 1 = 1`
+	args := []any{}
+	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query += `
+ORDER BY requested_at ASC, id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return result, fmt.Errorf("cache statistics store: usage snapshot query: %w", err)
 	}
