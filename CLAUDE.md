@@ -8,7 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `go build -o ./cli-caching-proxy-test ./cmd/server` - build the main server binary used in the README local workflow.
 - `./cli-caching-proxy-test` - run the proxy locally.
 - `docker compose up -d --build` - run the proxy via Docker Compose.
-- `./install.sh` - guided macOS service install.
+- `./install_mac.sh` - guided macOS service install.
+- `./install_linux.sh` - guided Linux user-service install.
+- `pwsh -File .\\install_windows.ps1` - guided Windows install.
 - `go test ./...` - run the full Go test suite.
 - `go test ./path/to/package` - run tests for a single package.
 - `go test ./path/to/package -run '^TestName$'` - run a single Go test.

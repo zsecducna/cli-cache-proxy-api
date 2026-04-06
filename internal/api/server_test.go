@@ -762,6 +762,57 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 }
 
+func TestInstallerPlatformEntryPointsExist(t *testing.T) {
+	_, filePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test file path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", ".."))
+
+	for _, rel := range []string{"install_mac.sh", "install_linux.sh", "install_windows.ps1"} {
+		if _, err := os.Stat(filepath.Join(repoRoot, rel)); err != nil {
+			t.Fatalf("expected %s to exist: %v", rel, err)
+		}
+	}
+
+	shimBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_mac.sh"))
+	if err != nil {
+		t.Fatalf("failed to read installer script: %v", err)
+	}
+	if !strings.Contains(string(shimBytes), "install_mac.sh") {
+		t.Fatalf("expected install.sh compatibility shim to delegate to install_mac.sh")
+	}
+}
+
+func TestInstallerPlatformScriptsContainExpectedServiceSetup(t *testing.T) {
+	_, filePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test file path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", ".."))
+
+	linuxBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_linux.sh"))
+	if err != nil {
+		t.Fatalf("failed to read install_linux.sh: %v", err)
+	}
+	linuxBody := string(linuxBytes)
+	if !strings.Contains(linuxBody, "systemctl --user") {
+		t.Fatalf("expected install_linux.sh to use systemctl --user")
+	}
+	if strings.Contains(linuxBody, "launchctl") {
+		t.Fatalf("install_linux.sh should not reference launchctl")
+	}
+
+	windowsBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_windows.ps1"))
+	if err != nil {
+		t.Fatalf("failed to read install_windows.ps1: %v", err)
+	}
+	windowsBody := string(windowsBytes)
+	if !strings.Contains(windowsBody, "Register-ScheduledTask") || !strings.Contains(windowsBody, "Start-ScheduledTask") {
+		t.Fatalf("expected install_windows.ps1 to manage a scheduled task")
+	}
+}
+
 func TestInstallScriptRefusesSkipBuildWhenExistingBinaryWouldHideSourceChanges(t *testing.T) {
 	_, filePath, _, ok := runtime.Caller(0)
 	if !ok {
@@ -778,9 +829,9 @@ func TestInstallScriptRefusesSkipBuildWhenExistingBinaryWouldHideSourceChanges(t
 		t.Fatalf("failed to seed existing binary: %v", err)
 	}
 
-	scriptBytes, err := os.ReadFile(filepath.Join(repoRoot, "install.sh"))
+	scriptBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_mac.sh"))
 	if err != nil {
-		t.Fatalf("failed to read install.sh: %v", err)
+		t.Fatalf("failed to read installer script: %v", err)
 	}
 	scriptBody := strings.TrimSuffix(string(scriptBytes), "main \"$@\"\n")
 	scriptBody = strings.TrimSuffix(scriptBody, "main \"$@\"")
@@ -817,7 +868,7 @@ main
 	cmd := exec.Command("bash", harnessPath)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("expected install.sh to fail when build is skipped and an existing binary would hide source changes; output=%s", string(output))
+		t.Fatalf("expected install_mac.sh to fail when build is skipped and an existing binary would hide source changes; output=%s", string(output))
 	}
 	if !strings.Contains(string(output), "source changes") {
 		t.Fatalf("expected skip-build failure to mention source changes, got: %s", string(output))

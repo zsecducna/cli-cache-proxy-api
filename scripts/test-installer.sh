@@ -156,7 +156,7 @@ run_installer_capture() {
   shift 3
 
   set +e
-  env "$@" bash "$repo_root/install.sh" <"$answers_path" >"$output_path" 2>&1
+  env "$@" bash "$repo_root/install_mac.sh" <"$answers_path" >"$output_path" 2>&1
   local status=$?
   set -e
   return "$status"
@@ -305,7 +305,7 @@ EOF
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "n" \
     "y" \
     "2" \
@@ -360,7 +360,7 @@ test_auth_merge_preserves_existing_target_files() {
     "$answers_path" \
     "$install_root" \
     "$target_auth" \
-    "n" \
+    "y" \
     "n" \
     "y" \
     "y"
@@ -406,7 +406,7 @@ test_db_merge_restores_backup_on_prompt_cache_failure() {
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "n" \
     "y"
 
@@ -453,7 +453,7 @@ test_plist_escapes_xml_significant_paths() {
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "y" \
     "n"
 
@@ -513,7 +513,7 @@ test_detection_uses_spec_default_fallbacks() {
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "n"
 
   run_installer_capture \
@@ -574,7 +574,7 @@ EOF
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "y" \
     "y"
 
@@ -646,7 +646,7 @@ EOF
     "$answers_path" \
     "$install_root" \
     "$install_root/auth" \
-    "n" \
+    "y" \
     "y" \
     "n"
 

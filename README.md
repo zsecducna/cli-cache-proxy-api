@@ -58,7 +58,23 @@ The compose file mounts:
 For a guided local installation on macOS, use:
 
 ```bash
-./install.sh
+./install_mac.sh
+```
+
+### Option 4: Install as a Linux user service
+
+For a guided local installation on Linux, use:
+
+```bash
+./install_linux.sh
+```
+
+### Option 5: Install on Windows
+
+For a guided local installation on Windows, use:
+
+```powershell
+pwsh -File .\install_windows.ps1
 ```
 
 ## Usage
