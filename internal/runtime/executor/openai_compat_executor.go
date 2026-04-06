@@ -365,6 +365,24 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, originalPayload, auth, stream, plan)
 	}
 
+	// When the inbound request is already in OpenAI Responses format, forward
+	// to the upstream's /responses endpoint directly instead of converting to
+	// chat completions.
+	if from == sdktranslator.FormatOpenAIResponse {
+		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, originalPayload, stream)
+		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, req.Payload, stream)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAIResponse.String(), e.Identifier())
+		if err != nil {
+			return openAICompatExecutionPlan{}, err
+		}
+		plan.selectedSurface = openAICompatSurfaceResponses
+		plan.targetFormat = sdktranslator.FormatOpenAIResponse
+		plan.endpoint = "/responses"
+		plan.translated = translated
+		return plan, nil
+	}
+
 	originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, originalPayload, stream)
 	translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, req.Payload, stream)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel)
