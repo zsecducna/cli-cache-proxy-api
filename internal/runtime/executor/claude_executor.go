@@ -213,13 +213,68 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		return resp, err
+			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+			if errClose := errBody.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+			if isClaudeOAuthToken(apiKey) && isClaudeLongContextRequiredError(httpResp.StatusCode, b) && httpReq.Header.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED") == "" {
+				fallbackReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+				if reqErr == nil {
+					fallbackReq.Header = httpReq.Header.Clone()
+					fallbackReq.Header.Set("X-CPA-CLAUDE-1M-FALLBACK-DISABLED", "true")
+					applyClaudeHeaders(fallbackReq, auth, apiKey, false, extraBetas, e.cfg)
+					fallbackResp, fallbackErr := httpClient.Do(fallbackReq)
+					if fallbackErr == nil {
+						httpResp = fallbackResp
+						helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+						if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+							decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+							if err != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, err)
+								if errClose := httpResp.Body.Close(); errClose != nil {
+									log.Errorf("response body close error: %v", errClose)
+								}
+								return resp, err
+							}
+							defer func() {
+								if errClose := decodedBody.Close(); errClose != nil {
+									log.Errorf("response body close error: %v", errClose)
+								}
+							}()
+							data, err := io.ReadAll(decodedBody)
+							if err != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, err)
+								return resp, err
+							}
+							helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+							reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+							out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, bodyForTranslation, data, nil)
+							return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+						}
+						fallbackErrBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+						if decErr != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, decErr)
+							msg := fmt.Sprintf("failed to decode fallback error response body: %v", decErr)
+							helps.LogWithRequestID(ctx).Warn(msg)
+							return resp, statusErr{code: httpResp.StatusCode, msg: msg}
+						}
+						fallbackBody, readErr := io.ReadAll(fallbackErrBody)
+						if errClose := fallbackErrBody.Close(); errClose != nil {
+							log.Errorf("response body close error: %v", errClose)
+						}
+						if readErr != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+							msg := fmt.Sprintf("failed to read fallback error response body: %v", readErr)
+							helps.LogWithRequestID(ctx).Warn(msg)
+							fallbackBody = []byte(msg)
+						}
+						b = fallbackBody
+					}
+				}
+			}
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -386,6 +441,103 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
+		}
+		if isClaudeOAuthToken(apiKey) && isClaudeLongContextRequiredError(httpResp.StatusCode, b) && httpReq.Header.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED") == "" {
+			fallbackReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+			if reqErr == nil {
+				fallbackReq.Header = httpReq.Header.Clone()
+				fallbackReq.Header.Set("X-CPA-CLAUDE-1M-FALLBACK-DISABLED", "true")
+				applyClaudeHeaders(fallbackReq, auth, apiKey, true, extraBetas, e.cfg)
+				fallbackResp, fallbackErr := httpClient.Do(fallbackReq)
+				if fallbackErr == nil {
+					httpResp = fallbackResp
+					helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+					if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+						decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+						if err != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, err)
+							if errClose := httpResp.Body.Close(); errClose != nil {
+								log.Errorf("response body close error: %v", errClose)
+							}
+							return nil, err
+						}
+						out := make(chan cliproxyexecutor.StreamChunk)
+						go func() {
+							defer close(out)
+							defer func() {
+								if errClose := decodedBody.Close(); errClose != nil {
+									log.Errorf("response body close error: %v", errClose)
+								}
+							}()
+							if from == to {
+								scanner := bufio.NewScanner(decodedBody)
+								scanner.Buffer(nil, 52_428_800)
+								for scanner.Scan() {
+									line := scanner.Bytes()
+									helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+									if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+										reporter.Publish(ctx, detail)
+									}
+									if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+										line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+									}
+									cloned := make([]byte, len(line)+1)
+									copy(cloned, line)
+									cloned[len(line)] = '\n'
+									out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+								}
+								if errScan := scanner.Err(); errScan != nil {
+									helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+									reporter.PublishFailure(ctx)
+									out <- cliproxyexecutor.StreamChunk{Err: errScan}
+								}
+								return
+							}
+							scanner := bufio.NewScanner(decodedBody)
+							scanner.Buffer(nil, 52_428_800)
+							var param any
+							for scanner.Scan() {
+								line := scanner.Bytes()
+								helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+								if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+									reporter.Publish(ctx, detail)
+								}
+								if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+									line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+								}
+								chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, bytes.Clone(line), &param)
+								for i := range chunks {
+									out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+								}
+							}
+							if errScan := scanner.Err(); errScan != nil {
+								helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+								reporter.PublishFailure(ctx)
+								out <- cliproxyexecutor.StreamChunk{Err: errScan}
+							}
+						}()
+						return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+					}
+					fallbackErrBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+					if decErr != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, decErr)
+						msg := fmt.Sprintf("failed to decode fallback error response body: %v", decErr)
+						helps.LogWithRequestID(ctx).Warn(msg)
+						return nil, statusErr{code: httpResp.StatusCode, msg: msg}
+					}
+					fallbackBody, readErr := io.ReadAll(fallbackErrBody)
+					if errClose := fallbackErrBody.Close(); errClose != nil {
+						log.Errorf("response body close error: %v", errClose)
+					}
+					if readErr != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+						msg := fmt.Sprintf("failed to read fallback error response body: %v", readErr)
+						helps.LogWithRequestID(ctx).Warn(msg)
+						fallbackBody = []byte(msg)
+					}
+					b = fallbackBody
+				}
+			}
 		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
@@ -810,6 +962,14 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+func isClaudeLongContextRequiredError(status int, body []byte) bool {
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(helps.SummarizeErrorBody("application/json", body)))
+	return strings.Contains(msg, "extra usage is required for long context requests")
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -876,6 +1036,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
 			baseBetas += ",context-1m-2025-08-07"
+		}
+		fallbackDisabled := strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED")), "true")
+		if !fallbackDisabled && ginHeaders != nil {
+			fallbackDisabled = strings.EqualFold(strings.TrimSpace(ginHeaders.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED")), "true")
+		}
+		if fallbackDisabled {
+			baseBetas = strings.ReplaceAll(baseBetas, ",context-1m-2025-08-07", "")
+			baseBetas = strings.ReplaceAll(baseBetas, "context-1m-2025-08-07,", "")
+			baseBetas = strings.Trim(strings.ReplaceAll(baseBetas, ",,", ","), ",")
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
@@ -1348,6 +1517,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
+	if hasSignedAnthropicThinkingHistory(payload) {
+		return payload
+	}
 	clientUserAgent := getClientUserAgent(ctx)
 	useExperimentalCCHSigning := experimentalCCHSigningEnabled(cfg, auth)
 

@@ -25,6 +25,10 @@ const (
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
+func EffectiveRequestLogEnabled(cfg *Config) bool {
+	return cfg != nil && (cfg.RequestLog || cfg.Debug)
+}
+
 type Config struct {
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.

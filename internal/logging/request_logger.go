@@ -124,6 +124,16 @@ type StreamingLogWriter interface {
 	//   - error: An error if writing fails, nil otherwise
 	WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error
 
+	// WriteAPIResponseErrors writes upstream API error responses to the log.
+	// This should be called when upstream error responses were captured separately from the main response.
+	//
+	// Parameters:
+	//   - apiResponseErrors: Captured upstream API error responses
+	//
+	// Returns:
+	//   - error: An error if writing fails, nil otherwise
+	WriteAPIResponseErrors(apiResponseErrors []*interfaces.ErrorMessage) error
+
 	// SetFirstChunkTimestamp sets the TTFB timestamp captured when first chunk was received.
 	//
 	// Parameters:
@@ -1208,6 +1218,9 @@ type FileStreamingLogWriter struct {
 	// apiWebsocketTimeline stores the upstream websocket event timeline.
 	apiWebsocketTimeline []byte
 
+	// apiResponseErrors stores upstream API error responses.
+	apiResponseErrors []*interfaces.ErrorMessage
+
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
 }
@@ -1304,6 +1317,27 @@ func (w *FileStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+func (w *FileStreamingLogWriter) WriteAPIResponseErrors(apiResponseErrors []*interfaces.ErrorMessage) error {
+	if len(apiResponseErrors) == 0 {
+		return nil
+	}
+	w.apiResponseErrors = make([]*interfaces.ErrorMessage, 0, len(apiResponseErrors))
+	for i := 0; i < len(apiResponseErrors); i++ {
+		if apiResponseErrors[i] == nil {
+			continue
+		}
+		copied := &interfaces.ErrorMessage{StatusCode: apiResponseErrors[i].StatusCode}
+		if apiResponseErrors[i].Error != nil {
+			copied.Error = fmt.Errorf("%s", apiResponseErrors[i].Error.Error())
+		}
+		if len(apiResponseErrors[i].Addon) > 0 {
+			copied.Addon = apiResponseErrors[i].Addon.Clone()
+		}
+		w.apiResponseErrors = append(w.apiResponseErrors, copied)
+	}
+	return nil
+}
+
 func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if !timestamp.IsZero() {
 		w.apiResponseTimestamp = timestamp
@@ -1394,13 +1428,16 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiResponse, w.apiWebsocketTimeline, nil), true); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiResponse, w.apiWebsocketTimeline, w.apiResponseErrors), true); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, time.Time{}); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(logFile, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
@@ -1488,6 +1525,10 @@ func (w *NoOpStreamingLogWriter) WriteAPIResponse(_ []byte) error {
 // Returns:
 //   - error: Always returns nil
 func (w *NoOpStreamingLogWriter) WriteAPIWebsocketTimeline(_ []byte) error {
+	return nil
+}
+
+func (w *NoOpStreamingLogWriter) WriteAPIResponseErrors(_ []*interfaces.ErrorMessage) error {
 	return nil
 }
 

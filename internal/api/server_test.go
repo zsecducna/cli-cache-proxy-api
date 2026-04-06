@@ -15,9 +15,11 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	apihandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -481,6 +483,58 @@ func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
 	}
 }
 
+func TestDefaultRequestLoggerFactory_EnablesLoggingWhenDebugTrue(t *testing.T) {
+	cfg := &proxyconfig.Config{Debug: true}
+	logger := defaultRequestLoggerFactory(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+	if !fileLogger.IsEnabled() {
+		t.Fatal("expected request logger to be enabled when debug is true")
+	}
+}
+
+type toggleableRequestLogger struct {
+	enabled bool
+}
+
+func (l *toggleableRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
+	return nil
+}
+
+func (l *toggleableRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (internallogging.StreamingLogWriter, error) {
+	return &internallogging.NoOpStreamingLogWriter{}, nil
+}
+
+func (l *toggleableRequestLogger) IsEnabled() bool {
+	return l.enabled
+}
+
+func (l *toggleableRequestLogger) SetEnabled(enabled bool) {
+	l.enabled = enabled
+}
+
+func TestUpdateClients_TogglesRequestLoggerWhenOnlyDebugChanges(t *testing.T) {
+	logger := &toggleableRequestLogger{}
+	server := &Server{
+		requestLogger: logger,
+		handlers:      apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil),
+	}
+	server.oldConfigYaml = []byte("debug: false\nrequest-log: false\n")
+
+	server.UpdateClients(&proxyconfig.Config{Debug: true})
+	if !logger.enabled {
+		t.Fatal("expected request logger to be enabled when debug becomes true")
+	}
+
+	server.oldConfigYaml = []byte("debug: true\nrequest-log: false\n")
+	server.UpdateClients(&proxyconfig.Config{})
+	if logger.enabled {
+		t.Fatal("expected request logger to be disabled when debug and request-log are both false")
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")
@@ -533,10 +587,10 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	errLog := fileLogger.LogRequestWithOptions(
 		"/v1/chat/completions",
 		http.MethodPost,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
 		http.StatusBadGateway,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
 		nil,
 		nil,

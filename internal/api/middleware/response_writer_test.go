@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -172,6 +173,7 @@ func (l *testRequestLogger) IsEnabled() bool {
 
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
+	apiResponseErrors    []*interfaces.ErrorMessage
 	closed               bool
 }
 
@@ -191,6 +193,21 @@ func (w *testStreamingLogWriter) WriteAPIResponse([]byte) error {
 
 func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
 	w.apiWebsocketTimeline = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
+
+func (w *testStreamingLogWriter) WriteAPIResponseErrors(apiResponseErrors []*interfaces.ErrorMessage) error {
+	w.apiResponseErrors = make([]*interfaces.ErrorMessage, 0, len(apiResponseErrors))
+	for i := 0; i < len(apiResponseErrors); i++ {
+		if apiResponseErrors[i] == nil {
+			continue
+		}
+		copied := &interfaces.ErrorMessage{StatusCode: apiResponseErrors[i].StatusCode}
+		if apiResponseErrors[i].Error != nil {
+			copied.Error = errors.New(apiResponseErrors[i].Error.Error())
+		}
+		w.apiResponseErrors = append(w.apiResponseErrors, copied)
+	}
 	return nil
 }
 

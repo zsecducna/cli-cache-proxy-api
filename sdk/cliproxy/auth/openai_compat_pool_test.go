@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -322,6 +323,76 @@ func TestManagerExecute_ClaudeViaGPTRouteReturnsBackendNotAvailable(t *testing.T
 	}
 	if authErr.Code != "claude_via_gpt_backend_not_available" {
 		t.Fatalf("error code = %q, want %q", authErr.Code, "claude_via_gpt_backend_not_available")
+	}
+}
+
+func TestManager_ClaudeViaGPTRoutePreservesExplicit429(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	err := m.normalizeRouteExecutionError(&Error{
+		Code:       "auth_unavailable",
+		Message:    "Extra usage is required for long context requests.",
+		HTTPStatus: http.StatusTooManyRequests,
+	}, []string{"codex", "openai-compatibility"}, "claude-sonnet-4-6[1m]", claudeViaGPTRouteOptions())
+	if err == nil {
+		t.Fatal("expected explicit 429 error")
+	}
+	authErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if authErr.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", authErr.HTTPStatus, http.StatusTooManyRequests)
+	}
+	if authErr.Message != "Extra usage is required for long context requests." {
+		t.Fatalf("message = %q", authErr.Message)
+	}
+}
+
+func TestManager_ExhaustedModelCooldownErrorReturns429ForRealClaudeOAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:       "claude-auth-1",
+		Provider: "claude",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			"claude-opus-4-6": {
+				Unavailable:    true,
+				NextRetryAfter: now.Add(2 * time.Minute),
+				LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth 1: %v", err)
+	}
+	if _, err := m.Register(context.Background(), &Auth{
+		ID:       "claude-auth-2",
+		Provider: "claude",
+		Status:   StatusError,
+		ModelStates: map[string]*ModelState{
+			"claude-opus-4-6": {
+				Unavailable:    true,
+				NextRetryAfter: now.Add(3 * time.Minute),
+				LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("register auth 2: %v", err)
+	}
+
+	err := m.exhaustedModelCooldownError([]string{"claude"}, "claude-opus-4-6[1m]")
+	if err == nil {
+		t.Fatal("expected cooldown error")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type = %T, want status error", err)
+	}
+	if got := se.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "claude-opus-4-6[1m]") {
+		t.Fatalf("message = %q, want route model context", msg)
 	}
 }
 

@@ -1197,6 +1197,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
+			if cooldownErr := m.exhaustedModelCooldownError(providers, routeModel); cooldownErr != nil {
+				return cliproxyexecutor.Response{}, cooldownErr
+			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
@@ -1274,6 +1277,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
+			}
+			if cooldownErr := m.exhaustedModelCooldownError(providers, routeModel); cooldownErr != nil {
+				return cliproxyexecutor.Response{}, cooldownErr
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1476,6 +1482,9 @@ func (m *Manager) normalizeRouteExecutionError(err error, providers []string, ro
 
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
+		if authErr.HTTPStatus > 0 && authErr.HTTPStatus != http.StatusBadGateway {
+			return err
+		}
 		switch authErr.Code {
 		case "auth_not_found", "auth_unavailable", "executor_not_found":
 			return &Error{
@@ -2176,6 +2185,62 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
 	}
+}
+
+func (m *Manager) exhaustedModelCooldownError(providers []string, routeModel string) error {
+	if m == nil || strings.TrimSpace(routeModel) == "" {
+		return nil
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
+		if providerKey == "" {
+			continue
+		}
+		providerSet[providerKey] = struct{}{}
+	}
+	if len(providerSet) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	baseModel := canonicalModelKey(routeModel)
+	var earliest time.Time
+	providerForError := ""
+	matched := false
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		state := lookupModelState(auth, routeModel)
+		if state == nil && baseModel != "" {
+			state = lookupModelState(auth, baseModel)
+		}
+		if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(now) {
+			continue
+		}
+		if statusCodeFromResult(state.LastError) != http.StatusTooManyRequests {
+			continue
+		}
+		matched = true
+		if providerForError == "" {
+			providerForError = auth.Provider
+		}
+		if earliest.IsZero() || state.NextRetryAfter.Before(earliest) {
+			earliest = state.NextRetryAfter
+		}
+	}
+	if !matched {
+		return nil
+	}
+	return newModelCooldownError(routeModel, providerForError, time.Until(earliest))
 }
 
 func hasModelError(auth *Auth, now time.Time) bool {

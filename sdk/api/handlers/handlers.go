@@ -921,17 +921,17 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
-	if h.Cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
-			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
-					slicesAPIResponseError = append(slicesAPIResponseError, err)
-					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
-				}
-			} else {
-				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
+	if err == nil {
+		return
+	}
+	if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
+		if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
+			if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
+				slicesAPIResponseError = append(slicesAPIResponseError, err)
+				ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
 			}
+		} else {
+			ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
 		}
 	}
 }

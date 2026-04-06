@@ -286,9 +286,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			template, _ = sjson.SetBytes(template, "text.format.type", "text")
 		case "json_schema":
 			template, _ = sjson.SetBytes(template, "text.format.type", "json_schema")
-			if name := outputFormat.Get("name"); name.Exists() {
-				template, _ = sjson.SetBytes(template, "text.format.name", name.Value())
+			formatName := "response"
+			if name := strings.TrimSpace(outputFormat.Get("name").String()); name != "" {
+				formatName = name
 			}
+			template, _ = sjson.SetBytes(template, "text.format.name", formatName)
 			if strict := outputFormat.Get("strict"); strict.Exists() {
 				template, _ = sjson.SetBytes(template, "text.format.strict", strict.Value())
 			}

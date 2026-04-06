@@ -60,7 +60,7 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	return logging.NewFileRequestLogger(config.EffectiveRequestLogEnabled(cfg), logsDir, configDir, cfg.ErrorLogsMaxFiles)
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -901,15 +901,13 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	// Update request logger enabled state if it has changed
-	previousRequestLog := false
-	if oldCfg != nil {
-		previousRequestLog = oldCfg.RequestLog
-	}
-	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
+	previousRequestLog := config.EffectiveRequestLogEnabled(oldCfg)
+	currentRequestLog := config.EffectiveRequestLogEnabled(cfg)
+	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != currentRequestLog) {
 		if s.loggerToggle != nil {
-			s.loggerToggle(cfg.RequestLog)
+			s.loggerToggle(currentRequestLog)
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggler.SetEnabled(cfg.RequestLog)
+			toggler.SetEnabled(currentRequestLog)
 		}
 	}
 

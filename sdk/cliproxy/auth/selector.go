@@ -127,6 +127,9 @@ func canonicalModelKey(model string) string {
 	if model == "" {
 		return ""
 	}
+	if idx := strings.Index(model, "["); idx >= 0 && strings.HasSuffix(model, "]") {
+		model = strings.TrimSpace(model[:idx])
+	}
 	parsed := thinking.ParseSuffix(model)
 	modelName := strings.TrimSpace(parsed.ModelName)
 	if modelName == "" {

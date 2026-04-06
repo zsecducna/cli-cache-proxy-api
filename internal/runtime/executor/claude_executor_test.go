@@ -2107,6 +2107,25 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestApplyCloaking_SkipsSignedThinkingHistory(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "key-123",
+			Cloak: &config.CloakConfig{
+				StrictMode:     true,
+				SensitiveWords: []string{"proxy"},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"system":"proxy rules","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"deliberation","signature":"sig_12345678901234567890123456789012345678901234567890"},{"type":"text","text":"proxy access"}]},{"role":"user","content":[{"type":"text","text":"proxy follow-up"}]}]}`)
+
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("signed thinking history should bypass cloaking, got %s", string(out))
+	}
+}
+
 func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
 	out := normalizeClaudeTemperatureForThinking(payload)

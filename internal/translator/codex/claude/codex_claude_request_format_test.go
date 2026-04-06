@@ -40,3 +40,27 @@ func TestConvertClaudeRequestToCodex_MapsOutputConfigFormatJSONSchema(t *testing
 		t.Fatalf("reasoning.effort = %q, want %q, body=%s", got, "medium", result)
 	}
 }
+
+func TestConvertClaudeRequestToCodex_DefaultsOutputConfigFormatNameWhenMissing(t *testing.T) {
+	inputJSON := `{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
+		"output_config":{
+			"format":{
+				"type":"json_schema",
+				"strict":true,
+				"schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}
+			}
+		}
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(inputJSON), true)
+	root := gjson.ParseBytes(result)
+
+	if got := root.Get("text.format.type").String(); got != "json_schema" {
+		t.Fatalf("text.format.type = %q, want %q, body=%s", got, "json_schema", result)
+	}
+	if got := root.Get("text.format.name").String(); got != "response" {
+		t.Fatalf("text.format.name = %q, want %q, body=%s", got, "response", result)
+	}
+}

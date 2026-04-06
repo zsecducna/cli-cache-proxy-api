@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -64,5 +65,30 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Values("X-Request-Id"); !reflect.DeepEqual(got, []string{"new-1", "new-2"}) {
 		t.Fatalf("X-Request-Id = %#v, want %#v", got, []string{"new-1", "new-2"})
+	}
+}
+
+func TestLoggingAPIResponseError_PersistsInGinContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.LoggingAPIResponseError(ctx, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      errors.New("rate limit"),
+	})
+
+	stored, exists := ginCtx.Get("API_RESPONSE_ERROR")
+	if !exists {
+		t.Fatal("API_RESPONSE_ERROR missing")
+	}
+	errs, ok := stored.([]*interfaces.ErrorMessage)
+	if !ok || len(errs) != 1 {
+		t.Fatalf("stored errors = %#v, want one error", stored)
+	}
+	if errs[0] == nil || errs[0].StatusCode != http.StatusTooManyRequests || errs[0].Error == nil || errs[0].Error.Error() != "rate limit" {
+		t.Fatalf("stored error = %#v, want status 429 with rate limit message", errs[0])
 	}
 }
