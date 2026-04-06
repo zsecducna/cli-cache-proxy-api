@@ -222,6 +222,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI Compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") {
 		t.Fatalf("management page missing provider filter controls/options: %s", body)
 	}
+	if !strings.Contains(body, "const sameFilter = lastUsageStatisticsProvider === getUsageProviderFilter();") || !strings.Contains(body, "lastUsageStatisticsProvider = getUsageProviderFilter();") {
+		t.Fatalf("management page should invalidate cached usage stats when provider filter changes: %s", body)
+	}
 	if strings.Contains(body, "cliproxy-cache-stats-inline-host") {
 		t.Fatalf("management page should not include the removed inline host: %s", body)
 	}

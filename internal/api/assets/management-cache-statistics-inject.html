@@ -41,6 +41,7 @@
   let lastUsageStatisticsFetchAt = 0;
   let lastUsageStatistics = null;
   let lastUsageStatisticsRangeKey = '';
+  let lastUsageStatisticsProvider = '';
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
   const quotaModes = new Map();
@@ -705,9 +706,10 @@
       const minIntervalMs = getUsageIntervalSeconds() * 1000;
       const elapsedMs = Date.now() - lastUsageStatisticsFetchAt;
       const sameRange = lastUsageStatisticsRangeKey === timeRange.key;
-      const remainingMs = lastUsageStatisticsFetchAt > 0 && sameRange ? Math.max(0, minIntervalMs - elapsedMs) : 0;
+      const sameFilter = lastUsageStatisticsProvider === getUsageProviderFilter();
+      const remainingMs = lastUsageStatisticsFetchAt > 0 && sameRange && sameFilter ? Math.max(0, minIntervalMs - elapsedMs) : 0;
       if (remainingMs > 0) {
-        if (lastUsageStatistics && sameRange) {
+        if (lastUsageStatistics && sameRange && sameFilter) {
           renderUsageStatistics(container, lastUsageStatistics, timeRange);
         }
         scheduleUsageRefreshRetry(remainingMs);
@@ -718,6 +720,7 @@
       lastUsageStatisticsFetchAt = Date.now();
       lastUsageStatistics = stats;
       lastUsageStatisticsRangeKey = timeRange.key;
+      lastUsageStatisticsProvider = getUsageProviderFilter();
       renderUsageStatistics(container, stats, timeRange);
     } finally {
       usageRefreshInFlight = false;
