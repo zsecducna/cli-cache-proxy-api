@@ -935,6 +935,266 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	}
 }
 
+func assertOneHourEphemeralCacheControl(t *testing.T, payload []byte, path string) {
+	t.Helper()
+
+	cc := gjson.GetBytes(payload, path)
+	if !cc.Exists() {
+		t.Fatalf("expected %s to exist", path)
+	}
+	if got := cc.Get("type").String(); got != "ephemeral" {
+		t.Fatalf("%s.type = %q, want %q", path, got, "ephemeral")
+	}
+	if got := cc.Get("ttl").String(); got != "1h" {
+		t.Fatalf("%s.ttl = %q, want %q", path, got, "1h")
+	}
+}
+
+func assertFiveMinuteEphemeralCacheControl(t *testing.T, payload []byte, path string) {
+	t.Helper()
+
+	cc := gjson.GetBytes(payload, path)
+	if !cc.Exists() {
+		t.Fatalf("expected %s to exist", path)
+	}
+	if got := cc.Get("type").String(); got != "ephemeral" {
+		t.Fatalf("%s.type = %q, want %q", path, got, "ephemeral")
+	}
+	if ttl := cc.Get("ttl").String(); ttl != "" && ttl != "5m" {
+		t.Fatalf("%s.ttl = %q, want empty or %q", path, ttl, "5m")
+	}
+}
+
+func assertNoCacheControlAtPath(t *testing.T, payload []byte, path string) {
+	t.Helper()
+
+	if gjson.GetBytes(payload, path).Exists() {
+		t.Fatalf("expected %s to be removed", path)
+	}
+}
+
+func cacheEligibleAnthropicText() string {
+	return strings.Repeat("cacheable context block ", 5000)
+}
+
+func TestEnsureCacheControl_RewritesExistingAnthropicCacheLayout(t *testing.T) {
+	payload := []byte(fmt.Sprintf(`{
+		"tools": [
+			{"name":"tool-a","description":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}},
+			{"name":"tool-b","description":%q}
+		],
+		"system": [
+			{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":%q}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"turn-2"}]},
+			{"role":"user","content":[{"type":"text","text":"turn-3","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`,
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+	))
+
+	out := ensureCacheControl(payload)
+
+	assertNoCacheControlAtPath(t, out, "tools.0.cache_control")
+	assertOneHourEphemeralCacheControl(t, out, "tools.1.cache_control")
+	assertNoCacheControlAtPath(t, out, "system.0.cache_control")
+	assertOneHourEphemeralCacheControl(t, out, "system.1.cache_control")
+	assertOneHourEphemeralCacheControl(t, out, "messages.0.content.0.cache_control")
+	assertNoCacheControlAtPath(t, out, "messages.2.content.0.cache_control")
+}
+
+func TestEnsureCacheControl_PreservesAnthropicOrdering(t *testing.T) {
+	payload := []byte(`{
+		"tools": [
+			{"name":"tool-a","description":"first"},
+			{"name":"tool-b","description":"second"}
+		],
+		"system": [
+			{"type":"text","text":"sys-1"},
+			{"type":"text","text":"sys-2"}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"u1"}]},
+			{"role":"assistant","content":[{"type":"text","text":"a1"}]},
+			{"role":"user","content":[{"type":"text","text":"u2"}]}
+		]
+	}`)
+
+	out := ensureCacheControl(payload)
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "tool-a" {
+		t.Fatalf("tools.0.name = %q, want tool-a", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "tool-b" {
+		t.Fatalf("tools.1.name = %q, want tool-b", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "sys-1" {
+		t.Fatalf("system.0.text = %q, want sys-1", got)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "u2" {
+		t.Fatalf("messages.2.content.0.text = %q, want u2", got)
+	}
+}
+
+func TestDecideAnthropicCachePolicy_DisablesCachingBelowMinimumPromptLength(t *testing.T) {
+	payload := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"system": [{"type":"text","text":"sys-a"}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"turn-1"}]}
+		]
+	}`)
+
+	decision := decideAnthropicCachePolicy(payload)
+
+	if decision.RewriteApplied {
+		t.Fatal("rewrite should be disabled when estimated input is below 4096 tokens")
+	}
+	if decision.Breakpoints.Tools || decision.Breakpoints.System || decision.Breakpoints.Messages {
+		t.Fatalf("all breakpoints should be disabled below the cacheable threshold: %+v", decision.Breakpoints)
+	}
+	if decision.MatchedAgenticCodingLoop {
+		t.Fatal("short/general traffic should not match the agentic classifier")
+	}
+}
+
+func TestDecideAnthropicCachePolicy_PromotesToolLoopsWithTwoUserTurns(t *testing.T) {
+	payload := []byte(fmt.Sprintf(`{
+		"tools": [{"name":"Read","description":%q}],
+		"system": [{"type":"text","text":%q}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":%q}]},
+			{"role":"assistant","content":[{"type":"text","text":"turn-2"}]},
+			{"role":"user","content":[{"type":"text","text":%q}]}
+		]
+	}`,
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+	))
+
+	decision := decideAnthropicCachePolicy(payload)
+
+	if got := decision.Breakpoints.TTL; got != "1h" {
+		t.Fatalf("Breakpoints.TTL = %q, want %q", got, "1h")
+	}
+	if !decision.Breakpoints.Messages {
+		t.Fatal("agentic traffic should preserve the message-history breakpoint")
+	}
+	if !decision.MatchedAgenticCodingLoop {
+		t.Fatal("expected the agentic classifier to match tools + 2 user turns")
+	}
+}
+
+func TestEnsureCacheControl_ShortTrafficRewritesToFiveMinuteBreakpoints(t *testing.T) {
+	payload := []byte(fmt.Sprintf(`{
+		"tools": [
+			{"name":"tool-a","description":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}},
+			{"name":"tool-b","description":%q}
+		],
+		"system": [
+			{"type":"text","text":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}},
+			{"type":"text","text":%q}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"turn-1","cache_control":{"type":"ephemeral","ttl":"24h"}}]}
+		]
+	}`,
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+	))
+
+	out := ensureCacheControl(payload)
+
+	assertNoCacheControlAtPath(t, out, "tools.0.cache_control")
+	assertFiveMinuteEphemeralCacheControl(t, out, "tools.1.cache_control")
+	assertNoCacheControlAtPath(t, out, "system.0.cache_control")
+	assertFiveMinuteEphemeralCacheControl(t, out, "system.1.cache_control")
+	assertNoCacheControlAtPath(t, out, "messages.0.content.0.cache_control")
+}
+
+func TestDecideAnthropicCachePolicy_DoesNotUseRawJSONEnvelopeSizeForThreshold(t *testing.T) {
+	var messages strings.Builder
+	for i := 0; i < 320; i++ {
+		if i > 0 {
+			messages.WriteByte(',')
+		}
+		role := "assistant"
+		if i%2 == 0 {
+			role = "user"
+		}
+		messages.WriteString(fmt.Sprintf(`{"role":%q,"content":[{"type":"text","text":"x"}]}`, role))
+	}
+
+	payload := []byte(fmt.Sprintf(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [%s]
+	}`,
+		messages.String(),
+	))
+
+	if len(payload) <= anthropicPromptCacheMinimumTokens*4 {
+		t.Fatalf("expected raw JSON payload to be much larger than the byte heuristic, got %d bytes", len(payload))
+	}
+	if got := estimateAnthropicPromptTokens(payload); got >= anthropicPromptCacheMinimumTokens {
+		t.Fatalf("structure-aware token estimate = %d, want below %d", got, anthropicPromptCacheMinimumTokens)
+	}
+
+	decision := decideAnthropicCachePolicy(payload)
+	if decision.RewriteApplied {
+		t.Fatal("large JSON envelope with tiny message content should still skip cache rewriting when prompt content is below 4096 tokens")
+	}
+}
+
+func TestDecideAnthropicCachePolicy_SkipsRewriteForSignedThinkingHistory(t *testing.T) {
+	payload := []byte(fmt.Sprintf(`{
+		"tools": [{"name":"Read","description":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}}],
+		"system": [{"type":"text","text":%q}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}}]},
+			{"role":"assistant","content":[{"type":"thinking","thinking":"deliberation","signature":"sig_12345678901234567890123456789012345678901234567890"},{"type":"text","text":"done"}]},
+			{"role":"user","content":[{"type":"text","text":%q}]}
+		]
+	}`,
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+	))
+
+	decision := decideAnthropicCachePolicy(payload)
+	if decision.RewriteApplied {
+		t.Fatal("signed thinking history should disable cache rewrite to preserve Anthropic signatures")
+	}
+
+	out := rewriteAnthropicCacheControl(payload, decision)
+	if !bytes.Equal(out, payload) {
+		t.Fatal("payload with signed thinking history should remain byte-identical when rewrite is skipped")
+	}
+}
+
+func TestEnsureCacheControl_StripsClientCacheLayoutWhenPolicySelectsNoBreakpoints(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"turn-1","cache_control":{"type":"ephemeral","ttl":"24h"}}]}
+		]
+	}`)
+
+	out := ensureCacheControl(payload)
+
+	assertNoCacheControlAtPath(t, out, "messages.0.content.0.cache_control")
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
@@ -1034,20 +1294,27 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 		"base_url": server.URL,
 	}}
 
-	payload := []byte(`{
+	payload := []byte(fmt.Sprintf(`{
 		"tools": [
-			{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}},
-			{"name":"t2","cache_control":{"type":"ephemeral"}}
+			{"name":"t1","description":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}},
+			{"name":"t2","description":%q}
 		],
 		"system": [
-			{"type":"text","text":"s1","cache_control":{"type":"ephemeral","ttl":"1h"}},
-			{"type":"text","text":"s2","cache_control":{"type":"ephemeral","ttl":"1h"}}
+			{"type":"text","text":%q,"cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":%q}
 		],
 		"messages": [
-			{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
-			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+			{"role":"user","content":[{"type":"text","text":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"a1"}]},
+			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}
 		]
-	}`)
+	}`,
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+		cacheEligibleAnthropicText(),
+	))
 
 	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-3-5-haiku-20241022",
@@ -1060,6 +1327,12 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	if len(seenBody) == 0 {
 		t.Fatal("expected count_tokens request body to be captured")
 	}
+	assertNoCacheControlAtPath(t, seenBody, "tools.0.cache_control")
+	assertOneHourEphemeralCacheControl(t, seenBody, "tools.1.cache_control")
+	assertNoCacheControlAtPath(t, seenBody, "system.0.cache_control")
+	assertOneHourEphemeralCacheControl(t, seenBody, "system.1.cache_control")
+	assertOneHourEphemeralCacheControl(t, seenBody, "messages.0.content.0.cache_control")
+	assertNoCacheControlAtPath(t, seenBody, "messages.2.content.0.cache_control")
 	if got := countCacheControls(seenBody); got > 4 {
 		t.Fatalf("count_tokens body has %d cache_control blocks, want <= 4", got)
 	}

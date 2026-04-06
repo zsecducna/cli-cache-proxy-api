@@ -32,6 +32,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"github.com/tiktoken-go/tokenizer"
 
 	"github.com/gin-gonic/gin"
 )
@@ -139,19 +140,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
-
-	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	// Cloaking and ensureCacheControl may push the total over 4 when the client
-	// (e.g. Amp CLI) already sends multiple cache_control blocks.
-	body = enforceCacheControlLimit(body, 4)
-
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
-	body = normalizeCacheControlTTL(body)
+	decision := decideAnthropicCachePolicy(body)
+	body = rewriteAnthropicCacheControl(body, decision)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -310,16 +300,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
-	}
-
-	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
-	body = enforceCacheControlLimit(body, 4)
-
-	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
-	body = normalizeCacheControlTTL(body)
+	decision := decideAnthropicCachePolicy(body)
+	body = rewriteAnthropicCacheControl(body, decision)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -489,9 +471,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = checkSystemInstructions(body)
 	}
 
-	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
-	body = enforceCacheControlLimit(body, 4)
-	body = normalizeCacheControlTTL(body)
+	// Keep count_tokens requests compatible with the same Anthropic cache rewrite policy.
+	decision := decideAnthropicCachePolicy(body)
+	body = rewriteAnthropicCacheControl(body, decision)
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -1392,30 +1374,249 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	return payload
 }
 
-// ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
-// According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
-// This function adds cache_control to:
-// 1. The LAST tool in the tools array (caches all tool definitions)
-// 2. The LAST system prompt element
-// 3. The SECOND-TO-LAST user turn (caches conversation history for multi-turn)
-//
-// Up to 4 cache breakpoints are allowed per request. Tools, System, and Messages are INDEPENDENT breakpoints.
-// This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
-// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-func ensureCacheControl(payload []byte) []byte {
-	// 1. Inject cache_control into the LAST tool (caches all tool definitions)
-	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
-	payload = injectToolsCacheControl(payload)
+type anthropicCacheBreakpointPlan struct {
+	Tools    bool
+	System   bool
+	Messages bool
+	TTL      string
+}
 
-	// 2. Inject cache_control into the LAST system prompt element
-	// System is the second level in the cache hierarchy.
-	payload = injectSystemCacheControl(payload)
+type anthropicCachePolicyDecision struct {
+	RewriteApplied           bool
+	OverwroteClientLayout    bool
+	MatchedAgenticCodingLoop bool
+	Breakpoints              anthropicCacheBreakpointPlan
+}
 
-	// 3. Inject cache_control into messages for multi-turn conversation caching
-	// This caches the conversation history up to the second-to-last user turn.
-	payload = injectMessagesCacheControl(payload)
+const anthropicPromptCacheMinimumTokens = 4096
 
+func estimateAnthropicPromptTokens(payload []byte) int64 {
+	if len(payload) == 0 {
+		return 0
+	}
+
+	segments := collectAnthropicPromptSegments(gjson.ParseBytes(payload))
+	joined := strings.TrimSpace(strings.Join(segments, "\n"))
+	if joined == "" {
+		return 0
+	}
+
+	enc, err := tokenizer.Get(tokenizer.O200kBase)
+	if err != nil {
+		return int64(len(joined) / 4)
+	}
+	count, err := enc.Count(joined)
+	if err != nil {
+		return int64(len(joined) / 4)
+	}
+	return int64(count)
+}
+
+func collectAnthropicPromptSegments(root gjson.Result) []string {
+	segments := make([]string, 0, 32)
+	collectAnthropicSystemSegments(root.Get("system"), &segments)
+	collectAnthropicToolSegments(root.Get("tools"), &segments)
+	collectAnthropicMessageSegments(root.Get("messages"), &segments)
+	return segments
+}
+
+func collectAnthropicSystemSegments(system gjson.Result, segments *[]string) {
+	if !system.Exists() {
+		return
+	}
+	if system.Type == gjson.String {
+		appendAnthropicSegment(segments, system.String())
+		return
+	}
+	if !system.IsArray() {
+		appendAnthropicSegment(segments, system.Raw)
+		return
+	}
+	for _, part := range system.Array() {
+		if text := part.Get("text"); text.Exists() {
+			appendAnthropicSegment(segments, text.String())
+			continue
+		}
+		appendAnthropicSegment(segments, part.Raw)
+	}
+}
+
+func collectAnthropicToolSegments(tools gjson.Result, segments *[]string) {
+	if !tools.Exists() {
+		return
+	}
+	if !tools.IsArray() {
+		appendAnthropicSegment(segments, tools.Raw)
+		return
+	}
+	for _, tool := range tools.Array() {
+		appendAnthropicSegment(segments, tool.Get("name").String())
+		appendAnthropicSegment(segments, tool.Get("description").String())
+		if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
+			appendAnthropicSegment(segments, inputSchema.Raw)
+		}
+		if schema := tool.Get("schema"); schema.Exists() {
+			appendAnthropicSegment(segments, schema.Raw)
+		}
+	}
+}
+
+func collectAnthropicMessageSegments(messages gjson.Result, segments *[]string) {
+	if !messages.Exists() || !messages.IsArray() {
+		return
+	}
+	for _, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() {
+			continue
+		}
+		if content.Type == gjson.String {
+			appendAnthropicSegment(segments, content.String())
+			continue
+		}
+		if !content.IsArray() {
+			appendAnthropicSegment(segments, content.Raw)
+			continue
+		}
+		for _, part := range content.Array() {
+			collectAnthropicContentPart(part, segments)
+		}
+	}
+}
+
+func collectAnthropicContentPart(part gjson.Result, segments *[]string) {
+	switch part.Get("type").String() {
+	case "text":
+		appendAnthropicSegment(segments, part.Get("text").String())
+	case "tool_use":
+		appendAnthropicSegment(segments, part.Get("name").String())
+		if input := part.Get("input"); input.Exists() {
+			appendAnthropicSegment(segments, input.Raw)
+		}
+	case "tool_result":
+		appendAnthropicSegment(segments, part.Get("tool_use_id").String())
+		content := part.Get("content")
+		if content.Type == gjson.String {
+			appendAnthropicSegment(segments, content.String())
+			return
+		}
+		if content.IsArray() {
+			for _, nested := range content.Array() {
+				collectAnthropicContentPart(nested, segments)
+			}
+			return
+		}
+		appendAnthropicSegment(segments, content.Raw)
+	default:
+		if text := part.Get("text"); text.Exists() {
+			appendAnthropicSegment(segments, text.String())
+			return
+		}
+		appendAnthropicSegment(segments, part.Raw)
+	}
+}
+
+func appendAnthropicSegment(segments *[]string, value string) {
+	if segments == nil {
+		return
+	}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		*segments = append(*segments, trimmed)
+	}
+}
+
+func hasSignedAnthropicThinkingHistory(payload []byte) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false
+	}
+	for _, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+		for _, part := range content.Array() {
+			if part.Get("type").String() != "thinking" {
+				continue
+			}
+			if strings.TrimSpace(part.Get("signature").String()) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func decideAnthropicCachePolicy(payload []byte) anthropicCachePolicyDecision {
+	decision := anthropicCachePolicyDecision{
+		Breakpoints: anthropicCacheBreakpointPlan{
+			Tools:  gjson.GetBytes(payload, "tools.#").Int() > 0,
+			System: gjson.GetBytes(payload, "system").Exists(),
+			TTL:    "5m",
+		},
+	}
+
+	userTurns := 0
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			if msg.Get("role").String() == "user" {
+				userTurns++
+			}
+			return true
+		})
+	}
+
+	decision.Breakpoints.Messages = userTurns >= 2
+	decision.MatchedAgenticCodingLoop = decision.Breakpoints.Tools && decision.Breakpoints.Messages
+	if decision.MatchedAgenticCodingLoop {
+		decision.Breakpoints.TTL = "1h"
+	}
+	decision.OverwroteClientLayout = countCacheControls(payload) > 0
+	if hasSignedAnthropicThinkingHistory(payload) {
+		decision.Breakpoints = anthropicCacheBreakpointPlan{}
+		decision.RewriteApplied = false
+		return decision
+	}
+	if estimateAnthropicPromptTokens(payload) < anthropicPromptCacheMinimumTokens {
+		decision.Breakpoints = anthropicCacheBreakpointPlan{}
+		decision.RewriteApplied = decision.OverwroteClientLayout
+		return decision
+	}
+	decision.RewriteApplied = decision.OverwroteClientLayout || decision.Breakpoints.Tools || decision.Breakpoints.System || decision.Breakpoints.Messages
+	return decision
+}
+
+func rewriteAnthropicCacheControl(payload []byte, decision anthropicCachePolicyDecision) []byte {
+	if !decision.RewriteApplied {
+		return payload
+	}
+
+	payload = stripAnthropicMessageCacheControl(payload)
+	payload = stripAnthropicToolCacheControl(payload)
+	payload = stripAnthropicSystemCacheControl(payload)
+
+	if decision.Breakpoints.Tools {
+		payload = injectToolsCacheControlWithTTL(payload, decision.Breakpoints.TTL)
+	}
+	if decision.Breakpoints.System {
+		payload = injectSystemCacheControlWithTTL(payload, decision.Breakpoints.TTL)
+	}
+	if decision.Breakpoints.Messages {
+		payload = injectMessagesCacheControlWithTTL(payload, decision.Breakpoints.TTL)
+	}
+
+	payload = enforceCacheControlLimit(payload, 4)
+	payload = normalizeCacheControlTTL(payload)
 	return payload
+}
+
+// ensureCacheControl rewrites Anthropic cache breakpoints using the proxy policy.
+// According to Anthropic's documentation, cache prefixes are created in order:
+// tools -> system -> messages.
+func ensureCacheControl(payload []byte) []byte {
+	decision := decideAnthropicCachePolicy(payload)
+	return rewriteAnthropicCacheControl(payload, decision)
 }
 
 func countCacheControls(payload []byte) int {
@@ -1789,31 +1990,15 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 // - There are at least 2 user turns in the conversation
 // - No message content already has cache_control
 func injectMessagesCacheControl(payload []byte) []byte {
+	return injectMessagesCacheControlWithTTL(payload, "")
+}
+
+func injectMessagesCacheControlWithTTL(payload []byte, ttl string) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
 
-	// Check if ANY message content already has cache_control
-	hasCacheControlInMessages := false
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		content := msg.Get("content")
-		if content.IsArray() {
-			content.ForEach(func(_, item gjson.Result) bool {
-				if item.Get("cache_control").Exists() {
-					hasCacheControlInMessages = true
-					return false
-				}
-				return true
-			})
-		}
-		return !hasCacheControlInMessages
-	})
-	if hasCacheControlInMessages {
-		return payload
-	}
-
-	// Find all user message indices
 	var userMsgIndices []int
 	messages.ForEach(func(index gjson.Result, msg gjson.Result) bool {
 		if msg.Get("role").String() == "user" {
@@ -1822,24 +2007,19 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		return true
 	})
 
-	// Need at least 2 user turns to cache the second-to-last
 	if len(userMsgIndices) < 2 {
 		return payload
 	}
 
-	// Get the second-to-last user message index
 	secondToLastUserIdx := userMsgIndices[len(userMsgIndices)-2]
-
-	// Get the content of this message
 	contentPath := fmt.Sprintf("messages.%d.content", secondToLastUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
 
 	if content.IsArray() {
-		// Add cache_control to the last content block of this message
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
 			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
-			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			result, err := sjson.SetBytes(payload, cacheControlPath, ephemeralCacheControl(ttl))
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
@@ -1847,15 +2027,12 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			payload = result
 		}
 	} else if content.Type == gjson.String {
-		// Convert string content to array with cache_control
 		text := content.String()
 		newContent := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": ephemeralCacheControl(ttl),
 			},
 		}
 		result, err := sjson.SetBytes(payload, contentPath, newContent)
@@ -1872,7 +2049,107 @@ func injectMessagesCacheControl(payload []byte) []byte {
 // injectToolsCacheControl adds cache_control to the last tool in the tools array.
 // Per Anthropic docs: "The cache_control parameter on the last tool definition caches all tool definitions."
 // This only adds cache_control if NO tool in the array already has it.
+func ephemeralCacheControl(ttl string) map[string]string {
+	cc := map[string]string{"type": "ephemeral"}
+	if strings.TrimSpace(ttl) != "" {
+		cc["ttl"] = ttl
+	}
+	return cc
+}
+
+func stripAnthropicToolCacheControl(payload []byte) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+	tools, ok := asArray(root["tools"])
+	if !ok {
+		return payload
+	}
+	modified := false
+	for _, item := range tools {
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			delete(obj, "cache_control")
+			modified = true
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return marshalPayloadObject(payload, root)
+}
+
+func stripAnthropicSystemCacheControl(payload []byte) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+	system, ok := asArray(root["system"])
+	if !ok {
+		return payload
+	}
+	modified := false
+	for _, item := range system {
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			delete(obj, "cache_control")
+			modified = true
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return marshalPayloadObject(payload, root)
+}
+
+func stripAnthropicMessageCacheControl(payload []byte) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+	messages, ok := asArray(root["messages"])
+	if !ok {
+		return payload
+	}
+	modified := false
+	for _, msg := range messages {
+		msgObj, ok := asObject(msg)
+		if !ok {
+			continue
+		}
+		content, ok := asArray(msgObj["content"])
+		if !ok {
+			continue
+		}
+		for _, item := range content {
+			obj, ok := asObject(item)
+			if !ok {
+				continue
+			}
+			if _, exists := obj["cache_control"]; exists {
+				delete(obj, "cache_control")
+				modified = true
+			}
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return marshalPayloadObject(payload, root)
+}
+
 func injectToolsCacheControl(payload []byte) []byte {
+	return injectToolsCacheControlWithTTL(payload, "")
+}
+
+func injectToolsCacheControlWithTTL(payload []byte, ttl string) []byte {
 	tools := gjson.GetBytes(payload, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return payload
@@ -1883,22 +2160,8 @@ func injectToolsCacheControl(payload []byte) []byte {
 		return payload
 	}
 
-	// Check if ANY tool already has cache_control - if so, don't modify tools
-	hasCacheControlInTools := false
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("cache_control").Exists() {
-			hasCacheControlInTools = true
-			return false
-		}
-		return true
-	})
-	if hasCacheControlInTools {
-		return payload
-	}
-
-	// Add cache_control to the last tool
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	result, err := sjson.SetBytes(payload, lastToolPath, ephemeralCacheControl(ttl))
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -1909,8 +2172,11 @@ func injectToolsCacheControl(payload []byte) []byte {
 
 // injectSystemCacheControl adds cache_control to the last element in the system prompt.
 // Converts string system prompts to array format if needed.
-// This only adds cache_control if NO system element already has it.
 func injectSystemCacheControl(payload []byte) []byte {
+	return injectSystemCacheControlWithTTL(payload, "")
+}
+
+func injectSystemCacheControlWithTTL(payload []byte, ttl string) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload
@@ -1922,38 +2188,20 @@ func injectSystemCacheControl(payload []byte) []byte {
 			return payload
 		}
 
-		// Check if ANY system element already has cache_control
-		hasCacheControlInSystem := false
-		system.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("cache_control").Exists() {
-				hasCacheControlInSystem = true
-				return false
-			}
-			return true
-		})
-		if hasCacheControlInSystem {
-			return payload
-		}
-
-		// Add cache_control to the last system element
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		result, err := sjson.SetBytes(payload, lastSystemPath, ephemeralCacheControl(ttl))
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
 		}
 		payload = result
 	} else if system.Type == gjson.String {
-		// Convert string system prompt to array with cache_control
-		// "system": "text" -> "system": [{"type": "text", "text": "text", "cache_control": {"type": "ephemeral"}}]
 		text := system.String()
 		newSystem := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": ephemeralCacheControl(ttl),
 			},
 		}
 		result, err := sjson.SetBytes(payload, "system", newSystem)
