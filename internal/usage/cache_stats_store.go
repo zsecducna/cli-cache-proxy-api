@@ -42,6 +42,7 @@ type CacheStatisticsSummary struct {
 	SuccessRequests int64   `json:"success_requests"`
 	FailedRequests  int64   `json:"failed_requests"`
 	InputTokens     int64   `json:"input_tokens"`
+	EffectiveInputTokens int64 `json:"effective_input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	ReasoningTokens int64   `json:"reasoning_tokens"`
 	CachedTokens    int64   `json:"cached_tokens"`
@@ -55,6 +56,7 @@ type CacheStatisticsModelSummary struct {
 	Requests        int64   `json:"requests"`
 	FailedRequests  int64   `json:"failed_requests"`
 	InputTokens     int64   `json:"input_tokens"`
+	EffectiveInputTokens int64 `json:"effective_input_tokens"`
 	OutputTokens    int64   `json:"output_tokens"`
 	ReasoningTokens int64   `json:"reasoning_tokens"`
 	CachedTokens    int64   `json:"cached_tokens"`
@@ -67,6 +69,7 @@ type CacheStatisticsDaySummary struct {
 	Day          string  `json:"day"`
 	Requests     int64   `json:"requests"`
 	InputTokens  int64   `json:"input_tokens"`
+	EffectiveInputTokens int64 `json:"effective_input_tokens"`
 	CachedTokens int64   `json:"cached_tokens"`
 	TotalTokens  int64   `json:"total_tokens"`
 	CacheRatio   float64 `json:"cache_ratio"`
@@ -84,6 +87,7 @@ type CacheStatisticsRequest struct {
 	LatencyMs                         int64     `json:"latency_ms"`
 	Failed                            bool      `json:"failed"`
 	InputTokens                       int64     `json:"input_tokens"`
+	EffectiveInputTokens              int64     `json:"effective_input_tokens"`
 	OutputTokens                      int64     `json:"output_tokens"`
 	ReasoningTokens                   int64     `json:"reasoning_tokens"`
 	CachedTokens                      int64     `json:"cached_tokens"`
@@ -622,6 +626,14 @@ SELECT
     COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(CASE
+        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+            CASE
+                WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
+                ELSE cached_tokens
+            END
+        ELSE input_tokens
+    END), 0),
     COALESCE(SUM(output_tokens), 0),
     COALESCE(SUM(reasoning_tokens), 0),
     COALESCE(SUM(cached_tokens), 0),
@@ -636,6 +648,7 @@ WHERE requested_at >= ?`
 		&summary.SuccessRequests,
 		&summary.FailedRequests,
 		&summary.InputTokens,
+		&summary.EffectiveInputTokens,
 		&summary.OutputTokens,
 		&summary.ReasoningTokens,
 		&summary.CachedTokens,
@@ -645,7 +658,7 @@ WHERE requested_at >= ?`
 	if err != nil {
 		return summary, fmt.Errorf("cache statistics store: query summary: %w", err)
 	}
-	summary.CacheRatio = ratio(summary.CachedTokens, summary.InputTokens)
+	summary.CacheRatio = ratio(summary.CachedTokens, cacheStatisticsRatioDenominator(summary.EffectiveInputTokens, summary.InputTokens))
 	return summary, nil
 }
 
@@ -656,6 +669,14 @@ SELECT
     COUNT(*),
     COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(CASE
+        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+            CASE
+                WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
+                ELSE cached_tokens
+            END
+        ELSE input_tokens
+    END), 0),
     COALESCE(SUM(output_tokens), 0),
     COALESCE(SUM(reasoning_tokens), 0),
     COALESCE(SUM(cached_tokens), 0),
@@ -683,6 +704,7 @@ LIMIT ?`
 			&item.Requests,
 			&item.FailedRequests,
 			&item.InputTokens,
+			&item.EffectiveInputTokens,
 			&item.OutputTokens,
 			&item.ReasoningTokens,
 			&item.CachedTokens,
@@ -691,7 +713,7 @@ LIMIT ?`
 		); err != nil {
 			return nil, fmt.Errorf("cache statistics store: scan model summary: %w", err)
 		}
-		item.CacheRatio = ratio(item.CachedTokens, item.InputTokens)
+		item.CacheRatio = ratio(item.CachedTokens, cacheStatisticsRatioDenominator(item.EffectiveInputTokens, item.InputTokens))
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -706,6 +728,14 @@ SELECT
     substr(requested_at, 1, 10) AS day,
     COUNT(*),
     COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(CASE
+        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+            CASE
+                WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
+                ELSE cached_tokens
+            END
+        ELSE input_tokens
+    END), 0),
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0)
 FROM cache_statistics_requests
@@ -723,10 +753,10 @@ ORDER BY day ASC`
 	result := make([]CacheStatisticsDaySummary, 0)
 	for rows.Next() {
 		var item CacheStatisticsDaySummary
-		if err := rows.Scan(&item.Day, &item.Requests, &item.InputTokens, &item.CachedTokens, &item.TotalTokens); err != nil {
+		if err := rows.Scan(&item.Day, &item.Requests, &item.InputTokens, &item.EffectiveInputTokens, &item.CachedTokens, &item.TotalTokens); err != nil {
 			return nil, fmt.Errorf("cache statistics store: scan day summary: %w", err)
 		}
-		item.CacheRatio = ratio(item.CachedTokens, item.InputTokens)
+		item.CacheRatio = ratio(item.CachedTokens, cacheStatisticsRatioDenominator(item.EffectiveInputTokens, item.InputTokens))
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -795,7 +825,8 @@ LIMIT ?`
 		if ts, errParse := time.Parse(time.RFC3339Nano, requestedAt); errParse == nil {
 			item.Timestamp = ts
 		}
-		item.CacheRatio = ratio(item.CachedTokens, item.InputTokens)
+		item.EffectiveInputTokens = cacheStatisticsEffectiveInputTokens(item.Provider, item.InputTokens, item.CachedTokens, item.AnthropicCacheCreationInputTokens, item.AnthropicCacheReadInputTokens)
+		item.CacheRatio = ratio(item.CachedTokens, cacheStatisticsRatioDenominator(item.EffectiveInputTokens, item.InputTokens))
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -902,6 +933,25 @@ func normaliseNonNegative(value int64) int64 {
 		return 0
 	}
 	return value
+}
+
+func cacheStatisticsEffectiveInputTokens(provider string, inputTokens, cachedTokens, anthropicCacheCreationTokens, anthropicCacheReadTokens int64) int64 {
+	inputTokens = normaliseNonNegative(inputTokens)
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		cacheReadTokens := normaliseNonNegative(anthropicCacheReadTokens)
+		if cacheReadTokens == 0 {
+			cacheReadTokens = normaliseNonNegative(cachedTokens)
+		}
+		return inputTokens + normaliseNonNegative(anthropicCacheCreationTokens) + cacheReadTokens
+	}
+	return inputTokens
+}
+
+func cacheStatisticsRatioDenominator(effectiveInputTokens, inputTokens int64) int64 {
+	if effectiveInputTokens > 0 {
+		return effectiveInputTokens
+	}
+	return inputTokens
 }
 
 func cacheString(cache *helps.CodexCacheObservability, extract func(*helps.CodexCacheObservability) string) string {

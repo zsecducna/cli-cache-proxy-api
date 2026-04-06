@@ -116,6 +116,48 @@ func TestCacheStatisticsStoreUsesSingleSQLiteConnection(t *testing.T) {
 	}
 }
 
+func TestCacheStatisticsStoreSnapshotIncludesAnthropicEffectiveInputTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	event := CacheStatisticsEvent{
+		Timestamp: time.Now().UTC().Truncate(time.Second),
+		Provider:  "claude",
+		Model:     "claude-opus-4-6",
+		Tokens: TokenStats{
+			InputTokens:  3,
+			OutputTokens: 101,
+			CachedTokens: 164451,
+			TotalTokens:  104,
+		},
+		AnthropicCache: helps.AnthropicCacheObservability{
+			CacheCreationInputTokens: 1235,
+			CacheReadInputTokens:     164451,
+		},
+	}
+	if err := store.InsertEvent(context.Background(), event); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.Summary.EffectiveInputTokens != 165689 {
+		t.Fatalf("summary effective_input_tokens = %d, want 165689", snapshot.Summary.EffectiveInputTokens)
+	}
+	if len(snapshot.RecentRequests) != 1 {
+		t.Fatalf("len(RecentRequests) = %d, want 1", len(snapshot.RecentRequests))
+	}
+	if snapshot.RecentRequests[0].EffectiveInputTokens != 165689 {
+		t.Fatalf("recent effective_input_tokens = %d, want 165689", snapshot.RecentRequests[0].EffectiveInputTokens)
+	}
+}
+
 func TestCacheStatisticsStoreMigratesExistingDatabaseWithoutReasoningEffort(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	db, err := sql.Open("sqlite", path)

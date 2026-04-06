@@ -89,6 +89,7 @@
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 16px;
         margin: 0 0 16px;
+        transition: opacity 0.15s ease;
       }
       .cliproxy-enhancer__card {
         display: flex;
@@ -125,6 +126,7 @@
       }
       .cliproxy-enhancer__request-events {
         margin-top: 8px;
+        transition: opacity 0.15s ease;
       }
       .cliproxy-enhancer__table-wrap {
         overflow: auto;
@@ -161,6 +163,12 @@
       }
       .cliproxy-enhancer__warning-hidden {
         display: none !important;
+      }
+      [data-cliproxy-hidden="true"] {
+        display: none !important;
+      }
+      .cliproxy-enhancer__card {
+        transition: opacity 0.15s ease;
       }
       @media (max-width: 960px) {
         .cliproxy-enhancer__toolbar {
@@ -677,7 +685,19 @@
     const nextSignature = String(signature || '');
     if (node.dataset.cliproxySignature === nextSignature) return false;
     node.dataset.cliproxySignature = nextSignature;
-    node.innerHTML = html;
+    if (node.children.length === 0) {
+      // First render — no transition needed
+      node.innerHTML = html; // eslint-disable-line -- html is built from escapeHTML()-sanitized values
+      return true;
+    }
+    // Fade out, swap, fade in for smooth update
+    node.style.opacity = '0.4';
+    requestAnimationFrame(() => {
+      node.innerHTML = html; // eslint-disable-line -- html is built from escapeHTML()-sanitized values
+      requestAnimationFrame(() => {
+        node.style.opacity = '1';
+      });
+    });
     return true;
   }
 
@@ -727,20 +747,27 @@
     }
     const cachedTokens = Number(summary && summary.cached_tokens || 0);
     const inputTokens = Number(summary && summary.input_tokens || 0);
-    const percentage = inputTokens > 0 ? ((cachedTokens / inputTokens) * 100).toFixed(2) : '0.00';
-    const signature = ['cached-card', cachedTokens, inputTokens, percentage].join(':');
+    const effectiveInputTokens = Number(summary && summary.effective_input_tokens || inputTokens || 0);
+    const percentage = effectiveInputTokens > 0 ? ((cachedTokens / effectiveInputTokens) * 100).toFixed(2) : '0.00';
+    const signature = ['cached-card', cachedTokens, effectiveInputTokens, percentage].join(':');
     setEnhancerMarkup(cachedCard, signature, `
       <div class="cliproxy-enhancer__label">Cached Tokens</div>
       <div class="cliproxy-enhancer__value">${escapeHTML(formatCompact(cachedTokens))}<span>${escapeHTML(percentage)}%</span></div>
-      <div class="cliproxy-enhancer__hint">${escapeHTML(formatInteger(cachedTokens))} persisted cached tokens</div>
+      <div class="cliproxy-enhancer__hint">${escapeHTML(formatInteger(cachedTokens))} cached tokens over ${escapeHTML(formatInteger(effectiveInputTokens))} effective input tokens</div>
     `);
   }
 
   function hideUsageBlocks(container) {
     const linesBlock = findUsageChildBlock(container, 'Lines to display');
-    if (linesBlock) linesBlock.style.display = 'none';
+    if (linesBlock) {
+      linesBlock.style.display = 'none';
+      linesBlock.dataset.cliproxyHidden = 'true';
+    }
     const serviceHealthBlock = findUsageChildBlock(container, 'Service Health');
-    if (serviceHealthBlock) serviceHealthBlock.style.display = 'none';
+    if (serviceHealthBlock) {
+      serviceHealthBlock.style.display = 'none';
+      serviceHealthBlock.dataset.cliproxyHidden = 'true';
+    }
   }
 
   function renderRequestEvents(container, stats, timeRange) {
@@ -769,7 +796,7 @@
               <th>Model Name</th>
               <th>Reasoning Effort</th>
               <th>Cache Policy</th>
-              <th>Input Tokens</th>
+              <th>Input Tokens (effective)</th>
               <th>Output Tokens</th>
               <th>Reasoning Tokens</th>
               <th>Cache Read</th>
@@ -791,13 +818,20 @@
               const isAnthropicRow = item.anthropic_rewrite_applied || anthropicCacheRead > 0 || anthropicCacheWrite > 0;
               const cacheRead = isAnthropicRow ? anthropicCacheRead : Number(item.cached_tokens || 0);
               const cacheWrite = isAnthropicRow ? anthropicCacheWrite : 0;
+              const rawInput = Number(item.input_tokens || 0);
+              const effectiveInput = isAnthropicRow
+                ? Number(item.effective_input_tokens || 0) || (rawInput + cacheRead + cacheWrite)
+                : rawInput;
+              const inputLabel = isAnthropicRow && effectiveInput !== rawInput
+                ? `${formatInteger(effectiveInput)} (uncached ${formatInteger(rawInput)})`
+                : formatInteger(effectiveInput);
               return `
               <tr>
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
                 <td>${escapeHTML(item.model || '')}</td>
                 <td>${escapeHTML(item.reasoning_effort || 'n/a')}</td>
                 <td>${escapeHTML(policy)}</td>
-                <td>${escapeHTML(formatInteger(item.input_tokens))}</td>
+                <td>${escapeHTML(inputLabel)}</td>
                 <td>${escapeHTML(formatInteger(item.output_tokens))}</td>
                 <td>${escapeHTML(formatInteger(item.reasoning_tokens))}</td>
                 <td>${escapeHTML(formatInteger(cacheRead))}</td>
@@ -1082,7 +1116,8 @@
     if (!getUsageAutoEnabled()) return;
     usageTimer = window.setInterval(() => {
       if (!isUsagePageReady() || document.hidden) return;
-      triggerUsageRefresh();
+      // Fetch enhanced data directly — do NOT click native Refresh button
+      // as that causes the React app to re-render all native content (flash).
       refreshUsagePage(true).catch(() => {});
     }, getUsageIntervalSeconds() * 1000);
   }

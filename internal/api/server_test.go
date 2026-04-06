@@ -216,6 +216,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "Cache Read") || !strings.Contains(body, "Cache Write") || !strings.Contains(body, "anthropic_cache_read_input_tokens") || !strings.Contains(body, "anthropic_cache_creation_input_tokens") {
 		t.Fatalf("management page missing anthropic cache accounting labels/fields: %s", body)
 	}
+	if !strings.Contains(body, "Input Tokens (effective)") || !strings.Contains(body, "effective_input_tokens") {
+		t.Fatalf("management page missing effective input token evidence for anthropic rows: %s", body)
+	}
 	if strings.Contains(body, "Total Input") {
 		t.Fatalf("management page should not render the removed Total Input column: %s", body)
 	}
@@ -509,6 +512,64 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=gemini", 2, "gemini", "gemini-cli")
 	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 2, "openai-compatibility", "openrouter")
 	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", 1, "claude")
+}
+
+func TestManagementCacheStatisticsEndpointIncludesAnthropicEffectiveInputTokens(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	event := usage.CacheStatisticsEvent{
+		Timestamp: time.Now().UTC().Truncate(time.Second),
+		Provider:  "claude",
+		Model:     "claude-opus-4-6",
+		Tokens: usage.TokenStats{
+			InputTokens:  3,
+			OutputTokens: 101,
+			CachedTokens: 164451,
+			TotalTokens:  104,
+		},
+		AnthropicCache: helps.AnthropicCacheObservability{
+			CacheCreationInputTokens: 1235,
+			CacheReadInputTokens:     164451,
+		},
+	}
+	if err := store.InsertEvent(context.Background(), event); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		CacheStatistics struct {
+			Summary struct {
+				EffectiveInputTokens int64 `json:"effective_input_tokens"`
+			} `json:"summary"`
+			RecentRequests []struct {
+				EffectiveInputTokens int64 `json:"effective_input_tokens"`
+			} `json:"recent_requests"`
+		} `json:"cache_statistics"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.CacheStatistics.Summary.EffectiveInputTokens != 165689 {
+		t.Fatalf("summary effective_input_tokens = %d, want 165689", payload.CacheStatistics.Summary.EffectiveInputTokens)
+	}
+	if len(payload.CacheStatistics.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(payload.CacheStatistics.RecentRequests))
+	}
+	if payload.CacheStatistics.RecentRequests[0].EffectiveInputTokens != 165689 {
+		t.Fatalf("recent effective_input_tokens = %d, want 165689", payload.CacheStatistics.RecentRequests[0].EffectiveInputTokens)
+	}
 }
 
 func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
