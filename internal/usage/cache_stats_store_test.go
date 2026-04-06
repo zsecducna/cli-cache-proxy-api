@@ -102,6 +102,20 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestCacheStatisticsStoreUsesSingleSQLiteConnection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	stats := store.db.Stats()
+	if stats.MaxOpenConnections != 1 {
+		t.Fatalf("max open connections = %d, want 1", stats.MaxOpenConnections)
+	}
+}
+
 func TestCacheStatisticsStoreMigratesExistingDatabaseWithoutReasoningEffort(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	db, err := sql.Open("sqlite", path)

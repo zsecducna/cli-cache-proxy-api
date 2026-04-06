@@ -934,6 +934,46 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_Execute_PersistsAnthropicCacheUsageObservability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", bytes.NewReader([]byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)))
+	ginCtx.Request = ginReq
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":31,"cache_read_input_tokens":22000}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{
+		"api_key":  "sk-ant-oauth-token",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	if _, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	obs, ok := helps.GetAnthropicCacheObservability(ctx)
+	if !ok {
+		t.Fatal("expected anthropic cache observability")
+	}
+	if obs.CacheCreationInputTokens != 31 {
+		t.Fatalf("cache creation input tokens = %d, want 31", obs.CacheCreationInputTokens)
+	}
+	if obs.CacheReadInputTokens != 22000 {
+		t.Fatalf("cache read input tokens = %d, want 22000", obs.CacheReadInputTokens)
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")

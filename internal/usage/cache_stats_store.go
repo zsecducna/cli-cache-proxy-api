@@ -204,6 +204,8 @@ func OpenCacheStatisticsStore(path string) (*CacheStatisticsStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cache statistics store: open database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	for _, stmt := range []string{
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
@@ -363,20 +365,28 @@ INSERT INTO cache_statistics_requests (
 }
 
 func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelLimit, days int) (CacheStatisticsSnapshot, error) {
+	return s.SnapshotByProvider(ctx, recentLimit, modelLimit, days, "")
+}
+
+func (s *CacheStatisticsStore) SnapshotByProvider(ctx context.Context, recentLimit, modelLimit, days int, provider string) (CacheStatisticsSnapshot, error) {
 	if days <= 0 {
 		days = defaultCacheStatisticsDays
 	}
-	return s.snapshotSince(ctx, recentLimit, modelLimit, snapshotSince(days))
+	return s.snapshotSince(ctx, recentLimit, modelLimit, snapshotSince(days), provider)
 }
 
 func (s *CacheStatisticsStore) SnapshotSince(ctx context.Context, recentLimit, modelLimit int, since time.Time) (CacheStatisticsSnapshot, error) {
-	if since.IsZero() {
-		return s.Snapshot(ctx, recentLimit, modelLimit, defaultCacheStatisticsDays)
-	}
-	return s.snapshotSince(ctx, recentLimit, modelLimit, since.UTC().Format(time.RFC3339Nano))
+	return s.SnapshotSinceByProvider(ctx, recentLimit, modelLimit, since, "")
 }
 
-func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, modelLimit int, since string) (CacheStatisticsSnapshot, error) {
+func (s *CacheStatisticsStore) SnapshotSinceByProvider(ctx context.Context, recentLimit, modelLimit int, since time.Time, provider string) (CacheStatisticsSnapshot, error) {
+	if since.IsZero() {
+		return s.SnapshotByProvider(ctx, recentLimit, modelLimit, defaultCacheStatisticsDays, provider)
+	}
+	return s.snapshotSince(ctx, recentLimit, modelLimit, since.UTC().Format(time.RFC3339Nano), provider)
+}
+
+func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, modelLimit int, since string, provider string) (CacheStatisticsSnapshot, error) {
 	result := CacheStatisticsSnapshot{Enabled: s != nil && s.db != nil}
 	if ctx == nil {
 		ctx = context.Background()
@@ -392,19 +402,19 @@ func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, m
 	}
 	result.DBPath = s.path
 
-	summary, err := s.querySummary(ctx, since)
+	summary, err := s.querySummary(ctx, since, provider)
 	if err != nil {
 		return result, err
 	}
-	byModel, err := s.queryModelSummaries(ctx, modelLimit, since)
+	byModel, err := s.queryModelSummaries(ctx, modelLimit, since, provider)
 	if err != nil {
 		return result, err
 	}
-	byDay, err := s.queryDaySummaries(ctx, since)
+	byDay, err := s.queryDaySummaries(ctx, since, provider)
 	if err != nil {
 		return result, err
 	}
-	recent, err := s.queryRecentRequests(ctx, recentLimit, since)
+	recent, err := s.queryRecentRequests(ctx, recentLimit, since, provider)
 	if err != nil {
 		return result, err
 	}
@@ -594,9 +604,9 @@ ORDER BY requested_at ASC, id ASC`)
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string) (CacheStatisticsSummary, error) {
+func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string, provider string) (CacheStatisticsSummary, error) {
 	var summary CacheStatisticsSummary
-	err := s.db.QueryRowContext(ctx, `
+	query := `
 SELECT
     COUNT(*),
     COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
@@ -608,7 +618,10 @@ SELECT
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0)
 FROM cache_statistics_requests
-WHERE requested_at >= ?`, since).Scan(
+WHERE requested_at >= ?`
+	args := []any{since}
+	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
 		&summary.TotalRequests,
 		&summary.SuccessRequests,
 		&summary.FailedRequests,
@@ -626,8 +639,8 @@ WHERE requested_at >= ?`, since).Scan(
 	return summary, nil
 }
 
-func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string) ([]CacheStatisticsModelSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsModelSummary, error) {
+	query := `
 SELECT
     model,
     COUNT(*),
@@ -639,10 +652,15 @@ SELECT
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0)
 FROM cache_statistics_requests
-WHERE requested_at >= ?
+WHERE requested_at >= ?`
+	args := []any{since}
+	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query += `
 GROUP BY model
 ORDER BY COUNT(*) DESC, model ASC
-LIMIT ?`, since, limit)
+LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cache statistics store: query model summaries: %w", err)
 	}
@@ -672,8 +690,8 @@ LIMIT ?`, since, limit)
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string) ([]CacheStatisticsDaySummary, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, provider string) ([]CacheStatisticsDaySummary, error) {
+	query := `
 SELECT
     substr(requested_at, 1, 10) AS day,
     COUNT(*),
@@ -681,9 +699,13 @@ SELECT
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0)
 FROM cache_statistics_requests
-WHERE requested_at >= ?
+WHERE requested_at >= ?`
+	args := []any{since}
+	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query += `
 GROUP BY substr(requested_at, 1, 10)
-ORDER BY day ASC`, since)
+ORDER BY day ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cache statistics store: query day summaries: %w", err)
 	}
@@ -703,8 +725,8 @@ ORDER BY day ASC`, since)
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string) ([]CacheStatisticsRequest, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsRequest, error) {
+	query := `
 SELECT
     id, requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
@@ -712,9 +734,14 @@ SELECT
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
 FROM cache_statistics_requests
-WHERE requested_at >= ?
+WHERE requested_at >= ?`
+	args := []any{since}
+	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query += `
 ORDER BY requested_at DESC, id DESC
-LIMIT ?`, since, limit)
+LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cache statistics store: query recent requests: %w", err)
 	}
@@ -765,6 +792,41 @@ LIMIT ?`, since, limit)
 		return nil, fmt.Errorf("cache statistics store: iterate recent requests: %w", err)
 	}
 	return result, nil
+}
+
+func appendCacheStatisticsProviderFilter(query string, args []any, provider string) (string, []any) {
+	providers := cacheStatisticsProvidersForFilter(provider)
+	if len(providers) == 0 {
+		return query, args
+	}
+	placeholders := make([]string, 0, len(providers))
+	for _, item := range providers {
+		placeholders = append(placeholders, "?")
+		args = append(args, item)
+	}
+	query += " AND provider IN (" + strings.Join(placeholders, ",") + ")"
+	return query, args
+}
+
+func cacheStatisticsProvidersForFilter(provider string) []string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "":
+		return nil
+	case "gemini":
+		return []string{"gemini", "gemini-cli", "aistudio", "antigravity"}
+	case "codex":
+		return []string{"codex"}
+	case "claude":
+		return []string{"claude"}
+	case "vertex":
+		return []string{"vertex"}
+	case "ampcode":
+		return []string{"ampcode"}
+	case "openai-compatible", "openai_compatible", "openai compatible providers":
+		return []string{"openai-compatibility", "openrouter"}
+	default:
+		return []string{strings.TrimSpace(provider)}
+	}
 }
 
 func ensureCacheStatisticsColumn(db *sql.DB, tableName, columnName, alterSQL string) error {

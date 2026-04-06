@@ -926,7 +926,9 @@ main() {
     staging_binary="$(mktemp "$install_root/cli-proxy-api.staging.XXXXXX")"
     build_binary "$repo_root" "$config_path" "$staging_binary"
     install_binary "$staging_binary" "$binary_path"
-  elif [[ ! -x "$binary_path" ]]; then
+  elif [[ -x "$binary_path" ]]; then
+    die "Build was skipped, but the existing binary at $binary_path would hide source changes. Re-run install.sh and choose to build from source so UI changes are installed."
+  else
     die "No existing binary found at $binary_path and build was skipped."
   fi
 

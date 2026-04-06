@@ -20,6 +20,15 @@
   const MAX_REQUEST_ROWS = 50;
   const RECENT_REQUEST_FETCH_LIMIT = 500;
   const MODEL_LIMIT = 10;
+  const PROVIDER_FILTER_OPTIONS = [
+    { value: '', label: 'All Providers' },
+    { value: 'gemini', label: 'Gemini' },
+    { value: 'codex', label: 'Codex' },
+    { value: 'claude', label: 'Claude' },
+    { value: 'vertex', label: 'Vertex' },
+    { value: 'ampcode', label: 'ampcode' },
+    { value: 'openai-compatible', label: 'OpenAI Compatible Providers' },
+  ];
 
   let managementAuthorization = '';
   let nativeFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
@@ -413,6 +422,10 @@
     } else {
       url.searchParams.set('days', String(timeRange && timeRange.days || 14));
     }
+    const provider = getUsageProviderFilter();
+    if (provider) {
+      url.searchParams.set('provider', provider);
+    }
     url.searchParams.set('limit', String(limit));
     url.searchParams.set('model_limit', String(MODEL_LIMIT));
     const response = await nativeFetch(url.toString(), {
@@ -462,6 +475,10 @@
       controls.className = 'cliproxy-enhancer__toolbar';
       controls.innerHTML = `
         <label>
+          Provider
+          <select id="cliproxy-usage-provider-filter">${PROVIDER_FILTER_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('')}</select>
+        </label>
+        <label>
           <input id="cliproxy-usage-auto-refresh-toggle" type="checkbox">
           Usage auto refresh
         </label>
@@ -473,8 +490,15 @@
         <span class="cliproxy-enhancer__hint">Follows the page-global Usage Statistics time filter.</span>
       `;
       header.insertAdjacentElement('afterend', controls);
+      const provider = controls.querySelector('#cliproxy-usage-provider-filter');
       const toggle = controls.querySelector('#cliproxy-usage-auto-refresh-toggle');
       const interval = controls.querySelector('#cliproxy-usage-auto-refresh-interval');
+      provider.addEventListener('change', () => {
+        lastUsageStatisticsFetchAt = 0;
+        lastUsageStatistics = null;
+        lastUsageStatisticsRangeKey = '';
+        refreshUsagePage(false).catch(() => {});
+      });
       toggle.addEventListener('change', () => {
         setJSONStorage(STORAGE_KEYS.usageAuto, toggle.checked);
         startUsageTimer();
@@ -614,7 +638,6 @@
               <th>Reasoning Tokens</th>
               <th>Cache Read</th>
               <th>Cache Write</th>
-              <th>Total Input</th>
             </tr>
           </thead>
           <tbody>
@@ -632,9 +655,6 @@
               const isAnthropicRow = item.anthropic_rewrite_applied || anthropicCacheRead > 0 || anthropicCacheWrite > 0;
               const cacheRead = isAnthropicRow ? anthropicCacheRead : Number(item.cached_tokens || 0);
               const cacheWrite = isAnthropicRow ? anthropicCacheWrite : 0;
-              const totalInput = isAnthropicRow
-                ? Number(item.input_tokens || 0) + anthropicCacheRead + anthropicCacheWrite
-                : Number(item.total_tokens || 0);
               return `
               <tr>
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
@@ -646,11 +666,10 @@
                 <td>${escapeHTML(formatInteger(item.reasoning_tokens))}</td>
                 <td>${escapeHTML(formatInteger(cacheRead))}</td>
                 <td>${escapeHTML(formatInteger(cacheWrite))}</td>
-                <td>${escapeHTML(formatInteger(totalInput))}</td>
               </tr>
             `; }).join('') : `
               <tr>
-                <td colspan="10" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+                <td colspan="9" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
               </tr>
             `}
           </tbody>

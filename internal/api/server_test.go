@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -210,8 +213,14 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "Service Health") || !strings.Contains(body, "Cached Tokens") || !strings.Contains(body, "Reasoning Effort") {
 		t.Fatalf("management page missing usage/request-events labels: %s", body)
 	}
-	if !strings.Contains(body, "Cache Read") || !strings.Contains(body, "Cache Write") || !strings.Contains(body, "Total Input") || !strings.Contains(body, "anthropic_cache_read_input_tokens") || !strings.Contains(body, "anthropic_cache_creation_input_tokens") {
+	if !strings.Contains(body, "Cache Read") || !strings.Contains(body, "Cache Write") || !strings.Contains(body, "anthropic_cache_read_input_tokens") || !strings.Contains(body, "anthropic_cache_creation_input_tokens") {
 		t.Fatalf("management page missing anthropic cache accounting labels/fields: %s", body)
+	}
+	if strings.Contains(body, "Total Input") {
+		t.Fatalf("management page should not render the removed Total Input column: %s", body)
+	}
+	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI Compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") {
+		t.Fatalf("management page missing provider filter controls/options: %s", body)
 	}
 	if strings.Contains(body, "cliproxy-cache-stats-inline-host") {
 		t.Fatalf("management page should not include the removed inline host: %s", body)
@@ -397,6 +406,103 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 	if len(sincePayload.CacheStatistics.RecentRequests) != 1 || sincePayload.CacheStatistics.RecentRequests[0].Model != "gpt-5.4-mini" {
 		t.Fatalf("since recent requests = %+v, want only gpt-5.4-mini", sincePayload.CacheStatistics.RecentRequests)
 	}
+}
+
+func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []usage.CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-5 * time.Minute),
+			Provider:  "gemini",
+			Model:     "gemini-2.5-pro",
+			Tokens:    usage.TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		},
+		{
+			Timestamp: now.Add(-4 * time.Minute),
+			Provider:  "gemini-cli",
+			Model:     "gemini-2.5-flash",
+			Tokens:    usage.TokenStats{InputTokens: 20, OutputTokens: 5, TotalTokens: 25},
+		},
+		{
+			Timestamp: now.Add(-3 * time.Minute),
+			Provider:  "openai-compatibility",
+			Model:     "gpt-4.1",
+			Tokens:    usage.TokenStats{InputTokens: 30, OutputTokens: 5, TotalTokens: 35},
+		},
+		{
+			Timestamp: now.Add(-2 * time.Minute),
+			Provider:  "openrouter",
+			Model:     "gpt-4.1-mini",
+			Tokens:    usage.TokenStats{InputTokens: 40, OutputTokens: 5, TotalTokens: 45},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Minute),
+			Provider:  "claude",
+			Model:     "claude-sonnet-4-6",
+			Tokens:    usage.TokenStats{InputTokens: 50, OutputTokens: 5, TotalTokens: 55},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	assertProviders := func(path string, wantTotal int64, wantProviders ...string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-secret")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		var payload struct {
+			CacheStatistics struct {
+				Summary struct {
+					TotalRequests int64 `json:"total_requests"`
+				} `json:"summary"`
+				RecentRequests []struct {
+					Provider string `json:"provider"`
+				} `json:"recent_requests"`
+			} `json:"cache_statistics"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if payload.CacheStatistics.Summary.TotalRequests != wantTotal {
+			t.Fatalf("total_requests = %d, want %d", payload.CacheStatistics.Summary.TotalRequests, wantTotal)
+		}
+		if len(payload.CacheStatistics.RecentRequests) != len(wantProviders) {
+			t.Fatalf("recent requests len = %d, want %d", len(payload.CacheStatistics.RecentRequests), len(wantProviders))
+		}
+		got := make([]string, 0, len(payload.CacheStatistics.RecentRequests))
+		for _, item := range payload.CacheStatistics.RecentRequests {
+			got = append(got, item.Provider)
+		}
+		for _, want := range wantProviders {
+			found := false
+			for _, candidate := range got {
+				if candidate == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("providers = %v, want to contain %q", got, want)
+			}
+		}
+	}
+
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=gemini", 2, "gemini", "gemini-cli")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 2, "openai-compatibility", "openrouter")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", 1, "claude")
 }
 
 func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
@@ -631,6 +737,68 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestInstallScriptRefusesSkipBuildWhenExistingBinaryWouldHideSourceChanges(t *testing.T) {
+	_, filePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test file path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", ".."))
+	installRoot := t.TempDir()
+	authDir := filepath.Join(installRoot, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	binaryPath := filepath.Join(installRoot, "cli-proxy-api")
+	if err := os.WriteFile(binaryPath, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("failed to seed existing binary: %v", err)
+	}
+
+	scriptBytes, err := os.ReadFile(filepath.Join(repoRoot, "install.sh"))
+	if err != nil {
+		t.Fatalf("failed to read install.sh: %v", err)
+	}
+	scriptBody := strings.TrimSuffix(string(scriptBytes), "main \"$@\"\n")
+	scriptBody = strings.TrimSuffix(scriptBody, "main \"$@\"")
+	harness := fmt.Sprintf(`%s
+prompt_with_default() {
+  case "$1" in
+    "Install location") printf '%%s' %q ;;
+    "Auth folder") printf '%%s' %q ;;
+    *) printf '%%s' '' ;;
+  esac
+}
+confirm_yes_no() {
+  case "$1" in
+    "Build binary from source now?") return 1 ;;
+    "Create launchd service?") return 1 ;;
+    *) return 1 ;;
+  esac
+}
+require_tools() { :; }
+detect_sources() { CONFIG_SOURCES=(); AUTH_SOURCES=(); DB_SOURCES=(); BINARY_SOURCES=(); }
+print_detection_summary() { :; }
+choose_config_source() { return 1; }
+copy_or_patch_config() { :; }
+append_sources_excluding_target() { :; }
+ensure_cache_stats_schema() { :; }
+print_next_steps() { :; }
+main
+`, scriptBody, installRoot, authDir)
+	harnessPath := filepath.Join(t.TempDir(), "install-harness.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("failed to write install harness: %v", err)
+	}
+
+	cmd := exec.Command("bash", harnessPath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected install.sh to fail when build is skipped and an existing binary would hide source changes; output=%s", string(output))
+	}
+	if !strings.Contains(string(output), "source changes") {
+		t.Fatalf("expected skip-build failure to mention source changes, got: %s", string(output))
 	}
 }
 

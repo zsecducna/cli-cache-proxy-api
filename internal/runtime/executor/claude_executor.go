@@ -294,6 +294,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	helps.SetAnthropicCacheObservability(ctx, data)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
@@ -474,6 +475,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 								scanner.Buffer(nil, 52_428_800)
 								for scanner.Scan() {
 									line := scanner.Bytes()
+									helps.SetAnthropicCacheObservability(ctx, line)
 									helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 									if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 										reporter.Publish(ctx, detail)
@@ -565,6 +567,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				helps.SetAnthropicCacheObservability(ctx, line)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)

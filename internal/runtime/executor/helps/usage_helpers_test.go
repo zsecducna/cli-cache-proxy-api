@@ -71,6 +71,37 @@ func TestParseOpenAIStreamUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsage_DoesNotTreatCacheCreationAsCacheRead(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":103562}}`)
+	detail := ParseClaudeUsage(data)
+	if detail.InputTokens != 3 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3)
+	}
+	if detail.OutputTokens != 7 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	}
+	if detail.CachedTokens != 0 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 0)
+	}
+}
+
+func TestParseClaudeStreamUsage_DoesNotTreatCacheCreationAsCacheRead(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":103562}}`)
+	detail, ok := ParseClaudeStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseClaudeStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 3 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 3)
+	}
+	if detail.OutputTokens != 7 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	}
+	if detail.CachedTokens != 0 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 0)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",

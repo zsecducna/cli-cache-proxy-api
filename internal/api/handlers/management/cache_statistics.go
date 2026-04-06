@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,7 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 	limit := readPositiveIntQuery(c, "limit", 50)
 	modelLimit := readPositiveIntQuery(c, "model_limit", 10)
 	days := readPositiveIntQuery(c, "days", 14)
+	provider := strings.TrimSpace(c.Query("provider"))
 
 	store := usage.GetCacheStatisticsStore()
 	var (
@@ -28,9 +30,9 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid since parameter"})
 			return
 		}
-		snapshot, err = store.SnapshotSince(c.Request.Context(), limit, modelLimit, since)
+		snapshot, err = store.SnapshotSinceByProvider(c.Request.Context(), limit, modelLimit, since, provider)
 	} else {
-		snapshot, err = store.Snapshot(c.Request.Context(), limit, modelLimit, days)
+		snapshot, err = store.SnapshotByProvider(c.Request.Context(), limit, modelLimit, days, provider)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

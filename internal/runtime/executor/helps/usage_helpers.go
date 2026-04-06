@@ -332,10 +332,6 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 		OutputTokens: usageNode.Get("output_tokens").Int(),
 		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
 	}
-	if detail.CachedTokens == 0 {
-		// fall back to creation tokens when read tokens are absent
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
-	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail
 }
@@ -353,9 +349,6 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 		InputTokens:  usageNode.Get("input_tokens").Int(),
 		OutputTokens: usageNode.Get("output_tokens").Int(),
 		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
-	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail, true
