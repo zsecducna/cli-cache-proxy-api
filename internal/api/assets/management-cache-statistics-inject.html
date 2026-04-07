@@ -248,6 +248,64 @@
         color: var(--text-tertiary, #6b7280);
         font-size: 13px;
       }
+      .cliproxy-enhancer__bar-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-height: 240px;
+        padding-top: 8px;
+      }
+      .cliproxy-enhancer__bar-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        align-items: center;
+      }
+      .cliproxy-enhancer__bar-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+      }
+      .cliproxy-enhancer__bar-label {
+        font-size: 12px;
+        color: var(--text-primary, #111827);
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .cliproxy-enhancer__bar-track {
+        position: relative;
+        width: 100%;
+        height: 16px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--border-color, #d5d9e0) 60%, transparent);
+        overflow: hidden;
+      }
+      .cliproxy-enhancer__bar-fill {
+        display: flex;
+        height: 100%;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .cliproxy-enhancer__bar-segment {
+        height: 100%;
+      }
+      .cliproxy-enhancer__bar-value {
+        font-size: 12px;
+        color: var(--text-secondary, #4b5563);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .cliproxy-enhancer__bar-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 220px;
+        color: var(--text-tertiary, #6b7280);
+        font-size: 13px;
+      }
       .cliproxy-enhancer__warning-hidden {
         display: none !important;
       }
@@ -981,6 +1039,152 @@
     renderUsageTrendChartCard(findUsageTrendCard(container, 'Token Usage Trends'), stats, 'tokens');
   }
 
+  function calculateModelCost(summary, modelPrices) {
+    const modelName = normalize(summary && summary.model);
+    const pricing = modelName ? modelPrices[modelName] : null;
+    if (!pricing) return 0;
+    const inputTokens = Math.max(0, Number(summary && summary.input_tokens || 0));
+    const cachedTokens = Math.max(0, Number(summary && summary.cached_tokens || 0));
+    const outputTokens = Math.max(0, Number(summary && summary.output_tokens || 0));
+    const uncachedInputTokens = Math.max(inputTokens - cachedTokens, 0);
+    const cost = (
+      (uncachedInputTokens * Math.max(0, Number(pricing.prompt || 0))) +
+      (cachedTokens * Math.max(0, Number(pricing.cache || 0))) +
+      (outputTokens * Math.max(0, Number(pricing.completion || 0)))
+    ) / 1000000;
+    return Number.isFinite(cost) ? cost : 0;
+  }
+
+  function hideUsageChartCardChildren(card, hideHeaderControls) {
+    if (!(card instanceof HTMLElement)) return null;
+    const header = card.querySelector('.card-header');
+    Array.from(card.children).forEach((child) => {
+      if (child === header || isEnhancerNode(child)) return;
+      child.style.display = 'none';
+      child.dataset.cliproxyHidden = 'true';
+    });
+    if (hideHeaderControls && header instanceof HTMLElement) {
+      Array.from(header.children).forEach((child) => {
+        if (String(child.className || '').includes('title')) return;
+        child.style.display = 'none';
+        child.dataset.cliproxyHidden = 'true';
+      });
+    }
+    return header;
+  }
+
+  function buildModelBarChartHTML(items, segments, valueFormatter, emptyMessage) {
+    const validItems = Array.isArray(items) ? items.filter((item) => Number(item && item.total || 0) > 0) : [];
+    if (!validItems.length) {
+      return `<div class="cliproxy-enhancer__bar-empty">${escapeHTML(emptyMessage)}</div>`;
+    }
+    const maxTotal = Math.max(1, ...validItems.map((item) => Number(item.total || 0)));
+    const legend = segments.map((segment) => `
+      <div class="cliproxy-enhancer__trend-legend-item">
+        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${segment.color};"></span>
+        <span>${escapeHTML(segment.label)}</span>
+      </div>
+    `).join('');
+    const rows = validItems.map((item) => {
+      const width = Math.max(2, (Number(item.total || 0) / maxTotal) * 100);
+      const total = Math.max(0, Number(item.total || 0));
+      const barSegments = segments.map((segment) => {
+        const value = Math.max(0, Number(item.values && item.values[segment.key] || 0));
+        if (value <= 0 || total <= 0) return '';
+        return `<span class="cliproxy-enhancer__bar-segment" style="width:${(value / total) * 100}%;background:${segment.color};"></span>`;
+      }).join('');
+      return `
+        <div class="cliproxy-enhancer__bar-row">
+          <div class="cliproxy-enhancer__bar-label">${escapeHTML(item.label)}</div>
+          <div class="cliproxy-enhancer__bar-track">
+            <div class="cliproxy-enhancer__bar-fill" style="width:${width}%;">
+              ${barSegments}
+            </div>
+          </div>
+          <div class="cliproxy-enhancer__bar-value">${escapeHTML(valueFormatter(total))}</div>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div class="cliproxy-enhancer__bar-legend">${legend}</div>
+      <div class="cliproxy-enhancer__bar-shell">${rows}</div>
+    `;
+  }
+
+  function renderTokenTypeBreakdownChart(card, stats) {
+    if (!(card instanceof HTMLElement)) return;
+    const header = hideUsageChartCardChildren(card, true);
+    let panel = card.querySelector('#cliproxy-token-type-breakdown');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'cliproxy-token-type-breakdown';
+      panel.className = 'cliproxy-enhancer__bar-shell';
+      if (header && header.parentElement === card) {
+        header.insertAdjacentElement('afterend', panel);
+      } else {
+        card.appendChild(panel);
+      }
+    }
+    const summaries = Array.isArray(stats && stats.by_model) ? stats.by_model : [];
+    const items = summaries.map((item) => ({
+      label: normalize(item && item.model) || 'unknown',
+      total: Number(item && item.total_tokens || 0),
+      values: {
+        input: Number(item && item.input_tokens || 0),
+        output: Number(item && item.output_tokens || 0),
+        cached: Number(item && item.cached_tokens || 0),
+        reasoning: Number(item && item.reasoning_tokens || 0),
+      },
+    }));
+    const segments = [
+      { key: 'input', label: 'Input Tokens', color: '#8b8680' },
+      { key: 'output', label: 'Output Tokens', color: '#0f766e' },
+      { key: 'cached', label: 'Cached Tokens', color: '#2563eb' },
+      { key: 'reasoning', label: 'Reasoning Tokens', color: '#b45309' },
+    ];
+    const signature = ['token-type-breakdown', items.map((item) => `${item.label}:${item.total}:${Object.values(item.values).join(',')}`).join('|')].join(':');
+    setEnhancerMarkup(panel, signature, buildModelBarChartHTML(items, segments, formatCompact, 'No token breakdown available for the selected window.'));
+  }
+
+  function renderCostOverviewChart(card, stats) {
+    if (!(card instanceof HTMLElement)) return;
+    const header = hideUsageChartCardChildren(card, true);
+    let panel = card.querySelector('#cliproxy-cost-overview');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'cliproxy-cost-overview';
+      panel.className = 'cliproxy-enhancer__bar-shell';
+      if (header && header.parentElement === card) {
+        header.insertAdjacentElement('afterend', panel);
+      } else {
+        card.appendChild(panel);
+      }
+    }
+    const modelPrices = readModelPrices();
+    const summaries = Array.isArray(stats && stats.by_model) ? stats.by_model : [];
+    const items = summaries.map((item) => ({
+      label: normalize(item && item.model) || 'unknown',
+      total: calculateModelCost(item, modelPrices),
+      values: {
+        cost: calculateModelCost(item, modelPrices),
+      },
+    }));
+    const segments = [
+      { key: 'cost', label: 'Estimated Cost', color: '#047857' },
+    ];
+    const hasPricing = Object.keys(modelPrices).length > 0;
+    const signature = ['cost-overview', hasPricing ? 'priced' : 'unpriced', items.map((item) => `${item.label}:${item.total}`).join('|')].join(':');
+    const html = hasPricing
+      ? buildModelBarChartHTML(items, segments, formatCurrency, 'No model cost data available for the selected window.')
+      : '<div class="cliproxy-enhancer__bar-empty">Set model prices to view per-model cost overview.</div>';
+    setEnhancerMarkup(panel, signature, html);
+  }
+
+  function renderUsageModelBreakdownCharts(container, stats) {
+    renderTokenTypeBreakdownChart(findUsageTrendCard(container, 'Token Type Breakdown'), stats);
+    renderCostOverviewChart(findUsageTrendCard(container, 'Cost Overview'), stats);
+  }
+
   function readModelPrices() {
     try {
       const raw = window.localStorage.getItem(MODEL_PRICES_STORAGE_KEY);
@@ -1598,6 +1802,7 @@
     patchCachedTokensCard(container, stats.summary || {}, timeRange);
     patchAverageLatencyCard(container, stats.summary || {}, timeRange);
     renderUsageTrendCharts(container, stats || {});
+    renderUsageModelBreakdownCharts(container, stats || {});
     renderRequestEvents(container, stats, timeRange);
   }
 

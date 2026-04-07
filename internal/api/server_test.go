@@ -377,6 +377,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "renderUsageTrendCharts") || !strings.Contains(body, "trend_by_model") || !strings.Contains(body, "Token Usage Trends") || !strings.Contains(body, "Request Trends") {
 		t.Fatalf("management enhancer should replace the native aggregate trend charts with provider/time-filtered model trend charts driven by cache statistics: %s", body)
 	}
+	if !strings.Contains(body, "renderUsageModelBreakdownCharts") || !strings.Contains(body, "Token Type Breakdown") || !strings.Contains(body, "Cost Overview") || !strings.Contains(body, "Set model prices to view per-model cost overview.") {
+		t.Fatalf("management enhancer should replace the remaining aggregate usage breakdown cards with model-based token and cost charts driven by cache statistics summaries: %s", body)
+	}
 	if !strings.Contains(body, "disableChartAnimationOptions") || !strings.Contains(body, "scheduleChartAnimationDisable") || !strings.Contains(body, "canvas.$chartjs") || !strings.Contains(body, "options.animation = false;") || !strings.Contains(body, "findChartInstanceForCanvas") || !strings.Contains(body, "chart.update('none')") {
 		t.Fatalf("management enhancer should disable canvas chart animations through both the chart fiber options path and the live chart instance redraw path so all management charts redraw without motion: %s", body)
 	}
