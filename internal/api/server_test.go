@@ -321,8 +321,11 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "button[aria-label=\"Time Range\"]") || !strings.Contains(body, "setEnhancerMarkup") || !strings.Contains(body, "node.dataset.cliproxySignature") {
 		t.Fatalf("management enhancer should follow the live time-range control and avoid rewriting unchanged custom usage sections: %s", body)
 	}
-	if !strings.Contains(body, "patchUsageSummaryCards") || !strings.Contains(body, "setUsageCardValue") || !strings.Contains(body, "summary.total_requests") || !strings.Contains(body, "summary.total_tokens") {
-		t.Fatalf("management enhancer should refresh usage summary cards from persisted cache statistics, not only the request-events table: %s", body)
+	if !strings.Contains(body, "patchUsageSummaryCards") || !strings.Contains(body, "setUsageCardValue") || !strings.Contains(body, "summary.total_requests") || !strings.Contains(body, "summary.total_tokens") || !strings.Contains(body, "const tpmCard = findUsageMetricCard(metricsBlock, 'TPM');") || !strings.Contains(body, "const totalCostCard = findUsageMetricCard(metricsBlock, 'Total Cost');") || !strings.Contains(body, "calculateTotalCostFromModelSummaries") || !strings.Contains(body, "MODEL_PRICES_STORAGE_KEY") {
+		t.Fatalf("management enhancer should refresh all visible summary cards from persisted cache statistics and stored pricing, not only the request-events table: %s", body)
+	}
+	if !strings.Contains(body, "triggerNativeUsageRefresh") || !strings.Contains(body, "scheduleNativeUsageRefreshRetry") || !strings.Contains(body, "provider.addEventListener('change'") {
+		t.Fatalf("management enhancer should also trigger the native usage refresh path so React-owned cards and charts follow provider filter and auto-refresh updates: %s", body)
 	}
 }
 

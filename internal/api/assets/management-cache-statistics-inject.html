@@ -7,6 +7,7 @@
 
   const STYLE_ID = 'cliproxy-management-enhancer-style';
   const TIME_RANGE_KEY = 'cli-proxy-usage-time-range-v1';
+  const MODEL_PRICES_STORAGE_KEY = 'cli-proxy-model-prices-v2';
   const STORAGE_KEYS = {
     usageAuto: 'cliproxy-usage-auto-refresh-enabled-v1',
     usageInterval: 'cliproxy-usage-auto-refresh-interval-v1',
@@ -37,6 +38,7 @@
   const API_BASE_STORAGE_KEYS = ['apiBase', 'apiUrl'];
   let usageTimer = null;
   let usageRefreshRetryTimer = null;
+  let nativeUsageRefreshRetryTimer = null;
   let quotaTimer = null;
   let routeSyncTimer = null;
   let authPrimePromise = null;
@@ -45,6 +47,8 @@
   let lastUsageStatistics = null;
   let lastUsageStatisticsRangeKey = '';
   let lastUsageStatisticsProvider = '';
+  let lastNativeUsageRefreshAt = 0;
+  let lastNativeUsageRefreshKey = '';
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
   const quotaModes = new Map();
@@ -489,6 +493,36 @@
     return true;
   }
 
+  function scheduleNativeUsageRefreshRetry(delayMs) {
+    if (nativeUsageRefreshRetryTimer) return;
+    nativeUsageRefreshRetryTimer = window.setTimeout(() => {
+      nativeUsageRefreshRetryTimer = null;
+      if (!isUsagePageReady() || document.hidden) return;
+      triggerNativeUsageRefresh(true);
+    }, Math.max(0, delayMs));
+  }
+
+  function triggerNativeUsageRefresh(background) {
+    if (!isUsagePageReady()) return false;
+    const timeRange = getUsageTimeRange();
+    const provider = getUsageProviderFilter();
+    const key = `${timeRange.key}:${provider}`;
+    const minIntervalMs = getUsageIntervalSeconds() * 1000;
+    const elapsedMs = Date.now() - lastNativeUsageRefreshAt;
+    if (background && lastNativeUsageRefreshAt > 0 && lastNativeUsageRefreshKey === key && elapsedMs < minIntervalMs) {
+      scheduleNativeUsageRefreshRetry(minIntervalMs - elapsedMs);
+      return false;
+    }
+    const triggered = triggerUsageRefresh();
+    if (triggered) {
+      lastNativeUsageRefreshAt = Date.now();
+      lastNativeUsageRefreshKey = key;
+    } else if (background) {
+      scheduleNativeUsageRefreshRetry(750);
+    }
+    return triggered;
+  }
+
   function triggerQuotaRefreshAll() {
     const container = getPageContainer();
     if (!container) return false;
@@ -588,11 +622,67 @@
     return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(value || 0));
   }
 
+  function formatCurrency(value) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return '$0.00';
+    const rounded = amount.toFixed(2);
+    return `$${Number(rounded).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
   function formatDateTime(value) {
     if (!value) return '';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString();
+  }
+
+  function readModelPrices() {
+    try {
+      const raw = window.localStorage.getItem(MODEL_PRICES_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const prices = {};
+      Object.keys(parsed).forEach((modelName) => {
+        if (!modelName) return;
+        const entry = parsed[modelName];
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+        const prompt = Number(entry.prompt);
+        const completion = Number(entry.completion);
+        const cache = Number(entry.cache);
+        if (!Number.isFinite(prompt) && !Number.isFinite(completion) && !Number.isFinite(cache)) return;
+        const safePrompt = Number.isFinite(prompt) && prompt >= 0 ? prompt : 0;
+        const safeCompletion = Number.isFinite(completion) && completion >= 0 ? completion : 0;
+        const safeCache = Number.isFinite(cache) && cache >= 0 ? cache : safePrompt;
+        prices[modelName] = {
+          prompt: safePrompt,
+          completion: safeCompletion,
+          cache: safeCache,
+        };
+      });
+      return prices;
+    } catch {
+      return {};
+    }
+  }
+
+  function calculateTotalCostFromModelSummaries(modelSummaries, modelPrices) {
+    const summaries = Array.isArray(modelSummaries) ? modelSummaries : [];
+    return summaries.reduce((total, item) => {
+      const modelName = normalize(item && item.model);
+      const pricing = modelName ? modelPrices[modelName] : null;
+      if (!pricing) return total;
+      const inputTokens = Math.max(0, Number(item && item.input_tokens || 0));
+      const cachedTokens = Math.max(0, Number(item && item.cached_tokens || 0));
+      const outputTokens = Math.max(0, Number(item && item.output_tokens || 0));
+      const uncachedInputTokens = Math.max(inputTokens - cachedTokens, 0);
+      const cost = (
+        (uncachedInputTokens * Math.max(0, Number(pricing.prompt || 0))) +
+        (cachedTokens * Math.max(0, Number(pricing.cache || 0))) +
+        (outputTokens * Math.max(0, Number(pricing.completion || 0)))
+      ) / 1000000;
+      return total + (Number.isFinite(cost) ? cost : 0);
+    }, 0);
   }
 
   function filterRecentRequests(requests, timeRange) {
@@ -641,6 +731,9 @@
         lastUsageStatisticsFetchAt = 0;
         lastUsageStatistics = null;
         lastUsageStatisticsRangeKey = '';
+        lastNativeUsageRefreshAt = 0;
+        lastNativeUsageRefreshKey = '';
+        triggerNativeUsageRefresh(false);
         refreshUsagePage(false).catch(() => {});
       });
       toggle.addEventListener('change', () => {
@@ -727,15 +820,97 @@
     `);
   }
 
-  function patchCachedTokensCard(container, summary) {
-    const metricsBlock = Array.from(container.children).find((child) => {
+  function findUsageMetricsBlock(container) {
+    return Array.from(container.children).find((child) => {
       const text = normalize(child.textContent);
       return text.includes('Total Requests') && text.includes('Total Tokens') && text.includes('RPM');
-    });
+    }) || null;
+  }
+
+  function findUsageMetricCard(metricsBlock, label) {
+    if (!metricsBlock) return null;
+    const needle = normalize(label);
+    return Array.from(metricsBlock.children).find((child) => normalize(child.textContent).includes(needle)) || null;
+  }
+
+  function setUsageCardValue(card, label, value, hint, signatureParts) {
+    if (!card) return false;
+    return setEnhancerMarkup(card, signatureParts.join(':'), `
+      <div class="cliproxy-enhancer__label">${escapeHTML(label)}</div>
+      <div class="cliproxy-enhancer__value">${value}</div>
+      <div class="cliproxy-enhancer__hint">${escapeHTML(hint)}</div>
+    `);
+  }
+
+  function patchUsageSummaryCards(container, stats, timeRange) {
+    const metricsBlock = findUsageMetricsBlock(container);
     if (!metricsBlock) return;
-    const children = Array.from(metricsBlock.children);
-    const totalCard = children.find((child) => normalize(child.textContent).includes('Total Tokens'));
-    let cachedCard = children.find((child) => normalize(child.textContent).includes('Cached Tokens'));
+    const summary = stats && stats.summary || {};
+    const modelSummaries = stats && stats.by_model || [];
+    const totalRequests = Number(summary && summary.total_requests || 0);
+    const totalTokens = Number(summary && summary.total_tokens || 0);
+    const avgLatencyMs = Number(summary && summary.avg_latency_ms || 0);
+    const minutes = timeRange && Number.isFinite(timeRange.cutoffMs) && timeRange.cutoffMs > 0
+      ? (timeRange.cutoffMs / (60 * 1000))
+      : 0;
+    const rpm = minutes > 0 ? (totalRequests / minutes) : 0;
+    const tpm = minutes > 0 ? (totalTokens / minutes) : 0;
+    const modelPrices = readModelPrices();
+    const hasModelPrices = Object.keys(modelPrices).length > 0;
+    const totalCost = hasModelPrices ? calculateTotalCostFromModelSummaries(modelSummaries, modelPrices) : 0;
+    const totalRequestsCard = findUsageMetricCard(metricsBlock, 'Total Requests');
+    const totalTokensCard = findUsageMetricCard(metricsBlock, 'Total Tokens');
+    const rpmCard = findUsageMetricCard(metricsBlock, 'RPM');
+    const tpmCard = findUsageMetricCard(metricsBlock, 'TPM');
+    const totalCostCard = findUsageMetricCard(metricsBlock, 'Total Cost');
+    setUsageCardValue(
+      totalRequestsCard,
+      'Total Requests',
+      escapeHTML(formatCompact(totalRequests)),
+      `${timeRange ? timeRange.label : 'Selected window'} persisted requests`,
+      ['usage-total-requests', timeRange && timeRange.key || '', totalRequests],
+    );
+    setUsageCardValue(
+      totalTokensCard,
+      'Total Tokens',
+      escapeHTML(formatCompact(totalTokens)),
+      `${formatInteger(totalTokens)} tokens across ${formatInteger(totalRequests)} requests`,
+      ['usage-total-tokens', timeRange && timeRange.key || '', totalTokens, totalRequests],
+    );
+    setUsageCardValue(
+      rpmCard,
+      'RPM',
+      escapeHTML(minutes > 0 ? rpm.toFixed(rpm >= 100 ? 0 : 1) : '0.0'),
+      minutes > 0
+        ? `${timeRange.label} average requests per minute`
+        : `${timeRange ? timeRange.label : 'Selected window'} average unavailable`,
+      ['usage-rpm', timeRange && timeRange.key || '', totalRequests, Math.round(minutes), Math.round(avgLatencyMs)],
+    );
+    setUsageCardValue(
+      tpmCard,
+      'TPM',
+      escapeHTML(minutes > 0 ? tpm.toFixed(tpm >= 100 ? 0 : 1) : '0.0'),
+      minutes > 0
+        ? `${timeRange.label} average tokens per minute`
+        : `${timeRange ? timeRange.label : 'Selected window'} average unavailable`,
+      ['usage-tpm', timeRange && timeRange.key || '', totalTokens, Math.round(minutes)],
+    );
+    setUsageCardValue(
+      totalCostCard,
+      'Total Cost',
+      hasModelPrices ? escapeHTML(formatCurrency(totalCost)) : '--',
+      hasModelPrices
+        ? `${timeRange ? timeRange.label : 'Selected window'} estimated cost from stored model pricing`
+        : 'Set model pricing to estimate cost',
+      ['usage-total-cost', timeRange && timeRange.key || '', Math.round(totalCost * 100), Object.keys(modelPrices).length],
+    );
+  }
+
+  function patchCachedTokensCard(container, summary) {
+    const metricsBlock = findUsageMetricsBlock(container);
+    if (!metricsBlock) return;
+    const totalCard = findUsageMetricCard(metricsBlock, 'Total Tokens');
+    let cachedCard = findUsageMetricCard(metricsBlock, 'Cached Tokens');
     if (!cachedCard) {
       cachedCard = document.createElement('div');
       cachedCard.className = totalCard ? totalCard.className : 'cliproxy-enhancer__card';
@@ -850,6 +1025,7 @@
 
   function renderUsageStatistics(container, stats, timeRange) {
     updateServiceHealthRow(ensureServiceHealthRow(container), stats.summary || {}, timeRange.label);
+    patchUsageSummaryCards(container, stats || {}, timeRange);
     patchCachedTokensCard(container, stats.summary || {});
     renderRequestEvents(container, stats, timeRange);
   }
@@ -1102,6 +1278,10 @@
       window.clearTimeout(usageRefreshRetryTimer);
       usageRefreshRetryTimer = null;
     }
+    if (nativeUsageRefreshRetryTimer) {
+      window.clearTimeout(nativeUsageRefreshRetryTimer);
+      nativeUsageRefreshRetryTimer = null;
+    }
   }
 
   function stopQuotaTimer() {
@@ -1116,8 +1296,7 @@
     if (!getUsageAutoEnabled()) return;
     usageTimer = window.setInterval(() => {
       if (!isUsagePageReady() || document.hidden) return;
-      // Fetch enhanced data directly — do NOT click native Refresh button
-      // as that causes the React app to re-render all native content (flash).
+      triggerNativeUsageRefresh(true);
       refreshUsagePage(true).catch(() => {});
     }, getUsageIntervalSeconds() * 1000);
   }
