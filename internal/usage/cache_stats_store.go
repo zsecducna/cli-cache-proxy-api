@@ -30,6 +30,7 @@ type CacheStatisticsEvent struct {
 	Source          string
 	APIKey          string
 	CustomerID      string
+	CustomerEmail   string
 	AuthID          string
 	AuthIndex       string
 	LatencyMs       int64
@@ -112,12 +113,20 @@ type CacheStatisticsRequest struct {
 }
 
 type CacheStatisticsSnapshot struct {
-	Enabled        bool                          `json:"enabled"`
-	DBPath         string                        `json:"db_path,omitempty"`
-	Summary        CacheStatisticsSummary        `json:"summary"`
-	ByModel        []CacheStatisticsModelSummary `json:"by_model"`
-	ByDay          []CacheStatisticsDaySummary   `json:"by_day"`
-	RecentRequests []CacheStatisticsRequest      `json:"recent_requests"`
+	Enabled        bool                                 `json:"enabled"`
+	DBPath         string                               `json:"db_path,omitempty"`
+	Summary        CacheStatisticsSummary               `json:"summary"`
+	ByModel        []CacheStatisticsModelSummary        `json:"by_model"`
+	ByDay          []CacheStatisticsDaySummary          `json:"by_day"`
+	TrendByModel   map[string]CacheStatisticsModelTrend `json:"trend_by_model"`
+	RecentRequests []CacheStatisticsRequest             `json:"recent_requests"`
+}
+
+type CacheStatisticsModelTrend struct {
+	RequestsByDay  map[string]int64 `json:"requests_by_day"`
+	RequestsByHour map[string]int64 `json:"requests_by_hour"`
+	TokensByDay    map[string]int64 `json:"tokens_by_day"`
+	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
 }
 
 func (snapshot CacheStatisticsSnapshot) Redacted() CacheStatisticsSnapshot {
@@ -317,6 +326,7 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     source TEXT NOT NULL,
     api_key TEXT NOT NULL DEFAULT '',
     customer_id TEXT NOT NULL DEFAULT '',
+    customer_email TEXT NOT NULL DEFAULT '',
     auth_id TEXT NOT NULL,
     auth_index TEXT NOT NULL,
     latency_ms INTEGER NOT NULL,
@@ -365,6 +375,9 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_customer_id ON cache_statistics_requests(customer_id)`); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "customer_email", "ALTER TABLE cache_statistics_requests ADD COLUMN customer_email TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_rewrite_applied", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
@@ -409,17 +422,17 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 	if s.isPostgres() {
 		_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
-    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, failed,
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_key) DO NOTHING`,
 			s.requestsTableName(),
 			s.bind(1), s.bind(2), s.bind(3), s.bind(4), s.bind(5), s.bind(6), s.bind(7), s.bind(8), s.bind(9), s.bind(10), s.bind(11),
 			s.bind(12), s.bind(13), s.bind(14), s.bind(15), s.bind(16), s.bind(17), s.bind(18), s.bind(19), s.bind(20), s.bind(21), s.bind(22),
-			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28)),
+			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28), s.bind(29)),
 			eventKey,
 			s.timestampArg(timestamp),
 			strings.TrimSpace(event.Provider),
@@ -428,6 +441,7 @@ ON CONFLICT (event_key) DO NOTHING`,
 			strings.TrimSpace(event.Source),
 			strings.TrimSpace(event.APIKey),
 			strings.TrimSpace(event.CustomerID),
+			strings.TrimSpace(event.CustomerEmail),
 			strings.TrimSpace(event.AuthID),
 			strings.TrimSpace(event.AuthIndex),
 			normaliseNonNegative(event.LatencyMs),
@@ -456,12 +470,12 @@ ON CONFLICT (event_key) DO NOTHING`,
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO cache_statistics_requests (
-    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, failed,
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventKey,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
@@ -470,6 +484,7 @@ INSERT OR IGNORE INTO cache_statistics_requests (
 		strings.TrimSpace(event.Source),
 		strings.TrimSpace(event.APIKey),
 		strings.TrimSpace(event.CustomerID),
+		strings.TrimSpace(event.CustomerEmail),
 		strings.TrimSpace(event.AuthID),
 		strings.TrimSpace(event.AuthIndex),
 		normaliseNonNegative(event.LatencyMs),
@@ -547,6 +562,10 @@ func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, m
 	if err != nil {
 		return result, err
 	}
+	trendByModel, err := s.queryModelTrends(ctx, since, provider)
+	if err != nil {
+		return result, err
+	}
 	recent, err := s.queryRecentRequests(ctx, recentLimit, since, provider)
 	if err != nil {
 		return result, err
@@ -554,6 +573,7 @@ func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, m
 	result.Summary = summary
 	result.ByModel = byModel
 	result.ByDay = byDay
+	result.TrendByModel = trendByModel
 	result.RecentRequests = recent
 	return result, nil
 }
@@ -593,6 +613,7 @@ SELECT
     model,
     api_key,
     customer_id,
+    customer_email,
     source,
     auth_id,
     auth_index,
@@ -629,6 +650,7 @@ ORDER BY requested_at ASC, id ASC`
 			model                        string
 			apiKey                       string
 			customerID                   string
+			customerEmail                string
 			source                       string
 			authID                       string
 			authIndex                    string
@@ -652,6 +674,7 @@ ORDER BY requested_at ASC, id ASC`
 			&model,
 			&apiKey,
 			&customerID,
+			&customerEmail,
 			&source,
 			&authID,
 			&authIndex,
@@ -689,14 +712,15 @@ ORDER BY requested_at ASC, id ASC`
 			TotalTokens:     totalTokens,
 		})
 		detail := RequestDetail{
-			Timestamp:  timestamp,
-			Provider:   strings.TrimSpace(provider),
-			CustomerID: strings.TrimSpace(customerID),
-			LatencyMs:  latencyMs,
-			Source:     source,
-			AuthIndex:  authIndex,
-			Tokens:     tokens,
-			Failed:     failedInt != 0,
+			Timestamp:     timestamp,
+			Provider:      strings.TrimSpace(provider),
+			CustomerID:    strings.TrimSpace(customerID),
+			CustomerEmail: strings.TrimSpace(customerEmail),
+			LatencyMs:     latencyMs,
+			Source:        source,
+			AuthIndex:     authIndex,
+			Tokens:        tokens,
+			Failed:        failedInt != 0,
 		}
 		if promptCacheKey != "" || previousResponseID != "" || responseID != "" || promptCacheRetention != "" {
 			detail.Cache = &helps.CodexCacheObservability{
@@ -897,10 +921,97 @@ ORDER BY day ASC`
 	return result, nil
 }
 
+func (s *CacheStatisticsStore) queryModelTrends(ctx context.Context, since string, provider string) (map[string]CacheStatisticsModelTrend, error) {
+	result := make(map[string]CacheStatisticsModelTrend)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s == nil || s.db == nil {
+		return result, nil
+	}
+
+	dayExpr := "substr(requested_at, 1, 10)"
+	hourExpr := "strftime('%Y-%m-%dT%H:00:00Z', requested_at)"
+	if s.isPostgres() {
+		dayExpr = "to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+		hourExpr = "to_char(date_trunc('hour', requested_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD\"T\"HH24:00:00\"Z\"')"
+	}
+
+	loadBuckets := func(bucketExpr string, assign func(*CacheStatisticsModelTrend, string, int64, int64)) error {
+		query := fmt.Sprintf(`
+SELECT
+    model,
+    %s AS bucket,
+    COUNT(*),
+    COALESCE(SUM(total_tokens), 0)
+FROM %s
+WHERE requested_at >= %s`, bucketExpr, s.requestsTableName(), s.bind(1))
+		args := []any{s.sinceArg(since)}
+		query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+		query += `
+GROUP BY model, bucket
+ORDER BY model ASC, bucket ASC`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				model       string
+				bucket      string
+				requests    int64
+				totalTokens int64
+			)
+			if err := rows.Scan(&model, &bucket, &requests, &totalTokens); err != nil {
+				return err
+			}
+			model = strings.TrimSpace(model)
+			if model == "" {
+				model = "unknown"
+			}
+			trend := result[model]
+			if trend.RequestsByDay == nil {
+				trend.RequestsByDay = make(map[string]int64)
+			}
+			if trend.RequestsByHour == nil {
+				trend.RequestsByHour = make(map[string]int64)
+			}
+			if trend.TokensByDay == nil {
+				trend.TokensByDay = make(map[string]int64)
+			}
+			if trend.TokensByHour == nil {
+				trend.TokensByHour = make(map[string]int64)
+			}
+			assign(&trend, bucket, requests, totalTokens)
+			result[model] = trend
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := loadBuckets(dayExpr, func(trend *CacheStatisticsModelTrend, bucket string, requests int64, totalTokens int64) {
+		trend.RequestsByDay[bucket] = requests
+		trend.TokensByDay[bucket] = totalTokens
+	}); err != nil {
+		return nil, fmt.Errorf("cache statistics store: query model day trends: %w", err)
+	}
+	if err := loadBuckets(hourExpr, func(trend *CacheStatisticsModelTrend, bucket string, requests int64, totalTokens int64) {
+		trend.RequestsByHour[bucket] = requests
+		trend.TokensByHour[bucket] = totalTokens
+	}); err != nil {
+		return nil, fmt.Errorf("cache statistics store: query model hour trends: %w", err)
+	}
+
+	return result, nil
+}
+
 func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsRequest, error) {
 	query := fmt.Sprintf(`
 SELECT
-    id, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
+    id, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
@@ -932,6 +1043,7 @@ LIMIT ` + s.bind(len(args)+1)
 			&item.Source,
 			&item.APIKey,
 			&item.CustomerID,
+			&item.CustomerEmail,
 			&item.AuthID,
 			&item.AuthIndex,
 			&item.LatencyMs,

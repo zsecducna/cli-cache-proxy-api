@@ -102,6 +102,73 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestCacheStatisticsStoreSnapshotIncludesModelTrends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	events := []CacheStatisticsEvent{
+		{
+			Timestamp: time.Date(2026, 4, 7, 10, 15, 0, 0, time.UTC),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			Tokens:    TokenStats{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		},
+		{
+			Timestamp: time.Date(2026, 4, 7, 11, 20, 0, 0, time.UTC),
+			Provider:  "codex",
+			Model:     "gpt-5.4-mini",
+			Tokens:    TokenStats{InputTokens: 50, OutputTokens: 5, TotalTokens: 55},
+		},
+		{
+			Timestamp: time.Date(2026, 4, 7, 11, 45, 0, 0, time.UTC),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			Tokens:    TokenStats{InputTokens: 200, OutputTokens: 20, TotalTokens: 220},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	snapshot, err := store.SnapshotSinceByProvider(context.Background(), 10, 10, time.Date(2026, 4, 7, 0, 0, 0, 0, time.UTC), "codex")
+	if err != nil {
+		t.Fatalf("SnapshotSinceByProvider() error = %v", err)
+	}
+
+	if len(snapshot.TrendByModel) != 2 {
+		t.Fatalf("trend_by_model len = %d, want 2", len(snapshot.TrendByModel))
+	}
+	modelA, ok := snapshot.TrendByModel["gpt-5.4"]
+	if !ok {
+		t.Fatalf("missing model trend for gpt-5.4 in %+v", snapshot.TrendByModel)
+	}
+	if modelA.RequestsByDay["2026-04-07"] != 2 {
+		t.Fatalf("gpt-5.4 requests_by_day = %d, want 2", modelA.RequestsByDay["2026-04-07"])
+	}
+	if modelA.RequestsByHour["2026-04-07T10:00:00Z"] != 1 || modelA.RequestsByHour["2026-04-07T11:00:00Z"] != 1 {
+		t.Fatalf("gpt-5.4 requests_by_hour = %+v, want one request in 10:00 and 11:00 UTC buckets", modelA.RequestsByHour)
+	}
+	if modelA.TokensByHour["2026-04-07T10:00:00Z"] != 110 || modelA.TokensByHour["2026-04-07T11:00:00Z"] != 220 {
+		t.Fatalf("gpt-5.4 tokens_by_hour = %+v, want 110 and 220", modelA.TokensByHour)
+	}
+	modelB, ok := snapshot.TrendByModel["gpt-5.4-mini"]
+	if !ok {
+		t.Fatalf("missing model trend for gpt-5.4-mini in %+v", snapshot.TrendByModel)
+	}
+	if modelB.RequestsByHour["2026-04-07T11:00:00Z"] != 1 {
+		t.Fatalf("gpt-5.4-mini requests_by_hour = %+v, want one request in 11:00 UTC bucket", modelB.RequestsByHour)
+	}
+	if modelB.TokensByDay["2026-04-07"] != 55 {
+		t.Fatalf("gpt-5.4-mini tokens_by_day = %d, want 55", modelB.TokensByDay["2026-04-07"])
+	}
+}
+
 func TestCacheStatisticsStoreUsesSingleSQLiteConnection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	store, err := OpenCacheStatisticsStore(path)
@@ -244,8 +311,10 @@ func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 	}
 	first := baseEvent
 	first.CustomerID = "customer-a"
+	first.CustomerEmail = "customer-a@example.com"
 	second := baseEvent
 	second.CustomerID = "customer-b"
+	second.CustomerEmail = "customer-b@example.com"
 
 	if err := store.InsertEvent(context.Background(), first); err != nil {
 		t.Fatalf("InsertEvent(first) error = %v", err)
@@ -269,6 +338,16 @@ func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 		seenRecent[request.CustomerID] = true
 		if request.APIKey != "shared-system-key" {
 			t.Fatalf("recent api_key = %q, want %q", request.APIKey, "shared-system-key")
+		}
+		switch request.CustomerID {
+		case "customer-a":
+			if request.CustomerEmail != "customer-a@example.com" {
+				t.Fatalf("recent customer_email = %q, want %q", request.CustomerEmail, "customer-a@example.com")
+			}
+		case "customer-b":
+			if request.CustomerEmail != "customer-b@example.com" {
+				t.Fatalf("recent customer_email = %q, want %q", request.CustomerEmail, "customer-b@example.com")
+			}
 		}
 	}
 	for _, customerID := range []string{"customer-a", "customer-b"} {
@@ -298,6 +377,10 @@ func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 		}
 		if modelSnapshot.Details[0].CustomerID != customerID {
 			t.Fatalf("detail customer_id = %q, want %q", modelSnapshot.Details[0].CustomerID, customerID)
+		}
+		wantEmail := customerID + "@example.com"
+		if modelSnapshot.Details[0].CustomerEmail != wantEmail {
+			t.Fatalf("detail customer_email = %q, want %q", modelSnapshot.Details[0].CustomerEmail, wantEmail)
 		}
 	}
 }

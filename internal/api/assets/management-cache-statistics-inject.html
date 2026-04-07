@@ -52,9 +52,12 @@
   let lastNativeUsageRefreshKey = '';
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
+  let usageChartPeriodInterceptorInstalled = false;
   let usageChartDefaultsApplied = false;
   let lastObservedUsageFilterKey = '';
   const quotaModes = new Map();
+  let chartAnimationDisableTimers = [];
+  let chartAnimationGuardTimer = null;
 
   function installStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -118,6 +121,12 @@
         flex-direction: column;
         justify-content: space-between;
       }
+      [class*="chartCanvas"] canvas,
+      [class*="chartWrapper"] canvas,
+      [class*="chartArea"] canvas {
+        animation: none !important;
+        transition: none !important;
+      }
       .cliproxy-enhancer__label {
         font-size: 12px;
         font-weight: 600;
@@ -178,6 +187,66 @@
       }
       .cliproxy-enhancer__muted {
         color: var(--text-tertiary, #6b7280);
+      }
+      .cliproxy-enhancer__trend-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-height: 320px;
+        padding-top: 8px;
+      }
+      .cliproxy-enhancer__trend-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        align-items: center;
+      }
+      .cliproxy-enhancer__trend-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-secondary, #4b5563);
+      }
+      .cliproxy-enhancer__trend-legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        flex: 0 0 auto;
+      }
+      .cliproxy-enhancer__trend-chart {
+        width: 100%;
+        min-height: 260px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 88%, transparent);
+        overflow: hidden;
+      }
+      .cliproxy-enhancer__trend-chart svg {
+        display: block;
+        width: 100%;
+        height: 280px;
+      }
+      .cliproxy-enhancer__trend-grid {
+        stroke: color-mix(in srgb, var(--border-color, #d5d9e0) 80%, transparent);
+        stroke-width: 1;
+      }
+      .cliproxy-enhancer__trend-axis {
+        stroke: color-mix(in srgb, var(--text-tertiary, #6b7280) 35%, transparent);
+        stroke-width: 1;
+      }
+      .cliproxy-enhancer__trend-label {
+        fill: var(--text-tertiary, #6b7280);
+        font-size: 11px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      .cliproxy-enhancer__trend-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 260px;
+        color: var(--text-tertiary, #6b7280);
+        font-size: 13px;
       }
       .cliproxy-enhancer__warning-hidden {
         display: none !important;
@@ -725,6 +794,193 @@
     return `${minutes}m ${remainingSeconds.toFixed(0)}s`;
   }
 
+  function trendSeriesColors() {
+    return [
+      '#8b8680',
+      '#0f766e',
+      '#b45309',
+      '#7c3aed',
+      '#2563eb',
+      '#be185d',
+      '#047857',
+      '#b91c1c',
+      '#4338ca',
+      '#0f766e',
+    ];
+  }
+
+  function findUsageTrendCard(container, title) {
+    if (!container) return null;
+    return Array.from(container.querySelectorAll('.card')).find((card) => {
+      const titleNode = card.querySelector('.title');
+      return normalize(titleNode ? titleNode.textContent : '').toLowerCase() === normalize(title).toLowerCase();
+    }) || null;
+  }
+
+  function getUsageTrendPeriod(card) {
+    if (!(card instanceof HTMLElement)) return 'hour';
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const active = buttons.find((button) => String(button.className || '').includes('btn-primary'));
+    const activeLabel = normalize(active ? active.textContent : '');
+    return activeLabel === 'By Day' ? 'day' : 'hour';
+  }
+
+  function formatTrendBucketLabel(bucket, period) {
+    if (!bucket) return '';
+    if (period === 'day') {
+      const date = new Date(`${bucket}T00:00:00Z`);
+      if (Number.isNaN(date.getTime())) return bucket;
+      return date.toLocaleDateString(undefined, { month: '2-digit', day: '2-digit' });
+    }
+    const date = new Date(bucket);
+    if (Number.isNaN(date.getTime())) return bucket;
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    const hour = String(date.getUTCHours()).padStart(2, '0');
+    return `${month}-${day} ${hour}:00`;
+  }
+
+  function buildUsageTrendSeries(stats, period, metric) {
+    const trendByModel = stats && stats.trend_by_model && typeof stats.trend_by_model === 'object'
+      ? stats.trend_by_model
+      : {};
+    const byModel = Array.isArray(stats && stats.by_model) ? stats.by_model : [];
+    const orderedModels = [];
+    const seen = new Set();
+    byModel.forEach((item) => {
+      const model = normalize(item && item.model);
+      if (!model || seen.has(model)) return;
+      seen.add(model);
+      orderedModels.push(model);
+    });
+    Object.keys(trendByModel).sort().forEach((model) => {
+      const normalized = normalize(model);
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      orderedModels.push(normalized);
+    });
+    const bucketKey = period === 'day'
+      ? (metric === 'tokens' ? 'tokens_by_day' : 'requests_by_day')
+      : (metric === 'tokens' ? 'tokens_by_hour' : 'requests_by_hour');
+    const buckets = new Set();
+    orderedModels.forEach((model) => {
+      const series = trendByModel[model] && trendByModel[model][bucketKey];
+      if (!series || typeof series !== 'object') return;
+      Object.keys(series).forEach((bucket) => buckets.add(bucket));
+    });
+    const labels = Array.from(buckets).sort();
+    const colors = trendSeriesColors();
+    const datasets = orderedModels.map((model, index) => {
+      const valuesByBucket = trendByModel[model] && trendByModel[model][bucketKey] && typeof trendByModel[model][bucketKey] === 'object'
+        ? trendByModel[model][bucketKey]
+        : {};
+      const values = labels.map((bucket) => Math.max(0, Number(valuesByBucket[bucket] || 0)));
+      return {
+        label: model,
+        color: colors[index % colors.length],
+        values,
+      };
+    }).filter((dataset) => dataset.values.some((value) => value > 0));
+    return { labels, datasets };
+  }
+
+  function buildTrendChartSVG(labels, datasets, metric, period) {
+    if (!labels.length || !datasets.length) {
+      return '<div class="cliproxy-enhancer__trend-empty">No chart data for the selected window.</div>';
+    }
+    const width = 880;
+    const height = 280;
+    const padding = { top: 18, right: 18, bottom: 38, left: 52 };
+    const innerWidth = width - padding.left - padding.right;
+    const innerHeight = height - padding.top - padding.bottom;
+    const allValues = datasets.flatMap((dataset) => dataset.values);
+    const maxValue = Math.max(1, ...allValues);
+    const gridValues = [0, 0.25, 0.5, 0.75, 1];
+    const labelStep = Math.max(1, Math.ceil(labels.length / 6));
+    const xForIndex = (index) => {
+      if (labels.length <= 1) return padding.left + (innerWidth / 2);
+      return padding.left + ((innerWidth * index) / (labels.length - 1));
+    };
+    const yForValue = (value) => padding.top + innerHeight - ((Math.max(0, value) / maxValue) * innerHeight);
+    const gridLines = gridValues.map((ratio) => {
+      const y = padding.top + (innerHeight * ratio);
+      const value = Math.round(maxValue * (1 - ratio));
+      return `
+        <line class="cliproxy-enhancer__trend-grid" x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}"></line>
+        <text class="cliproxy-enhancer__trend-label" x="${padding.left - 8}" y="${y + 4}" text-anchor="end">${escapeHTML(metric === 'tokens' ? formatCompact(value) : formatInteger(value))}</text>
+      `;
+    }).join('');
+    const xLabels = labels.map((bucket, index) => {
+      if (index % labelStep !== 0 && index !== labels.length - 1) return '';
+      const x = xForIndex(index);
+      return `<text class="cliproxy-enhancer__trend-label" x="${x}" y="${height - 10}" text-anchor="middle">${escapeHTML(formatTrendBucketLabel(bucket, period))}</text>`;
+    }).join('');
+    const paths = datasets.map((dataset) => {
+      const points = dataset.values.map((value, index) => `${xForIndex(index)},${yForValue(value)}`).join(' ');
+      const lastIndex = dataset.values.length - 1;
+      const lastValue = dataset.values[lastIndex];
+      return `
+        <polyline fill="none" stroke="${dataset.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${points}"></polyline>
+        <circle cx="${xForIndex(lastIndex)}" cy="${yForValue(lastValue)}" r="3.5" fill="${dataset.color}"></circle>
+      `;
+    }).join('');
+    return `
+      <div class="cliproxy-enhancer__trend-chart">
+        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="${escapeHTML(metric === 'tokens' ? 'Token Usage Trends' : 'Request Trends')}">
+          <line class="cliproxy-enhancer__trend-axis" x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"></line>
+          <line class="cliproxy-enhancer__trend-axis" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}"></line>
+          ${gridLines}
+          ${paths}
+          ${xLabels}
+        </svg>
+      </div>
+    `;
+  }
+
+  function renderUsageTrendChartCard(card, stats, metric) {
+    if (!(card instanceof HTMLElement)) return;
+    const nativeWrapper = card.querySelector('[class*="chartWrapper"]');
+    if (nativeWrapper instanceof HTMLElement) {
+      nativeWrapper.style.display = 'none';
+      nativeWrapper.dataset.cliproxyHidden = 'true';
+    }
+    const metricName = metric === 'tokens' ? 'token-usage-trends' : 'request-trends';
+    let panel = card.querySelector(`#cliproxy-${metricName}`);
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = `cliproxy-${metricName}`;
+      panel.className = 'cliproxy-enhancer__trend-shell';
+      if (nativeWrapper && nativeWrapper.parentElement === card) {
+        nativeWrapper.insertAdjacentElement('afterend', panel);
+      } else {
+        card.appendChild(panel);
+      }
+    }
+    const period = getUsageTrendPeriod(card);
+    const trend = buildUsageTrendSeries(stats, period, metric);
+    const legend = trend.datasets.map((dataset) => `
+      <div class="cliproxy-enhancer__trend-legend-item">
+        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${dataset.color};"></span>
+        <span>${escapeHTML(dataset.label)}</span>
+      </div>
+    `).join('');
+    const signature = [
+      metricName,
+      period,
+      trend.labels.join(','),
+      trend.datasets.map((dataset) => `${dataset.label}:${dataset.values.join(',')}`).join('|'),
+    ].join(':');
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__trend-legend">${legend || '<span class="cliproxy-enhancer__muted">No models available for the selected window.</span>'}</div>
+      ${buildTrendChartSVG(trend.labels, trend.datasets, metric, period)}
+    `);
+  }
+
+  function renderUsageTrendCharts(container, stats) {
+    renderUsageTrendChartCard(findUsageTrendCard(container, 'Request Trends'), stats, 'requests');
+    renderUsageTrendChartCard(findUsageTrendCard(container, 'Token Usage Trends'), stats, 'tokens');
+  }
+
   function readModelPrices() {
     try {
       const raw = window.localStorage.getItem(MODEL_PRICES_STORAGE_KEY);
@@ -861,6 +1117,171 @@
     });
     usageChartDefaultsApplied = true;
     return true;
+  }
+
+  function clearChartAnimationDisableTimers() {
+    if (!chartAnimationDisableTimers.length) return;
+    chartAnimationDisableTimers.forEach((timer) => {
+      window.clearTimeout(timer);
+    });
+    chartAnimationDisableTimers = [];
+  }
+
+  function disableChartAnimationOptions(options) {
+    if (!options || typeof options !== 'object') return false;
+    let changed = false;
+    if (options.animation !== false) {
+      options.animation = false;
+      changed = true;
+    }
+    if (options.responsiveAnimationDuration !== 0) {
+      options.responsiveAnimationDuration = 0;
+      changed = true;
+    }
+    const transitions = options.transitions && typeof options.transitions === 'object' ? options.transitions : {};
+    ['active', 'resize', 'show', 'hide', 'reset'].forEach((name) => {
+      const current = transitions[name] && typeof transitions[name] === 'object' ? transitions[name] : {};
+      let transitionChanged = false;
+      const animation = current.animation;
+      if (animation !== false && !(animation && typeof animation === 'object' && Number(animation.duration) === 0)) {
+        current.animation = { duration: 0 };
+        transitionChanged = true;
+      }
+      if (current.animations !== false) {
+        current.animations = false;
+        transitionChanged = true;
+      }
+      if (transitionChanged) {
+        transitions[name] = current;
+        changed = true;
+      }
+    });
+    if (options.transitions !== transitions) {
+      options.transitions = transitions;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function disableChartAnimationsInProps(props) {
+    if (!props || typeof props !== 'object') return false;
+    let changed = false;
+    if (disableChartAnimationOptions(props.options)) changed = true;
+    if (disableChartAnimationOptions(props.chartOptions)) changed = true;
+    return changed;
+  }
+
+  function findChartInstanceInFiber(fiber, canvas) {
+    let hook = fiber && fiber.memoizedState;
+    while (hook) {
+      const value = hook.memoizedState;
+      if (
+        value
+        && typeof value === 'object'
+        && value.current
+        && typeof value.current.update === 'function'
+        && value.current.canvas === canvas
+      ) {
+        return value.current;
+      }
+      hook = hook.next;
+    }
+    return null;
+  }
+
+  function findChartInstanceForCanvas(canvas) {
+    let fiber = findFiberFromElement(canvas);
+    while (fiber) {
+      const direct = findChartInstanceInFiber(fiber, canvas);
+      if (direct) return direct;
+      if (fiber.alternate) {
+        const alternate = findChartInstanceInFiber(fiber.alternate, canvas);
+        if (alternate) return alternate;
+      }
+      fiber = fiber.return;
+    }
+    return null;
+  }
+
+  function disableChartAnimationsForInstance(chart) {
+    if (!chart || typeof chart !== 'object') return false;
+    let changed = false;
+    if (disableChartAnimationOptions(chart.options)) changed = true;
+    const configOptions = chart.config && chart.config._config && chart.config._config.options;
+    if (disableChartAnimationOptions(configOptions)) changed = true;
+    if (chart._animationsDisabled !== true) {
+      chart._animationsDisabled = true;
+      changed = true;
+    }
+    if (typeof chart.stop === 'function') {
+      chart.stop();
+    }
+    if (changed && typeof chart.update === 'function') {
+      try {
+        chart.update('none');
+      } catch {
+        try {
+          chart.update();
+        } catch {}
+      }
+    }
+    return changed;
+  }
+
+  function disableChartAnimations(scope) {
+    const root = scope || getPageContainer() || document.body;
+    if (!root) return false;
+    let changed = false;
+    Array.from(root.querySelectorAll('canvas')).forEach((canvas) => {
+      if (!canvas.$chartjs) return;
+      let fiber = findFiberFromElement(canvas);
+      while (fiber) {
+        if (disableChartAnimationsInProps(fiber.memoizedProps)) changed = true;
+        if (fiber.pendingProps && fiber.pendingProps !== fiber.memoizedProps && disableChartAnimationsInProps(fiber.pendingProps)) changed = true;
+        if (fiber.alternate) {
+          if (disableChartAnimationsInProps(fiber.alternate.memoizedProps)) changed = true;
+          if (fiber.alternate.pendingProps && fiber.alternate.pendingProps !== fiber.alternate.memoizedProps && disableChartAnimationsInProps(fiber.alternate.pendingProps)) changed = true;
+        }
+        fiber = fiber.return;
+      }
+      if (disableChartAnimationsForInstance(findChartInstanceForCanvas(canvas))) changed = true;
+    });
+    if (changed) {
+      window.requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+    }
+    return changed;
+  }
+
+  function scheduleChartAnimationDisable(delays = [0, 250, 750, 1500, 3000]) {
+    clearChartAnimationDisableTimers();
+    chartAnimationDisableTimers = delays.map((delay) => window.setTimeout(() => {
+      disableChartAnimations();
+    }, Math.max(0, delay)));
+  }
+
+  function startChartAnimationGuard() {
+    if (chartAnimationGuardTimer) return;
+    chartAnimationGuardTimer = window.setInterval(() => {
+      disableChartAnimations();
+    }, 1000);
+  }
+
+  function installUsageChartPeriodInterceptor() {
+    if (usageChartPeriodInterceptorInstalled) return;
+    usageChartPeriodInterceptorInstalled = true;
+    document.addEventListener('click', (event) => {
+      if (!isUsagePageReady()) return;
+      const button = event.target && event.target.closest ? event.target.closest('button') : null;
+      if (!button) return;
+      const text = normalize(button.textContent);
+      if (text !== 'By Hour' && text !== 'By Day') return;
+      window.setTimeout(() => {
+        if (!isUsagePageReady()) return;
+        refreshUsagePage(false).catch(() => {});
+      }, 50);
+    }, true);
   }
 
   function ensureServiceHealthRow(container) {
@@ -1102,7 +1523,7 @@
       requestBlock.insertAdjacentElement('afterend', panel);
     }
     const requests = filterRecentRequests(stats && stats.recent_requests || [], timeRange).slice(0, MAX_REQUEST_ROWS);
-    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}:${item.latency_ms || 0}`).join('|')].join(':');
+    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}:${item.latency_ms || 0}:${item.customer_id || ''}:${item.customer_email || ''}`).join('|')].join(':');
     setEnhancerMarkup(panel, signature, `
       <div class="cliproxy-enhancer__label">Request Events</div>
       <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} persisted request events within ${escapeHTML(timeRange.label)}.</div>
@@ -1176,6 +1597,7 @@
     patchUsageSummaryCards(container, stats || {}, timeRange);
     patchCachedTokensCard(container, stats.summary || {}, timeRange);
     patchAverageLatencyCard(container, stats.summary || {}, timeRange);
+    renderUsageTrendCharts(container, stats || {});
     renderRequestEvents(container, stats, timeRange);
   }
 
@@ -1194,6 +1616,7 @@
     try {
       const container = getPageContainer();
       if (!container) return;
+      scheduleChartAnimationDisable();
       ensureUsageControls(container);
       applyUsageChartPeriodDefaults(container);
       hideUsageBlocks(container);
@@ -1207,6 +1630,7 @@
         if (lastUsageStatistics && sameRange && sameFilter) {
           renderUsageStatistics(container, lastUsageStatistics, timeRange);
         }
+        disableChartAnimations(container);
         scheduleUsageRefreshRetry(remainingMs);
         return;
       }
@@ -1217,6 +1641,7 @@
       lastUsageStatisticsRangeKey = timeRange.key;
       lastUsageStatisticsProvider = getUsageProviderFilter();
       renderUsageStatistics(container, stats, timeRange);
+      disableChartAnimations(container);
     } finally {
       usageRefreshInFlight = false;
     }
@@ -1489,6 +1914,7 @@
     if (routeSyncTimer) return;
     routeSyncTimer = window.setTimeout(() => {
       routeSyncTimer = null;
+      scheduleChartAnimationDisable();
       if (window.location.hash === '#cache-statistics') {
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/usage`);
       }
@@ -1519,6 +1945,8 @@
   captureManagementAuthFromLoginPage();
   patchFetch();
   patchXHR();
+  installUsageChartPeriodInterceptor();
+  startChartAnimationGuard();
   window.addEventListener('hashchange', syncRouteSoon);
   new MutationObserver((mutations) => {
     if (shouldIgnoreRouteSyncMutations(mutations)) return;

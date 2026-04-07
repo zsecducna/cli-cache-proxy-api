@@ -11,13 +11,15 @@ import (
 )
 
 const CustomerIDHeader = "X-CheapRouter-User-ID"
+const CustomerEmailHeader = "X-CheapRouter-User-Email"
 
 // CustomerIdentityMiddleware accepts a trusted gateway-supplied customer header
 // only for loopback requests authenticated by the config inline API key provider.
 func CustomerIdentityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		customerID := strings.TrimSpace(c.GetHeader(CustomerIDHeader))
-		if customerID == "" {
+		customerEmail := strings.TrimSpace(c.GetHeader(CustomerEmailHeader))
+		if customerID == "" && customerEmail == "" {
 			c.Next()
 			return
 		}
@@ -27,8 +29,16 @@ func CustomerIdentityMiddleware() gin.HandlerFunc {
 			})
 			return
 		}
-		c.Set("customerID", customerID)
-		c.Request = c.Request.WithContext(helps.WithCustomerID(c.Request.Context(), customerID))
+		ctx := c.Request.Context()
+		if customerID != "" {
+			c.Set("customerID", customerID)
+			ctx = helps.WithCustomerID(ctx, customerID)
+		}
+		if customerEmail != "" {
+			c.Set("customerEmail", customerEmail)
+			ctx = helps.WithCustomerEmail(ctx, customerEmail)
+		}
+		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	}
 }

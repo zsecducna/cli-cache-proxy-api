@@ -64,6 +64,9 @@ func enrichCacheStatisticsCustomerEmails(snapshot usage.CacheStatisticsSnapshot)
 	}
 	emailsByCustomerID := make(map[string]string, len(snapshot.RecentRequests))
 	for i := range snapshot.RecentRequests {
+		if strings.TrimSpace(snapshot.RecentRequests[i].CustomerEmail) != "" {
+			continue
+		}
 		customerID := strings.TrimSpace(snapshot.RecentRequests[i].CustomerID)
 		if customerID == "" {
 			continue

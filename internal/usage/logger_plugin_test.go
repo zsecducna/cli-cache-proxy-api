@@ -87,11 +87,12 @@ func TestRequestStatisticsRecordUsesCustomerIDBucket(t *testing.T) {
 	ts := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
 
 	stats.Record(context.Background(), coreusage.Record{
-		Provider:    "codex",
-		Model:       "gpt-5.4",
-		APIKey:      "shared-system-key",
-		CustomerID:  "customer-a",
-		RequestedAt: ts,
+		Provider:      "codex",
+		Model:         "gpt-5.4",
+		APIKey:        "shared-system-key",
+		CustomerID:    "customer-a",
+		CustomerEmail: "customer-a@example.com",
+		RequestedAt:   ts,
 		Detail: coreusage.Detail{
 			InputTokens:  10,
 			OutputTokens: 2,
@@ -99,11 +100,12 @@ func TestRequestStatisticsRecordUsesCustomerIDBucket(t *testing.T) {
 		},
 	})
 	stats.Record(context.Background(), coreusage.Record{
-		Provider:    "codex",
-		Model:       "gpt-5.4",
-		APIKey:      "shared-system-key",
-		CustomerID:  "customer-b",
-		RequestedAt: ts.Add(1 * time.Second),
+		Provider:      "codex",
+		Model:         "gpt-5.4",
+		APIKey:        "shared-system-key",
+		CustomerID:    "customer-b",
+		CustomerEmail: "customer-b@example.com",
+		RequestedAt:   ts.Add(1 * time.Second),
 		Detail: coreusage.Detail{
 			InputTokens:  20,
 			OutputTokens: 3,
@@ -129,6 +131,10 @@ func TestRequestStatisticsRecordUsesCustomerIDBucket(t *testing.T) {
 		}
 		if modelSnapshot.Details[0].CustomerID != customerID {
 			t.Fatalf("detail customer_id = %q, want %q", modelSnapshot.Details[0].CustomerID, customerID)
+		}
+		wantEmail := customerID + "@example.com"
+		if modelSnapshot.Details[0].CustomerEmail != wantEmail {
+			t.Fatalf("detail customer_email = %q, want %q", modelSnapshot.Details[0].CustomerEmail, wantEmail)
 		}
 		if modelSnapshot.Details[0].Provider != "codex" {
 			t.Fatalf("detail provider = %q, want %q", modelSnapshot.Details[0].Provider, "codex")

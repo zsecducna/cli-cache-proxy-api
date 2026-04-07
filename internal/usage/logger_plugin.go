@@ -105,6 +105,7 @@ type RequestDetail struct {
 	Timestamp      time.Time                          `json:"timestamp"`
 	Provider       string                             `json:"provider,omitempty"`
 	CustomerID     string                             `json:"customer_id,omitempty"`
+	CustomerEmail  string                             `json:"customer_email,omitempty"`
 	LatencyMs      int64                              `json:"latency_ms"`
 	Source         string                             `json:"source"`
 	AuthIndex      string                             `json:"auth_index"`
@@ -454,6 +455,7 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 		Timestamp:      timestamp,
 		Provider:       strings.TrimSpace(record.Provider),
 		CustomerID:     strings.TrimSpace(record.CustomerID),
+		CustomerEmail:  strings.TrimSpace(record.CustomerEmail),
 		LatencyMs:      normaliseLatency(record.Latency),
 		Source:         record.Source,
 		AuthIndex:      record.AuthIndex,
@@ -487,6 +489,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Source:          detail.Source,
 		APIKey:          strings.TrimSpace(record.APIKey),
 		CustomerID:      detail.CustomerID,
+		CustomerEmail:   detail.CustomerEmail,
 		AuthID:          record.AuthID,
 		AuthIndex:       detail.AuthIndex,
 		LatencyMs:       detail.LatencyMs,

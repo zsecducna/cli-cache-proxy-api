@@ -119,10 +119,13 @@ func TestCustomerIdentityMiddlewareTrustsLocalSharedKey(t *testing.T) {
 		middleware.CustomerIdentityMiddleware(),
 		func(c *gin.Context) {
 			customerID, _ := c.Get("customerID")
+			customerEmail, _ := c.Get("customerEmail")
 			c.JSON(http.StatusOK, gin.H{
-				"customer_id":     customerID,
-				"context_user_id": helps.CustomerIDFromContext(c.Request.Context()),
-				"api_key":         c.GetString("apiKey"),
+				"customer_id":        customerID,
+				"customer_email":     customerEmail,
+				"context_user_id":    helps.CustomerIDFromContext(c.Request.Context()),
+				"context_user_email": helps.CustomerEmailFromContext(c.Request.Context()),
+				"api_key":            c.GetString("apiKey"),
 			})
 		},
 	)
@@ -131,6 +134,7 @@ func TestCustomerIdentityMiddlewareTrustsLocalSharedKey(t *testing.T) {
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Authorization", "Bearer test-key")
 	req.Header.Set(middleware.CustomerIDHeader, "customer-123")
+	req.Header.Set(middleware.CustomerEmailHeader, "customer@example.com")
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 
@@ -139,9 +143,11 @@ func TestCustomerIdentityMiddlewareTrustsLocalSharedKey(t *testing.T) {
 	}
 
 	var payload struct {
-		CustomerID    string `json:"customer_id"`
-		ContextUserID string `json:"context_user_id"`
-		APIKey        string `json:"api_key"`
+		CustomerID       string `json:"customer_id"`
+		CustomerEmail    string `json:"customer_email"`
+		ContextUserID    string `json:"context_user_id"`
+		ContextUserEmail string `json:"context_user_email"`
+		APIKey           string `json:"api_key"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -151,6 +157,12 @@ func TestCustomerIdentityMiddlewareTrustsLocalSharedKey(t *testing.T) {
 	}
 	if payload.ContextUserID != "customer-123" {
 		t.Fatalf("context_user_id = %q, want %q", payload.ContextUserID, "customer-123")
+	}
+	if payload.CustomerEmail != "customer@example.com" {
+		t.Fatalf("customer_email = %q, want %q", payload.CustomerEmail, "customer@example.com")
+	}
+	if payload.ContextUserEmail != "customer@example.com" {
+		t.Fatalf("context_user_email = %q, want %q", payload.ContextUserEmail, "customer@example.com")
 	}
 	if payload.APIKey != "test-key" {
 		t.Fatalf("api_key = %q, want %q", payload.APIKey, "test-key")
@@ -171,6 +183,7 @@ func TestCustomerIdentityMiddlewareRejectsSpoofedRemoteHeader(t *testing.T) {
 	req.RemoteAddr = "203.0.113.9:54321"
 	req.Header.Set("Authorization", "Bearer test-key")
 	req.Header.Set(middleware.CustomerIDHeader, "customer-123")
+	req.Header.Set(middleware.CustomerEmailHeader, "customer@example.com")
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 
@@ -355,8 +368,17 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "<th>User</th>") || !strings.Contains(body, "normalize(item.customer_email || item.customer_id) || 'Admin'") {
 		t.Fatalf("management enhancer should render the trusted X-CheapRouter-User-ID value in the Request Events table and default empty values to Admin: %s", body)
 	}
+	if !strings.Contains(body, "item.customer_email || ''") {
+		t.Fatalf("management enhancer should include customer_email in the Request Events table signature so stored display-email updates repaint existing rows: %s", body)
+	}
 	if !strings.Contains(body, "applyUsageChartPeriodDefaults") || !strings.Contains(body, "normalize(button.textContent) === 'By Hour'") || !strings.Contains(body, "normalize(button.textContent) === 'By Day'") || !strings.Contains(body, "usageChartDefaultsApplied = true") {
 		t.Fatalf("management enhancer should force chart period controls to default to By Hour once per usage page activation: %s", body)
+	}
+	if !strings.Contains(body, "renderUsageTrendCharts") || !strings.Contains(body, "trend_by_model") || !strings.Contains(body, "Token Usage Trends") || !strings.Contains(body, "Request Trends") {
+		t.Fatalf("management enhancer should replace the native aggregate trend charts with provider/time-filtered model trend charts driven by cache statistics: %s", body)
+	}
+	if !strings.Contains(body, "disableChartAnimationOptions") || !strings.Contains(body, "scheduleChartAnimationDisable") || !strings.Contains(body, "canvas.$chartjs") || !strings.Contains(body, "options.animation = false;") || !strings.Contains(body, "findChartInstanceForCanvas") || !strings.Contains(body, "chart.update('none')") {
+		t.Fatalf("management enhancer should disable canvas chart animations through both the chart fiber options path and the live chart instance redraw path so all management charts redraw without motion: %s", body)
 	}
 }
 
@@ -772,6 +794,59 @@ func TestManagementCacheStatisticsEndpointIncludesCustomerEmail(t *testing.T) {
 	}
 	if payload.CacheStatistics.RecentRequests[0].CustomerEmail != customer.Email {
 		t.Fatalf("recent customer_email = %q, want %q", payload.CacheStatistics.RecentRequests[0].CustomerEmail, customer.Email)
+	}
+}
+
+func TestManagementCacheStatisticsEndpointPreservesStoredCustomerEmail(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	event := usage.CacheStatisticsEvent{
+		Timestamp:     time.Now().UTC().Truncate(time.Second),
+		Provider:      "codex",
+		Model:         "gpt-5.4",
+		CustomerID:    "cust-direct",
+		CustomerEmail: "direct@example.com",
+		Tokens: usage.TokenStats{
+			InputTokens:  10,
+			OutputTokens: 2,
+			TotalTokens:  12,
+		},
+	}
+	if err := store.InsertEvent(context.Background(), event); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/cache-statistics?days=7&limit=10&model_limit=10", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		CacheStatistics struct {
+			RecentRequests []struct {
+				CustomerID    string `json:"customer_id"`
+				CustomerEmail string `json:"customer_email"`
+			} `json:"recent_requests"`
+		} `json:"cache_statistics"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.CacheStatistics.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(payload.CacheStatistics.RecentRequests))
+	}
+	if payload.CacheStatistics.RecentRequests[0].CustomerID != "cust-direct" {
+		t.Fatalf("recent customer_id = %q, want %q", payload.CacheStatistics.RecentRequests[0].CustomerID, "cust-direct")
+	}
+	if payload.CacheStatistics.RecentRequests[0].CustomerEmail != "direct@example.com" {
+		t.Fatalf("recent customer_email = %q, want %q", payload.CacheStatistics.RecentRequests[0].CustomerEmail, "direct@example.com")
 	}
 }
 
