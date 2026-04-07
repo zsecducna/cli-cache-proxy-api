@@ -41,6 +41,7 @@
   let nativeUsageRefreshRetryTimer = null;
   let quotaTimer = null;
   let routeSyncTimer = null;
+  let usageFilterSyncTimer = null;
   let authPrimePromise = null;
   let usageRefreshInFlight = false;
   let lastUsageStatisticsFetchAt = 0;
@@ -52,6 +53,7 @@
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
   let usageChartDefaultsApplied = false;
+  let lastObservedUsageFilterKey = '';
   const quotaModes = new Map();
 
   function installStyles() {
@@ -415,6 +417,15 @@
     return String(select.value || '').trim();
   }
 
+  function isNativeUsageRequestURL(urlLike) {
+    try {
+      const url = new URL(urlLike, window.location.origin);
+      return url.origin === window.location.origin && url.pathname === '/v0/management/usage';
+    } catch {
+      return false;
+    }
+  }
+
   function appendUsageProviderFilter(urlLike) {
     try {
       const url = new URL(urlLike, window.location.origin);
@@ -437,9 +448,11 @@
     if (!nativeFetch) return;
     window.fetch = async function patchedFetch(input, init) {
       let nextInput = input;
+      let shouldRepatchUsage = false;
       try {
         const originalURL = typeof input === 'string' ? input : (input && input.url) || '';
         const rewrittenURL = appendUsageProviderFilter(originalURL);
+        shouldRepatchUsage = isNativeUsageRequestURL(rewrittenURL || originalURL);
         if (typeof Request !== 'undefined' && input instanceof Request) {
           if (rewrittenURL && rewrittenURL !== input.url) {
             nextInput = new Request(rewrittenURL, input);
@@ -455,7 +468,11 @@
           );
         }
       } catch {}
-      return nativeFetch(nextInput, init);
+      const response = await nativeFetch(nextInput, init);
+      if (shouldRepatchUsage) {
+        scheduleUsagePatchAfterNativeRefresh(0);
+      }
+      return response;
     };
   }
 
@@ -467,6 +484,11 @@
       const rewrittenURL = appendUsageProviderFilter(url);
       this.__cliproxyURL = rewrittenURL;
       this.__cliproxyHeaders = {};
+      if (isNativeUsageRequestURL(rewrittenURL)) {
+        this.addEventListener('loadend', () => {
+          scheduleUsagePatchAfterNativeRefresh(0);
+        }, { once: true });
+      }
       const args = Array.from(arguments);
       args[1] = rewrittenURL;
       return open.apply(this, args);
@@ -510,11 +532,46 @@
     }, Math.max(0, delayMs));
   }
 
-  function triggerNativeUsageRefresh(background) {
-    if (!isUsagePageReady()) return false;
+  function clearUsageFilterSyncTimer() {
+    if (!usageFilterSyncTimer) return;
+    window.clearTimeout(usageFilterSyncTimer);
+    usageFilterSyncTimer = null;
+  }
+
+  function invalidateUsageRefreshState() {
+    lastUsageStatisticsFetchAt = 0;
+    lastUsageStatistics = null;
+    lastUsageStatisticsRangeKey = '';
+    lastUsageStatisticsProvider = '';
+    lastNativeUsageRefreshAt = 0;
+    lastNativeUsageRefreshKey = '';
+  }
+
+  function getUsageFilterKey() {
     const timeRange = getUsageTimeRange();
     const provider = getUsageProviderFilter();
-    const key = `${timeRange.key}:${provider}`;
+    return `${timeRange.key}:${provider}`;
+  }
+
+  function scheduleUsageFilterSync(delayMs, options = {}) {
+    clearUsageFilterSyncTimer();
+    usageFilterSyncTimer = window.setTimeout(() => {
+      usageFilterSyncTimer = null;
+      if (!isUsagePageReady() || document.hidden) return;
+      const nextKey = getUsageFilterKey();
+      if (!options.force && nextKey === lastObservedUsageFilterKey) return;
+      lastObservedUsageFilterKey = nextKey;
+      invalidateUsageRefreshState();
+      if (options.triggerNativeRefresh) {
+        triggerNativeUsageRefresh(false);
+      }
+      refreshUsagePage(false).catch(() => {});
+    }, Math.max(0, delayMs));
+  }
+
+  function triggerNativeUsageRefresh(background) {
+    if (!isUsagePageReady()) return false;
+    const key = getUsageFilterKey();
     const minIntervalMs = getUsageIntervalSeconds() * 1000;
     const elapsedMs = Date.now() - lastNativeUsageRefreshAt;
     if (background && lastNativeUsageRefreshAt > 0 && lastNativeUsageRefreshKey === key && elapsedMs < minIntervalMs) {
@@ -737,13 +794,7 @@
       const toggle = controls.querySelector('#cliproxy-usage-auto-refresh-toggle');
       const interval = controls.querySelector('#cliproxy-usage-auto-refresh-interval');
       provider.addEventListener('change', () => {
-        lastUsageStatisticsFetchAt = 0;
-        lastUsageStatistics = null;
-        lastUsageStatisticsRangeKey = '';
-        lastNativeUsageRefreshAt = 0;
-        lastNativeUsageRefreshKey = '';
-        triggerNativeUsageRefresh(false);
-        refreshUsagePage(false).catch(() => {});
+        scheduleUsageFilterSync(0, { force: true, triggerNativeRefresh: true });
       });
       toggle.addEventListener('change', () => {
         setJSONStorage(STORAGE_KEYS.usageAuto, toggle.checked);
@@ -1371,20 +1422,24 @@
       }
       if (isUsagePageReady()) {
         stopQuotaTimer();
-        refreshUsagePage(false).catch(() => {});
+        scheduleUsageFilterSync(lastObservedUsageFilterKey ? 150 : 0, { force: !lastObservedUsageFilterKey });
         startUsageTimer();
         return;
       }
       if (isQuotaPageReady()) {
         stopUsageTimer();
+        clearUsageFilterSyncTimer();
         usageChartDefaultsApplied = false;
+        lastObservedUsageFilterKey = '';
         refreshQuotaPage(false).catch(() => {});
         startQuotaTimer();
         return;
       }
       stopUsageTimer();
       stopQuotaTimer();
+      clearUsageFilterSyncTimer();
       usageChartDefaultsApplied = false;
+      lastObservedUsageFilterKey = '';
     }, 50);
   }
 

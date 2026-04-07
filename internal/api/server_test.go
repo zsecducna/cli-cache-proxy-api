@@ -333,6 +333,12 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "['usage-total-requests', timeRange && timeRange.key || '', getUsageProviderFilter(), totalRequests]") || !strings.Contains(body, "['cached-card', timeRange && timeRange.key || '', getUsageProviderFilter(), cachedTokens") {
 		t.Fatalf("management enhancer should encode time-range/provider context into summary-card signatures so filter changes always invalidate stale card markup: %s", body)
 	}
+	if !strings.Contains(body, "getUsageFilterKey") || !strings.Contains(body, "invalidateUsageRefreshState") || !strings.Contains(body, "scheduleUsageFilterSync") {
+		t.Fatalf("management enhancer should track the active usage filter key and invalidate cached refresh state when provider or time-range filters change: %s", body)
+	}
+	if !strings.Contains(body, "isNativeUsageRequestURL") || !strings.Contains(body, "scheduleUsagePatchAfterNativeRefresh(0)") {
+		t.Fatalf("management enhancer should re-apply filtered cards after the native usage endpoint actually returns, not only on speculative timers: %s", body)
+	}
 	if !strings.Contains(body, "applyUsageChartPeriodDefaults") || !strings.Contains(body, "normalize(button.textContent) === 'By Hour'") || !strings.Contains(body, "normalize(button.textContent) === 'By Day'") || !strings.Contains(body, "usageChartDefaultsApplied = true") {
 		t.Fatalf("management enhancer should force chart period controls to default to By Hour once per usage page activation: %s", body)
 	}
