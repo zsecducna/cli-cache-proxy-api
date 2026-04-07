@@ -338,10 +338,12 @@ func (s *Server) setupRoutes() {
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 	authMiddleware := AuthMiddleware(s.accessManager)
 	customerIdentityMiddleware := middleware.CustomerIdentityMiddleware()
+	customerCreditsMiddleware := middleware.CustomerCreditsMiddleware()
+	internalCustomerMiddleware := middleware.InternalCustomerMiddleware()
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(authMiddleware, customerIdentityMiddleware)
+	v1.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -355,11 +357,22 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(authMiddleware, customerIdentityMiddleware)
+	v1beta.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+	}
+
+	internalCustomers := s.engine.Group("/v1/internal/customers")
+	internalCustomers.Use(authMiddleware, internalCustomerMiddleware)
+	{
+		internalCustomers.POST("/resolve", s.mgmt.ResolveCustomerAPIKey)
+		internalCustomers.GET("/:id", s.mgmt.GetCustomer)
+		internalCustomers.PUT("/:id", s.mgmt.PutCustomer)
+		internalCustomers.GET("/:id/ledger", s.mgmt.GetCustomerLedger)
+		internalCustomers.POST("/:id/api-keys", s.mgmt.PostCustomerAPIKey)
+		internalCustomers.DELETE("/:id/api-keys/:key_id", s.mgmt.DeleteCustomerAPIKey)
 	}
 
 	// Root endpoint
@@ -505,6 +518,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/cache-statistics", s.mgmt.GetCacheStatistics)
+		mgmt.GET("/customers", s.mgmt.GetCustomers)
+		mgmt.GET("/customers/:id", s.mgmt.GetCustomer)
+		mgmt.PUT("/customers/:id", s.mgmt.PutCustomer)
+		mgmt.GET("/customers/:id/ledger", s.mgmt.GetCustomerLedger)
+		mgmt.POST("/customers/:id/api-keys", s.mgmt.PostCustomerAPIKey)
+		mgmt.DELETE("/customers/:id/api-keys/:key_id", s.mgmt.DeleteCustomerAPIKey)
+		mgmt.POST("/customers/:id/credits/top-up", s.mgmt.PostCustomerCreditsTopUp)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
