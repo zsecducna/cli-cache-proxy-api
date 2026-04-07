@@ -51,6 +51,7 @@
   let lastNativeUsageRefreshKey = '';
   let quotaRefreshInFlight = false;
   let quotaClickInterceptorInstalled = false;
+  let usageChartDefaultsApplied = false;
   const quotaModes = new Map();
 
   function installStyles() {
@@ -752,6 +753,23 @@
     return controls;
   }
 
+  function applyUsageChartPeriodDefaults(container) {
+    if (usageChartDefaultsApplied || !container) return false;
+    const groups = Array.from(container.querySelectorAll('.card')).map((card) => {
+      const buttons = Array.from(card.querySelectorAll('button'));
+      const hourButton = buttons.find((button) => normalize(button.textContent) === 'By Hour');
+      const dayButton = buttons.find((button) => normalize(button.textContent) === 'By Day');
+      if (!hourButton || !dayButton) return null;
+      return { hourButton };
+    }).filter(Boolean);
+    if (!groups.length) return false;
+    groups.forEach(({ hourButton }) => {
+      if (!hourButton.disabled) hourButton.click();
+    });
+    usageChartDefaultsApplied = true;
+    return true;
+  }
+
   function ensureServiceHealthRow(container) {
     let row = container.querySelector('#cliproxy-service-health-row, #cliproxy-usage-service-health');
     if (!row) {
@@ -1046,6 +1064,7 @@
       const container = getPageContainer();
       if (!container) return;
       ensureUsageControls(container);
+      applyUsageChartPeriodDefaults(container);
       hideUsageBlocks(container);
       const timeRange = getUsageTimeRange();
       const minIntervalMs = getUsageIntervalSeconds() * 1000;
@@ -1350,12 +1369,14 @@
       }
       if (isQuotaPageReady()) {
         stopUsageTimer();
+        usageChartDefaultsApplied = false;
         refreshQuotaPage(false).catch(() => {});
         startQuotaTimer();
         return;
       }
       stopUsageTimer();
       stopQuotaTimer();
+      usageChartDefaultsApplied = false;
     }, 50);
   }
 
