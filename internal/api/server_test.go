@@ -16,14 +16,16 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	apihandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -106,6 +108,76 @@ func TestHealthz(t *testing.T) {
 	}
 	if resp.Status != "ok" {
 		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+	}
+}
+
+func TestCustomerIdentityMiddlewareTrustsLocalSharedKey(t *testing.T) {
+	server := newTestServer(t)
+	server.engine.GET("/capture-customer",
+		AuthMiddleware(server.accessManager),
+		middleware.CustomerIdentityMiddleware(),
+		func(c *gin.Context) {
+			customerID, _ := c.Get("customerID")
+			c.JSON(http.StatusOK, gin.H{
+				"customer_id":     customerID,
+				"context_user_id": helps.CustomerIDFromContext(c.Request.Context()),
+				"api_key":         c.GetString("apiKey"),
+			})
+		},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/capture-customer", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set(middleware.CustomerIDHeader, "customer-123")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		CustomerID    string `json:"customer_id"`
+		ContextUserID string `json:"context_user_id"`
+		APIKey        string `json:"api_key"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.CustomerID != "customer-123" {
+		t.Fatalf("customer_id = %q, want %q", payload.CustomerID, "customer-123")
+	}
+	if payload.ContextUserID != "customer-123" {
+		t.Fatalf("context_user_id = %q, want %q", payload.ContextUserID, "customer-123")
+	}
+	if payload.APIKey != "test-key" {
+		t.Fatalf("api_key = %q, want %q", payload.APIKey, "test-key")
+	}
+}
+
+func TestCustomerIdentityMiddlewareRejectsSpoofedRemoteHeader(t *testing.T) {
+	server := newTestServer(t)
+	server.engine.GET("/capture-customer",
+		AuthMiddleware(server.accessManager),
+		middleware.CustomerIdentityMiddleware(),
+		func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/capture-customer", nil)
+	req.RemoteAddr = "203.0.113.9:54321"
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set(middleware.CustomerIDHeader, "customer-123")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "trusted internal callers") {
+		t.Fatalf("unexpected response body: %s", rr.Body.String())
 	}
 }
 
@@ -248,6 +320,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	}
 	if !strings.Contains(body, "button[aria-label=\"Time Range\"]") || !strings.Contains(body, "setEnhancerMarkup") || !strings.Contains(body, "node.dataset.cliproxySignature") {
 		t.Fatalf("management enhancer should follow the live time-range control and avoid rewriting unchanged custom usage sections: %s", body)
+	}
+	if !strings.Contains(body, "patchUsageSummaryCards") || !strings.Contains(body, "setUsageCardValue") || !strings.Contains(body, "summary.total_requests") || !strings.Contains(body, "summary.total_tokens") {
+		t.Fatalf("management enhancer should refresh usage summary cards from persisted cache statistics, not only the request-events table: %s", body)
 	}
 }
 
@@ -669,6 +744,98 @@ func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
 	}
 	if len(filtered.Usage.APIs) != 0 {
 		t.Fatalf("filtered apis len = %d, want 0", len(filtered.Usage.APIs))
+	}
+}
+
+func TestManagementUsageEndpointMergesPersistedAndLiveInMemoryStatistics(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	persisted := usage.CacheStatisticsEvent{
+		Timestamp:       now.Add(-2 * time.Minute),
+		Provider:        "codex",
+		Model:           "gpt-5.4",
+		ReasoningEffort: "medium",
+		Source:          "persisted@example.com",
+		AuthID:          "codex-persisted.json",
+		AuthIndex:       "idx-persisted",
+		LatencyMs:       1200,
+		Tokens:          usage.TokenStats{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+	}
+	if err := store.InsertEvent(context.Background(), persisted); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	liveStats := usage.NewRequestStatistics()
+	server.mgmt.SetUsageStatistics(liveStats)
+	liveStats.Record(context.Background(), coreusage.Record{
+		Provider:        "codex",
+		Model:           "gpt-5.4-mini",
+		APIKey:          "live-key-456",
+		ReasoningEffort: "high",
+		RequestedAt:     now.Add(-30 * time.Second),
+		Source:          "live@example.com",
+		AuthID:          "codex-live.json",
+		AuthIndex:       "idx-live",
+		Detail: coreusage.Detail{
+			InputTokens:  55,
+			OutputTokens: 11,
+			TotalTokens:  66,
+		},
+	})
+	liveStats.Record(context.Background(), coreusage.Record{
+		Provider:        "claude",
+		Model:           "claude-sonnet-4-5",
+		APIKey:          "claude-live-key-789",
+		ReasoningEffort: "medium",
+		RequestedAt:     now.Add(-20 * time.Second),
+		Source:          "claude-live@example.com",
+		AuthID:          "claude-live.json",
+		AuthIndex:       "idx-claude-live",
+		Detail: coreusage.Detail{
+			InputTokens:  90,
+			OutputTokens: 10,
+			TotalTokens:  100,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage?provider=codex", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		Usage          usage.StatisticsSnapshot `json:"usage"`
+		FailedRequests int64                    `json:"failed_requests"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if payload.Usage.TotalRequests != 2 {
+		t.Fatalf("total_requests = %d, want 2", payload.Usage.TotalRequests)
+	}
+	if payload.Usage.TotalTokens != 186 {
+		t.Fatalf("total_tokens = %d, want 186", payload.Usage.TotalTokens)
+	}
+	if payload.Usage.SuccessCount != 2 || payload.Usage.FailureCount != 0 || payload.FailedRequests != 0 {
+		t.Fatalf("success/failure counts = %+v failed_requests=%d, want 2/0/0", payload.Usage, payload.FailedRequests)
+	}
+	if _, ok := payload.Usage.APIs["codex-persisted.json"]; !ok {
+		t.Fatalf("missing persisted api bucket")
+	}
+	if _, ok := payload.Usage.APIs["live-key-456"]; !ok {
+		t.Fatalf("missing live in-memory api bucket")
+	}
+	if _, ok := payload.Usage.APIs["claude-live-key-789"]; ok {
+		t.Fatalf("unexpected provider-mismatched live api bucket in filtered snapshot")
 	}
 }
 

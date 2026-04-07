@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS ` + s.requestsTableName() + ` (
     reasoning_effort TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
     api_key TEXT NOT NULL DEFAULT '',
+    customer_id TEXT NOT NULL DEFAULT '',
     auth_id TEXT NOT NULL DEFAULT '',
     auth_index TEXT NOT NULL DEFAULT '',
     latency_ms BIGINT NOT NULL DEFAULT 0,
@@ -197,6 +198,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON ` + s.requestsTableNa
 `); err != nil {
 		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
 	}
+	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "customer_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_customer_id ON ` + s.requestsTableName() + ` (customer_id)`); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres customer index: %w", err)
+	}
 	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS ` + s.promptCacheTableName() + ` (
     response_id TEXT PRIMARY KEY,
@@ -225,6 +232,7 @@ func buildCacheStatisticsEventKey(event CacheStatisticsEvent) string {
 		strings.TrimSpace(event.ReasoningEffort),
 		strings.TrimSpace(event.Source),
 		strings.TrimSpace(event.APIKey),
+		strings.TrimSpace(event.CustomerID),
 		strings.TrimSpace(event.AuthID),
 		strings.TrimSpace(event.AuthIndex),
 		fmt.Sprintf("%d", normaliseNonNegative(event.LatencyMs)),
@@ -323,6 +331,7 @@ func (s *CacheStatisticsStore) importSQLiteRequestRows(ctx context.Context, lega
 		sqliteSelectExpr(columns, "reasoning_effort", "''"),
 		sqliteSelectExpr(columns, "source", "''"),
 		sqliteSelectExpr(columns, "api_key", "''"),
+		sqliteSelectExpr(columns, "customer_id", "''"),
 		sqliteSelectExpr(columns, "auth_id", "''"),
 		sqliteSelectExpr(columns, "auth_index", "''"),
 		sqliteSelectExpr(columns, "latency_ms", "0"),
@@ -359,6 +368,7 @@ func (s *CacheStatisticsStore) importSQLiteRequestRows(ctx context.Context, lega
 			reasoningEffort              string
 			source                       string
 			apiKey                       string
+			customerID                   string
 			authID                       string
 			authIndex                    string
 			latencyMs                    int64
@@ -387,6 +397,7 @@ func (s *CacheStatisticsStore) importSQLiteRequestRows(ctx context.Context, lega
 			&reasoningEffort,
 			&source,
 			&apiKey,
+			&customerID,
 			&authID,
 			&authIndex,
 			&latencyMs,
@@ -424,6 +435,7 @@ func (s *CacheStatisticsStore) importSQLiteRequestRows(ctx context.Context, lega
 			ReasoningEffort: reasoningEffort,
 			Source:          source,
 			APIKey:          apiKey,
+			CustomerID:      customerID,
 			AuthID:          authID,
 			AuthIndex:       authIndex,
 			LatencyMs:       latencyMs,
@@ -569,4 +581,12 @@ func applyAnthropicBreakpoints(obs *helps.AnthropicCacheObservability, raw strin
 			obs.MessagesBreakpoint = true
 		}
 	}
+}
+
+func ensurePostgresColumn(db *sql.DB, tableName, columnName, definition string) error {
+	if db == nil {
+		return fmt.Errorf("cache statistics store: database is nil")
+	}
+	_, err := db.Exec(`ALTER TABLE ` + tableName + ` ADD COLUMN IF NOT EXISTS ` + quoteIdentifier(columnName) + ` ` + definition)
+	return err
 }

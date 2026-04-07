@@ -103,6 +103,8 @@ type modelStats struct {
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
 	Timestamp      time.Time                          `json:"timestamp"`
+	Provider       string                             `json:"provider,omitempty"`
+	CustomerID     string                             `json:"customer_id,omitempty"`
 	LatencyMs      int64                              `json:"latency_ms"`
 	Source         string                             `json:"source"`
 	AuthIndex      string                             `json:"auth_index"`
@@ -422,10 +424,12 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		cacheRetention = detail.Cache.PromptCacheRetention
 	}
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%s|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%s|%s|%s|%s",
 		apiName,
 		modelName,
 		timestamp,
+		detail.Provider,
+		detail.CustomerID,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
@@ -448,6 +452,8 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 	}
 	detail := RequestDetail{
 		Timestamp:      timestamp,
+		Provider:       strings.TrimSpace(record.Provider),
+		CustomerID:     strings.TrimSpace(record.CustomerID),
 		LatencyMs:      normaliseLatency(record.Latency),
 		Source:         record.Source,
 		AuthIndex:      record.AuthIndex,
@@ -455,10 +461,7 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 		Cache:          resolveCodexCacheMetadata(ctx),
 		AnthropicCache: resolveAnthropicCacheMetadata(ctx),
 	}
-	statsKey := record.APIKey
-	if statsKey == "" {
-		statsKey = resolveAPIIdentifier(ctx, record)
-	}
+	statsKey := statisticsBucketKey(detail.CustomerID, record.APIKey, record.AuthID, record.AuthIndex, resolveAPIIdentifier(ctx, record))
 	detail.Failed = record.Failed
 	if !detail.Failed {
 		detail.Failed = !resolveSuccess(ctx)
@@ -483,6 +486,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
 		Source:          detail.Source,
 		APIKey:          strings.TrimSpace(record.APIKey),
+		CustomerID:      detail.CustomerID,
 		AuthID:          record.AuthID,
 		AuthIndex:       detail.AuthIndex,
 		LatencyMs:       detail.LatencyMs,
@@ -491,6 +495,16 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Cache:           detail.Cache,
 		AnthropicCache:  valueOrZeroAnthropic(detail.AnthropicCache),
 	}
+}
+
+func statisticsBucketKey(customerID, apiKey, authID, authIndex, fallback string) string {
+	for _, candidate := range []string{customerID, apiKey, authID, authIndex, fallback} {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return "unknown"
 }
 
 func redactStatisticsAPIKey(apiKey string) string {
@@ -506,6 +520,58 @@ func redactRequestDetail(detail RequestDetail) RequestDetail {
 	detail.AuthIndex = ""
 	detail.Cache = nil
 	return detail
+}
+
+// FilterStatisticsSnapshotByProvider keeps only request details that belong to the
+// requested provider group and recomputes aggregates from the retained details.
+func FilterStatisticsSnapshotByProvider(snapshot StatisticsSnapshot, provider string) StatisticsSnapshot {
+	providers := cacheStatisticsProvidersForFilter(provider)
+	if len(providers) == 0 {
+		return snapshot
+	}
+	allowed := make(map[string]struct{}, len(providers))
+	for _, item := range providers {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == "" {
+			continue
+		}
+		allowed[item] = struct{}{}
+	}
+	filtered := NewRequestStatistics()
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				if !statisticsDetailMatchesProvider(detail, allowed) {
+					continue
+				}
+				stats, ok := filtered.apis[apiName]
+				if !ok {
+					stats = &apiStats{Models: make(map[string]*modelStats)}
+					filtered.apis[apiName] = stats
+				}
+				filtered.recordImported(apiName, modelName, stats, detail)
+			}
+		}
+	}
+	return filtered.Snapshot()
+}
+
+// MergeStatisticsSnapshots combines multiple snapshots into one deduplicated view.
+func MergeStatisticsSnapshots(snapshots ...StatisticsSnapshot) StatisticsSnapshot {
+	merged := NewRequestStatistics()
+	for _, snapshot := range snapshots {
+		merged.MergeSnapshot(snapshot)
+	}
+	return merged.Snapshot()
+}
+
+func statisticsDetailMatchesProvider(detail RequestDetail, allowed map[string]struct{}) bool {
+	provider := strings.ToLower(strings.TrimSpace(detail.Provider))
+	if provider == "" {
+		return false
+	}
+	_, ok := allowed[provider]
+	return ok
 }
 
 func mergeRedactedAPISnapshot(left, right APISnapshot) APISnapshot {

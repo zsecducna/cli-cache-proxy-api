@@ -14,6 +14,7 @@ type Record struct {
 	Model           string
 	ReasoningEffort string
 	APIKey          string
+	CustomerID      string
 	AuthID          string
 	AuthIndex       string
 	Source          string

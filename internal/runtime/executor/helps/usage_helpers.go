@@ -21,6 +21,7 @@ type UsageReporter struct {
 	provider        string
 	model           string
 	reasoningEffort string
+	customerID      string
 	authID          string
 	authIndex       string
 	apiKey          string
@@ -35,6 +36,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		provider:        provider,
 		model:           model,
 		reasoningEffort: UsageReasoningEffortFromContext(ctx),
+		customerID:      CustomerIDFromContext(ctx),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
 		source:          resolveUsageSource(auth, apiKey),
@@ -104,6 +106,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		ReasoningEffort: r.reasoningEffort,
 		Source:          r.source,
 		APIKey:          r.apiKey,
+		CustomerID:      r.customerID,
 		AuthID:          r.authID,
 		AuthIndex:       r.authIndex,
 		RequestedAt:     r.requestedAt,

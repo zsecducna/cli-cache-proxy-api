@@ -218,3 +218,86 @@ INSERT INTO cache_statistics_requests (
 		t.Fatalf("legacy reasoning_effort = %q, want empty string", snapshot.RecentRequests[0].ReasoningEffort)
 	}
 }
+
+func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	baseTimestamp := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
+	baseEvent := CacheStatisticsEvent{
+		Timestamp: baseTimestamp,
+		Provider:  "codex",
+		Model:     "gpt-5.4",
+		APIKey:    "shared-system-key",
+		AuthID:    "shared-auth",
+		AuthIndex: "0",
+		LatencyMs: 900,
+		Tokens: TokenStats{
+			InputTokens:  100,
+			OutputTokens: 25,
+			TotalTokens:  125,
+		},
+	}
+	first := baseEvent
+	first.CustomerID = "customer-a"
+	second := baseEvent
+	second.CustomerID = "customer-b"
+
+	if err := store.InsertEvent(context.Background(), first); err != nil {
+		t.Fatalf("InsertEvent(first) error = %v", err)
+	}
+	if err := store.InsertEvent(context.Background(), second); err != nil {
+		t.Fatalf("InsertEvent(second) error = %v", err)
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.Summary.TotalRequests != 2 {
+		t.Fatalf("total_requests = %d, want 2", snapshot.Summary.TotalRequests)
+	}
+	if len(snapshot.RecentRequests) != 2 {
+		t.Fatalf("recent requests len = %d, want 2", len(snapshot.RecentRequests))
+	}
+	seenRecent := map[string]bool{}
+	for _, request := range snapshot.RecentRequests {
+		seenRecent[request.CustomerID] = true
+		if request.APIKey != "shared-system-key" {
+			t.Fatalf("recent api_key = %q, want %q", request.APIKey, "shared-system-key")
+		}
+	}
+	for _, customerID := range []string{"customer-a", "customer-b"} {
+		if !seenRecent[customerID] {
+			t.Fatalf("recent requests missing customer_id %q: %+v", customerID, snapshot.RecentRequests)
+		}
+	}
+
+	usageSnapshot, err := store.StatisticsSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("StatisticsSnapshot() error = %v", err)
+	}
+	if len(usageSnapshot.APIs) != 2 {
+		t.Fatalf("usage apis len = %d, want 2", len(usageSnapshot.APIs))
+	}
+	if _, ok := usageSnapshot.APIs["shared-system-key"]; ok {
+		t.Fatalf("unexpected shared api bucket in %+v", usageSnapshot.APIs)
+	}
+	for _, customerID := range []string{"customer-a", "customer-b"} {
+		apiSnapshot, ok := usageSnapshot.APIs[customerID]
+		if !ok {
+			t.Fatalf("missing usage bucket for %q in %+v", customerID, usageSnapshot.APIs)
+		}
+		modelSnapshot, ok := apiSnapshot.Models["gpt-5.4"]
+		if !ok || len(modelSnapshot.Details) != 1 {
+			t.Fatalf("model snapshot for %q = %+v, want one detail", customerID, modelSnapshot)
+		}
+		if modelSnapshot.Details[0].CustomerID != customerID {
+			t.Fatalf("detail customer_id = %q, want %q", modelSnapshot.Details[0].CustomerID, customerID)
+		}
+	}
+}

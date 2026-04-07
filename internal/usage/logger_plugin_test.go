@@ -82,6 +82,60 @@ func TestRequestStatisticsRecordIncludesCodexCacheMetadata(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsRecordUsesCustomerIDBucket(t *testing.T) {
+	stats := NewRequestStatistics()
+	ts := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
+
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		APIKey:      "shared-system-key",
+		CustomerID:  "customer-a",
+		RequestedAt: ts,
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 2,
+			TotalTokens:  12,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		APIKey:      "shared-system-key",
+		CustomerID:  "customer-b",
+		RequestedAt: ts.Add(1 * time.Second),
+		Detail: coreusage.Detail{
+			InputTokens:  20,
+			OutputTokens: 3,
+			TotalTokens:  23,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if len(snapshot.APIs) != 2 {
+		t.Fatalf("apis len = %d, want 2", len(snapshot.APIs))
+	}
+	if _, ok := snapshot.APIs["shared-system-key"]; ok {
+		t.Fatalf("unexpected shared api key bucket in %+v", snapshot.APIs)
+	}
+	for _, customerID := range []string{"customer-a", "customer-b"} {
+		apiSnapshot, ok := snapshot.APIs[customerID]
+		if !ok {
+			t.Fatalf("missing bucket for %q in %+v", customerID, snapshot.APIs)
+		}
+		modelSnapshot, ok := apiSnapshot.Models["gpt-5.4"]
+		if !ok || len(modelSnapshot.Details) != 1 {
+			t.Fatalf("model snapshot for %q = %+v, want single detail", customerID, modelSnapshot)
+		}
+		if modelSnapshot.Details[0].CustomerID != customerID {
+			t.Fatalf("detail customer_id = %q, want %q", modelSnapshot.Details[0].CustomerID, customerID)
+		}
+		if modelSnapshot.Details[0].Provider != "codex" {
+			t.Fatalf("detail provider = %q, want %q", modelSnapshot.Details[0].Provider, "codex")
+		}
+	}
+}
+
 func TestLoggerPluginPersistsWithDetachedContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store, err := OpenCacheStatisticsStore(filepath.Join(t.TempDir(), "cache-statistics.sqlite"))

@@ -94,7 +94,8 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
 				Metadata: map[string]string{
-					"source": candidate.source,
+					"source":        candidate.source,
+					"provider_type": sdkaccess.AccessProviderTypeConfigAPIKey,
 				},
 			}, nil
 		}

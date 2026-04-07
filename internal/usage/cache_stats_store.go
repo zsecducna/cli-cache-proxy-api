@@ -29,6 +29,7 @@ type CacheStatisticsEvent struct {
 	ReasoningEffort string
 	Source          string
 	APIKey          string
+	CustomerID      string
 	AuthID          string
 	AuthIndex       string
 	LatencyMs       int64
@@ -84,6 +85,7 @@ type CacheStatisticsRequest struct {
 	ReasoningEffort                   string    `json:"reasoning_effort,omitempty"`
 	Source                            string    `json:"source"`
 	APIKey                            string    `json:"api_key,omitempty"`
+	CustomerID                        string    `json:"customer_id,omitempty"`
 	AuthID                            string    `json:"auth_id"`
 	AuthIndex                         string    `json:"auth_index"`
 	LatencyMs                         int64     `json:"latency_ms"`
@@ -313,6 +315,7 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     reasoning_effort TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL,
     api_key TEXT NOT NULL DEFAULT '',
+    customer_id TEXT NOT NULL DEFAULT '',
     auth_id TEXT NOT NULL,
     auth_index TEXT NOT NULL,
     latency_ms INTEGER NOT NULL,
@@ -353,6 +356,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON cache_statistics_requests(api_key)`); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "customer_id", "ALTER TABLE cache_statistics_requests ADD COLUMN customer_id TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_customer_id ON cache_statistics_requests(customer_id)`); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_rewrite_applied", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -399,17 +408,17 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 	if s.isPostgres() {
 		_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO %s (
-    event_key, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, failed,
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_key) DO NOTHING`,
 			s.requestsTableName(),
 			s.bind(1), s.bind(2), s.bind(3), s.bind(4), s.bind(5), s.bind(6), s.bind(7), s.bind(8), s.bind(9), s.bind(10), s.bind(11),
 			s.bind(12), s.bind(13), s.bind(14), s.bind(15), s.bind(16), s.bind(17), s.bind(18), s.bind(19), s.bind(20), s.bind(21), s.bind(22),
-			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27)),
+			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28)),
 			eventKey,
 			s.timestampArg(timestamp),
 			strings.TrimSpace(event.Provider),
@@ -417,6 +426,7 @@ ON CONFLICT (event_key) DO NOTHING`,
 			strings.TrimSpace(event.ReasoningEffort),
 			strings.TrimSpace(event.Source),
 			strings.TrimSpace(event.APIKey),
+			strings.TrimSpace(event.CustomerID),
 			strings.TrimSpace(event.AuthID),
 			strings.TrimSpace(event.AuthIndex),
 			normaliseNonNegative(event.LatencyMs),
@@ -445,12 +455,12 @@ ON CONFLICT (event_key) DO NOTHING`,
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO cache_statistics_requests (
-    event_key, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, failed,
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventKey,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
@@ -458,6 +468,7 @@ INSERT OR IGNORE INTO cache_statistics_requests (
 		strings.TrimSpace(event.ReasoningEffort),
 		strings.TrimSpace(event.Source),
 		strings.TrimSpace(event.APIKey),
+		strings.TrimSpace(event.CustomerID),
 		strings.TrimSpace(event.AuthID),
 		strings.TrimSpace(event.AuthIndex),
 		normaliseNonNegative(event.LatencyMs),
@@ -580,6 +591,7 @@ SELECT
     provider,
     model,
     api_key,
+    customer_id,
     source,
     auth_id,
     auth_index,
@@ -615,6 +627,7 @@ ORDER BY requested_at ASC, id ASC`
 			provider                     string
 			model                        string
 			apiKey                       string
+			customerID                   string
 			source                       string
 			authID                       string
 			authIndex                    string
@@ -637,6 +650,7 @@ ORDER BY requested_at ASC, id ASC`
 			&provider,
 			&model,
 			&apiKey,
+			&customerID,
 			&source,
 			&authID,
 			&authIndex,
@@ -665,19 +679,7 @@ ORDER BY requested_at ASC, id ASC`
 		if model == "" {
 			model = "unknown"
 		}
-		apiKey = strings.TrimSpace(apiKey)
-		if apiKey == "" {
-			apiKey = strings.TrimSpace(authID)
-		}
-		if apiKey == "" {
-			apiKey = strings.TrimSpace(authIndex)
-		}
-		if apiKey == "" {
-			apiKey = strings.TrimSpace(provider)
-		}
-		if apiKey == "" {
-			apiKey = "persisted"
-		}
+		bucketKey := statisticsBucketKey(customerID, apiKey, authID, authIndex, provider)
 		tokens := normaliseTokenStats(TokenStats{
 			InputTokens:     inputTokens,
 			OutputTokens:    outputTokens,
@@ -686,12 +688,14 @@ ORDER BY requested_at ASC, id ASC`
 			TotalTokens:     totalTokens,
 		})
 		detail := RequestDetail{
-			Timestamp: timestamp,
-			LatencyMs: latencyMs,
-			Source:    source,
-			AuthIndex: authIndex,
-			Tokens:    tokens,
-			Failed:    failedInt != 0,
+			Timestamp:  timestamp,
+			Provider:   strings.TrimSpace(provider),
+			CustomerID: strings.TrimSpace(customerID),
+			LatencyMs:  latencyMs,
+			Source:     source,
+			AuthIndex:  authIndex,
+			Tokens:     tokens,
+			Failed:     failedInt != 0,
 		}
 		if promptCacheKey != "" || previousResponseID != "" || responseID != "" || promptCacheRetention != "" {
 			detail.Cache = &helps.CodexCacheObservability{
@@ -722,7 +726,7 @@ ORDER BY requested_at ASC, id ASC`
 		result.TokensByDay[dayKey] += tokens.TotalTokens
 		result.TokensByHour[hourKey] += tokens.TotalTokens
 
-		apiSnapshot := result.APIs[apiKey]
+		apiSnapshot := result.APIs[bucketKey]
 		if apiSnapshot.Models == nil {
 			apiSnapshot.Models = make(map[string]ModelSnapshot)
 		}
@@ -733,7 +737,7 @@ ORDER BY requested_at ASC, id ASC`
 		modelSnapshot.TotalTokens += tokens.TotalTokens
 		modelSnapshot.Details = append(modelSnapshot.Details, detail)
 		apiSnapshot.Models[model] = modelSnapshot
-		result.APIs[apiKey] = apiSnapshot
+		result.APIs[bucketKey] = apiSnapshot
 	}
 	if err := rows.Err(); err != nil {
 		return result, fmt.Errorf("cache statistics store: usage snapshot iterate: %w", err)
@@ -895,7 +899,7 @@ ORDER BY day ASC`
 func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsRequest, error) {
 	query := fmt.Sprintf(`
 SELECT
-    id, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
+    id, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
@@ -926,6 +930,7 @@ LIMIT ` + s.bind(len(args)+1)
 			&item.ReasoningEffort,
 			&item.Source,
 			&item.APIKey,
+			&item.CustomerID,
 			&item.AuthID,
 			&item.AuthIndex,
 			&item.LatencyMs,
