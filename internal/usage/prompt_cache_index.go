@@ -12,6 +12,9 @@ func (s *CacheStatisticsStore) initPromptCacheIndex() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("cache statistics store: not initialized")
 	}
+	if s.isPostgres() {
+		return s.initPostgresSchema()
+	}
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS prompt_cache_response_index (
     response_id TEXT PRIMARY KEY,
@@ -43,11 +46,11 @@ func (s *CacheStatisticsStore) LookupPromptCacheKeyByResponseID(ctx context.Cont
 	}
 
 	var promptCacheKey string
-	var expiresAtRaw string
-	row := s.db.QueryRowContext(ctx, `
+	var expiresAtRaw any
+	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 SELECT prompt_cache_key, expires_at
-FROM prompt_cache_response_index
-WHERE response_id = ?`, responseID)
+FROM %s
+WHERE response_id = %s`, s.promptCacheTableName(), s.bind(1)), responseID)
 	if err := row.Scan(&promptCacheKey, &expiresAtRaw); err != nil {
 		if err == sql.ErrNoRows {
 			return "", false, nil
@@ -55,13 +58,13 @@ WHERE response_id = ?`, responseID)
 		return "", false, fmt.Errorf("cache statistics store: lookup prompt cache key: %w", err)
 	}
 
-	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtRaw)
+	expiresAt, err := scanCacheStatisticsTime(expiresAtRaw)
 	if err != nil {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM prompt_cache_response_index WHERE response_id = ?`, responseID)
-		return "", false, nil
+		return "", false, fmt.Errorf("cache statistics store: parse prompt cache expiry: %w", err)
 	}
+
 	if !expiresAt.After(time.Now().UTC()) {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM prompt_cache_response_index WHERE response_id = ?`, responseID)
+		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE response_id = %s`, s.promptCacheTableName(), s.bind(1)), responseID)
 		return "", false, nil
 	}
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
@@ -88,18 +91,47 @@ func (s *CacheStatisticsStore) UpsertPromptCacheKeyByResponseID(ctx context.Cont
 	}
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO prompt_cache_response_index (response_id, prompt_cache_key, expires_at, updated_at)
-VALUES (?, ?, ?, ?)
+	if err := s.upsertPromptCacheKeyByResponseID(ctx, responseID, promptCacheKey, expiresAt, now); err != nil {
+		return err
+	}
+	_ = s.deleteExpiredPromptCacheKeys(ctx, now)
+	return nil
+}
+
+func (s *CacheStatisticsStore) upsertPromptCacheKeyByResponseID(ctx context.Context, responseID, promptCacheKey string, expiresAt, updatedAt time.Time) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	responseID = strings.TrimSpace(responseID)
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if responseID == "" || promptCacheKey == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().UTC().Add(time.Hour)
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+INSERT INTO %s (response_id, prompt_cache_key, expires_at, updated_at)
+VALUES (%s, %s, %s, %s)
 ON CONFLICT(response_id) DO UPDATE SET
     prompt_cache_key = excluded.prompt_cache_key,
     expires_at = excluded.expires_at,
     updated_at = excluded.updated_at
-`, responseID, promptCacheKey, expiresAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+`, s.promptCacheTableName(), s.bind(1), s.bind(2), s.bind(3), s.bind(4)),
+		responseID,
+		promptCacheKey,
+		s.timestampArg(expiresAt),
+		s.timestampArg(updatedAt),
+	)
 	if err != nil {
 		return fmt.Errorf("cache statistics store: upsert prompt cache key: %w", err)
 	}
-	_ = s.deleteExpiredPromptCacheKeys(ctx, now)
 	return nil
 }
 
@@ -113,7 +145,7 @@ func (s *CacheStatisticsStore) deleteExpiredPromptCacheKeys(ctx context.Context,
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM prompt_cache_response_index WHERE expires_at <= ?`, now.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE expires_at <= %s`, s.promptCacheTableName(), s.bind(1)), s.timestampArg(now))
 	if err != nil {
 		return fmt.Errorf("cache statistics store: delete expired prompt cache keys: %w", err)
 	}

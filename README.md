@@ -42,6 +42,26 @@ go build -o ./cli-caching-proxy-test ./cmd/server
 ./cli-caching-proxy-test
 ```
 
+Optional: enable Postgres-backed auth/config/statistics storage by creating a `.env`
+file in the server working directory:
+
+```bash
+cat > .env <<'EOF'
+PGSTORE_DSN=postgresql://cheaprouter:cheaprouter@localhost:5432/cliproxy
+PGSTORE_SCHEMA=public
+PGSTORE_LOCAL_PATH=~/.cli-cache-proxy
+EOF
+```
+
+On first startup, the proxy will keep using the same `PGSTORE_*` surface for auth,
+config, and usage statistics, and it will import local legacy auth/stats files from
+`PGSTORE_LOCAL_PATH` when the Postgres tables are empty.
+
+The installers can also write the same `PGSTORE_*` values into the install root `.env`,
+validate the DSN, and try to create the Postgres role/database automatically. If the
+installer cannot provision Postgres with the supplied credentials, it will print the
+exact bash commands needed to initialize the role/database manually.
+
 ### Option 2: Run with Docker Compose
 
 ```bash

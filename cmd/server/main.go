@@ -133,25 +133,26 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var (
-		usePostgresStore     bool
-		pgStoreDSN           string
-		pgStoreSchema        string
-		pgStoreLocalPath     string
-		pgStoreInst          *store.PostgresStore
-		useGitStore          bool
-		gitStoreRemoteURL    string
-		gitStoreUser         string
-		gitStorePassword     string
-		gitStoreLocalPath    string
-		gitStoreInst         *store.GitTokenStore
-		gitStoreRoot         string
-		useObjectStore       bool
-		objectStoreEndpoint  string
-		objectStoreAccess    string
-		objectStoreSecret    string
-		objectStoreBucket    string
-		objectStoreLocalPath string
-		objectStoreInst      *store.ObjectTokenStore
+		usePostgresStore      bool
+		pgStoreDSN            string
+		pgStoreSchema         string
+		pgStoreLocalPath      string
+		pgStoreStatsLocalPath string
+		pgStoreInst           *store.PostgresStore
+		useGitStore           bool
+		gitStoreRemoteURL     string
+		gitStoreUser          string
+		gitStorePassword      string
+		gitStoreLocalPath     string
+		gitStoreInst          *store.GitTokenStore
+		gitStoreRoot          string
+		useObjectStore        bool
+		objectStoreEndpoint   string
+		objectStoreAccess     string
+		objectStoreSecret     string
+		objectStoreBucket     string
+		objectStoreLocalPath  string
+		objectStoreInst       *store.ObjectTokenStore
 	)
 
 	wd, err := os.Getwd()
@@ -189,6 +190,9 @@ func main() {
 		if value, ok := lookupEnv("PGSTORE_LOCAL_PATH", "pgstore_local_path"); ok {
 			pgStoreLocalPath = value
 		}
+		if resolvedPath, errResolvePath := util.ResolveAuthDir(pgStoreLocalPath); errResolvePath == nil && resolvedPath != "" {
+			pgStoreLocalPath = resolvedPath
+		}
 		if pgStoreLocalPath == "" {
 			if writableBase != "" {
 				pgStoreLocalPath = writableBase
@@ -196,6 +200,7 @@ func main() {
 				pgStoreLocalPath = wd
 			}
 		}
+		pgStoreStatsLocalPath = pgStoreLocalPath
 		useGitStore = false
 	}
 	if value, ok := lookupEnv("GITSTORE_GIT_URL", "gitstore_git_url"); ok {
@@ -248,6 +253,7 @@ func main() {
 			DSN:      pgStoreDSN,
 			Schema:   pgStoreSchema,
 			SpoolDir: pgStoreLocalPath,
+			SeedRoot: pgStoreStatsLocalPath,
 		})
 		cancel()
 		if err != nil {
@@ -438,6 +444,12 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	usage.SetPersistentStoreOptions(usage.PersistentStoreOptions{
+		PostgresDSN:       pgStoreDSN,
+		PostgresSchema:    pgStoreSchema,
+		PostgresLocalPath: pgStoreStatsLocalPath,
+		RequirePostgres:   usePostgresStore,
+	})
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.

@@ -32,6 +32,7 @@ type PostgresStoreConfig struct {
 	ConfigTable string
 	AuthTable   string
 	SpoolDir    string
+	SeedRoot    string
 }
 
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
@@ -70,6 +71,11 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	absSpool, err := filepath.Abs(spoolRoot)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: resolve spool directory: %w", err)
+	}
+	if seedRoot := strings.TrimSpace(cfg.SeedRoot); seedRoot != "" {
+		if absSeed, errSeed := filepath.Abs(seedRoot); errSeed == nil {
+			cfg.SeedRoot = absSeed
+		}
 	}
 	configDir := filepath.Join(absSpool, "config")
 	authDir := filepath.Join(absSpool, "auths")
@@ -399,25 +405,18 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if _, errStat := os.Stat(s.configPath); errors.Is(errStat, fs.ErrNotExist) {
-			if exampleConfigPath != "" {
-				if errCopy := misc.CopyConfigTemplate(exampleConfigPath, s.configPath); errCopy != nil {
-					return fmt.Errorf("postgres store: copy example config: %w", errCopy)
-				}
-			} else {
-				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
-					return fmt.Errorf("postgres store: prepare config directory: %w", errCreate)
-				}
-				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
-					return fmt.Errorf("postgres store: create empty config: %w", errWrite)
-				}
-			}
-		}
-		data, errRead := os.ReadFile(s.configPath)
+		data, errRead := s.seedConfigContent(exampleConfigPath)
 		if errRead != nil {
-			return fmt.Errorf("postgres store: read local config: %w", errRead)
+			return errRead
 		}
-		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
+		normalized := normalizeLineEndings(string(data))
+		if err = os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
+			return fmt.Errorf("postgres store: prepare config directory: %w", err)
+		}
+		if err = os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
+			return fmt.Errorf("postgres store: write config to spool: %w", err)
+		}
+		if errPersist := s.persistConfig(ctx, []byte(normalized)); errPersist != nil {
 			return errPersist
 		}
 	case err != nil:
@@ -436,6 +435,16 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 
 // syncAuthFromDatabase populates the local auth directory from PostgreSQL data.
 func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
+	var authCount int
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", s.fullTableName(s.cfg.AuthTable))).Scan(&authCount); err != nil {
+		return fmt.Errorf("postgres store: count auth rows: %w", err)
+	}
+	if authCount == 0 {
+		if err := s.seedAuthFromLocal(ctx); err != nil {
+			return err
+		}
+	}
+
 	query := fmt.Sprintf("SELECT id, content FROM %s", s.fullTableName(s.cfg.AuthTable))
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -618,6 +627,100 @@ func (s *PostgresStore) fullTableName(name string) string {
 		return quoteIdentifier(name)
 	}
 	return quoteIdentifier(s.cfg.Schema) + "." + quoteIdentifier(name)
+}
+
+func (s *PostgresStore) seedConfigPath() string {
+	if s == nil {
+		return ""
+	}
+	seedRoot := strings.TrimSpace(s.cfg.SeedRoot)
+	if seedRoot == "" {
+		return ""
+	}
+	return filepath.Join(seedRoot, "config.yaml")
+}
+
+func (s *PostgresStore) seedAuthDir() string {
+	if s == nil {
+		return ""
+	}
+	seedRoot := strings.TrimSpace(s.cfg.SeedRoot)
+	if seedRoot == "" {
+		return ""
+	}
+	return filepath.Join(seedRoot, "auth")
+}
+
+func (s *PostgresStore) seedConfigContent(exampleConfigPath string) ([]byte, error) {
+	candidates := make([]string, 0, 3)
+	if seedPath := s.seedConfigPath(); seedPath != "" {
+		candidates = append(candidates, seedPath)
+	}
+	candidates = append(candidates, s.configPath)
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		data, err := os.ReadFile(candidate)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("postgres store: read local config: %w", err)
+		}
+	}
+	if exampleConfigPath != "" {
+		if err := misc.CopyConfigTemplate(exampleConfigPath, s.configPath); err != nil {
+			return nil, fmt.Errorf("postgres store: copy example config: %w", err)
+		}
+		return os.ReadFile(s.configPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
+		return nil, fmt.Errorf("postgres store: prepare config directory: %w", err)
+	}
+	if err := os.WriteFile(s.configPath, []byte{}, 0o600); err != nil {
+		return nil, fmt.Errorf("postgres store: create empty config: %w", err)
+	}
+	return []byte{}, nil
+}
+
+func (s *PostgresStore) seedAuthFromLocal(ctx context.Context) error {
+	seedAuthDir := s.seedAuthDir()
+	if seedAuthDir == "" {
+		return nil
+	}
+	if _, err := os.Stat(seedAuthDir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("postgres store: inspect seed auth directory: %w", err)
+	}
+	return filepath.WalkDir(seedAuthDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("postgres store: walk seed auth directory: %w", err)
+		}
+		if d.IsDir() {
+			if path != seedAuthDir && d.Name() == "logs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(d.Name()), ".json") {
+			return nil
+		}
+		relID, err := filepath.Rel(seedAuthDir, path)
+		if err != nil {
+			return fmt.Errorf("postgres store: compute seed auth path: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("postgres store: read seed auth file: %w", err)
+		}
+		if len(data) == 0 || !json.Valid(data) {
+			return nil
+		}
+		return s.persistAuth(ctx, filepath.ToSlash(relID), data)
+	})
 }
 
 func quoteIdentifier(identifier string) string {

@@ -28,6 +28,7 @@ type CacheStatisticsEvent struct {
 	Model           string
 	ReasoningEffort string
 	Source          string
+	APIKey          string
 	AuthID          string
 	AuthIndex       string
 	LatencyMs       int64
@@ -38,41 +39,41 @@ type CacheStatisticsEvent struct {
 }
 
 type CacheStatisticsSummary struct {
-	TotalRequests   int64   `json:"total_requests"`
-	SuccessRequests int64   `json:"success_requests"`
-	FailedRequests  int64   `json:"failed_requests"`
-	InputTokens     int64   `json:"input_tokens"`
-	EffectiveInputTokens int64 `json:"effective_input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	TotalTokens     int64   `json:"total_tokens"`
-	CacheRatio      float64 `json:"cache_ratio"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	TotalRequests        int64   `json:"total_requests"`
+	SuccessRequests      int64   `json:"success_requests"`
+	FailedRequests       int64   `json:"failed_requests"`
+	InputTokens          int64   `json:"input_tokens"`
+	EffectiveInputTokens int64   `json:"effective_input_tokens"`
+	OutputTokens         int64   `json:"output_tokens"`
+	ReasoningTokens      int64   `json:"reasoning_tokens"`
+	CachedTokens         int64   `json:"cached_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	CacheRatio           float64 `json:"cache_ratio"`
+	AvgLatencyMs         float64 `json:"avg_latency_ms"`
 }
 
 type CacheStatisticsModelSummary struct {
-	Model           string  `json:"model"`
-	Requests        int64   `json:"requests"`
-	FailedRequests  int64   `json:"failed_requests"`
-	InputTokens     int64   `json:"input_tokens"`
-	EffectiveInputTokens int64 `json:"effective_input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	TotalTokens     int64   `json:"total_tokens"`
-	CacheRatio      float64 `json:"cache_ratio"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	Model                string  `json:"model"`
+	Requests             int64   `json:"requests"`
+	FailedRequests       int64   `json:"failed_requests"`
+	InputTokens          int64   `json:"input_tokens"`
+	EffectiveInputTokens int64   `json:"effective_input_tokens"`
+	OutputTokens         int64   `json:"output_tokens"`
+	ReasoningTokens      int64   `json:"reasoning_tokens"`
+	CachedTokens         int64   `json:"cached_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	CacheRatio           float64 `json:"cache_ratio"`
+	AvgLatencyMs         float64 `json:"avg_latency_ms"`
 }
 
 type CacheStatisticsDaySummary struct {
-	Day          string  `json:"day"`
-	Requests     int64   `json:"requests"`
-	InputTokens  int64   `json:"input_tokens"`
-	EffectiveInputTokens int64 `json:"effective_input_tokens"`
-	CachedTokens int64   `json:"cached_tokens"`
-	TotalTokens  int64   `json:"total_tokens"`
-	CacheRatio   float64 `json:"cache_ratio"`
+	Day                  string  `json:"day"`
+	Requests             int64   `json:"requests"`
+	InputTokens          int64   `json:"input_tokens"`
+	EffectiveInputTokens int64   `json:"effective_input_tokens"`
+	CachedTokens         int64   `json:"cached_tokens"`
+	TotalTokens          int64   `json:"total_tokens"`
+	CacheRatio           float64 `json:"cache_ratio"`
 }
 
 type CacheStatisticsRequest struct {
@@ -82,6 +83,7 @@ type CacheStatisticsRequest struct {
 	Model                             string    `json:"model"`
 	ReasoningEffort                   string    `json:"reasoning_effort,omitempty"`
 	Source                            string    `json:"source"`
+	APIKey                            string    `json:"api_key,omitempty"`
 	AuthID                            string    `json:"auth_id"`
 	AuthIndex                         string    `json:"auth_index"`
 	LatencyMs                         int64     `json:"latency_ms"`
@@ -119,6 +121,7 @@ func (snapshot CacheStatisticsSnapshot) Redacted() CacheStatisticsSnapshot {
 	snapshot.DBPath = ""
 	for i := range snapshot.RecentRequests {
 		snapshot.RecentRequests[i].Source = ""
+		snapshot.RecentRequests[i].APIKey = ""
 		snapshot.RecentRequests[i].AuthID = ""
 		snapshot.RecentRequests[i].AuthIndex = ""
 		snapshot.RecentRequests[i].PromptCacheKey = ""
@@ -130,8 +133,11 @@ func (snapshot CacheStatisticsSnapshot) Redacted() CacheStatisticsSnapshot {
 }
 
 type CacheStatisticsStore struct {
-	path string
-	db   *sql.DB
+	path       string
+	db         *sql.DB
+	driver     string
+	schema     string
+	backendKey string
 }
 
 var (
@@ -161,18 +167,59 @@ func ConfigurePersistentStore(cfg *config.Config, configFilePath string) error {
 	if !enabled {
 		return ClosePersistentStore()
 	}
+	opts := currentPersistentStoreOptions()
+	cacheStatisticsStoreMu.RLock()
+	existing := cacheStatisticsStore
+	cacheStatisticsStoreMu.RUnlock()
+
+	if strings.TrimSpace(opts.PostgresDSN) != "" {
+		backendKey := postgresCacheStatisticsBackendKey(opts.PostgresDSN, opts.PostgresSchema)
+		if existing != nil && existing.backendKey == backendKey {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		store, err := OpenPostgresCacheStatisticsStore(ctx, PostgresCacheStatisticsStoreConfig{
+			DSN:    opts.PostgresDSN,
+			Schema: opts.PostgresSchema,
+		})
+		cancel()
+		if err != nil {
+			return err
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+		for _, legacyPath := range resolveLegacyCacheStatisticsPaths(cfg, configFilePath, opts) {
+			if err := store.ImportSQLiteFile(ctx, legacyPath); err != nil {
+				cancel()
+				_ = store.Close()
+				return err
+			}
+		}
+		cancel()
+
+		cacheStatisticsStoreMu.Lock()
+		old := cacheStatisticsStore
+		cacheStatisticsStore = store
+		cacheStatisticsStoreMu.Unlock()
+
+		if old != nil {
+			_ = old.Close()
+		}
+		return nil
+	}
+
+	if opts.RequirePostgres {
+		return fmt.Errorf("cache statistics store: PGSTORE_DSN is required when usage statistics are enabled")
+	}
 	path, err := resolveCacheStatisticsDBPath(cfg, configFilePath)
 	if err != nil {
 		return err
 	}
-
-	cacheStatisticsStoreMu.RLock()
-	existing := cacheStatisticsStore
-	cacheStatisticsStoreMu.RUnlock()
-	if existing != nil && existing.path == path {
+	if absPath, errAbs := filepath.Abs(path); errAbs == nil {
+		path = absPath
+	}
+	if existing != nil && existing.backendKey == "sqlite:"+path {
 		return nil
 	}
-
 	store, err := OpenCacheStatisticsStore(path)
 	if err != nil {
 		return err
@@ -193,6 +240,9 @@ func OpenCacheStatisticsStore(path string) (*CacheStatisticsStore, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("cache statistics store: empty path")
+	}
+	if absPath, errAbs := filepath.Abs(path); errAbs == nil {
+		path = absPath
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("cache statistics store: create directory: %w", err)
@@ -220,7 +270,7 @@ func OpenCacheStatisticsStore(path string) (*CacheStatisticsStore, error) {
 			return nil, fmt.Errorf("cache statistics store: configure database: %w", errExec)
 		}
 	}
-	store := &CacheStatisticsStore{path: path, db: db}
+	store := &CacheStatisticsStore{path: path, db: db, driver: "sqlite", backendKey: "sqlite:" + path}
 	if err := store.initSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -250,14 +300,19 @@ func (s *CacheStatisticsStore) initSchema() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("cache statistics store: not initialized")
 	}
+	if s.isPostgres() {
+		return s.initPostgresSchema()
+	}
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL DEFAULT '',
     requested_at TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     reasoning_effort TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
     auth_id TEXT NOT NULL,
     auth_index TEXT NOT NULL,
     latency_ms INTEGER NOT NULL,
@@ -285,7 +340,19 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "event_key", "ALTER TABLE cache_statistics_requests ADD COLUMN event_key TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_statistics_event_key ON cache_statistics_requests(event_key)`); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "reasoning_effort", "ALTER TABLE cache_statistics_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "api_key", "ALTER TABLE cache_statistics_requests ADD COLUMN api_key TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON cache_statistics_requests(api_key)`); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_rewrite_applied", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -328,19 +395,69 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 		timestamp = time.Now()
 	}
 	cache := event.Cache
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cache_statistics_requests (
-    requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
+	eventKey := buildCacheStatisticsEventKey(event)
+	if s.isPostgres() {
+		_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+INSERT INTO %s (
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, failed,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (event_key) DO NOTHING`,
+			s.requestsTableName(),
+			s.bind(1), s.bind(2), s.bind(3), s.bind(4), s.bind(5), s.bind(6), s.bind(7), s.bind(8), s.bind(9), s.bind(10), s.bind(11),
+			s.bind(12), s.bind(13), s.bind(14), s.bind(15), s.bind(16), s.bind(17), s.bind(18), s.bind(19), s.bind(20), s.bind(21), s.bind(22),
+			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27)),
+			eventKey,
+			s.timestampArg(timestamp),
+			strings.TrimSpace(event.Provider),
+			strings.TrimSpace(event.Model),
+			strings.TrimSpace(event.ReasoningEffort),
+			strings.TrimSpace(event.Source),
+			strings.TrimSpace(event.APIKey),
+			strings.TrimSpace(event.AuthID),
+			strings.TrimSpace(event.AuthIndex),
+			normaliseNonNegative(event.LatencyMs),
+			event.Failed,
+			normaliseNonNegative(tokens.InputTokens),
+			normaliseNonNegative(tokens.OutputTokens),
+			normaliseNonNegative(tokens.ReasoningTokens),
+			normaliseNonNegative(tokens.CachedTokens),
+			normaliseNonNegative(tokens.TotalTokens),
+			cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.PromptCacheKey }),
+			cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.PreviousResponseID }),
+			cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.ResponseID }),
+			cacheString(cache, func(v *helps.CodexCacheObservability) string { return v.PromptCacheRetention }),
+			event.AnthropicCache.RewriteApplied,
+			event.AnthropicCache.OverwroteClientLayout,
+			event.AnthropicCache.MatchedAgenticCodingLoop,
+			strings.TrimSpace(event.AnthropicCache.TTL),
+			anthropicBreakpointSummary(event.AnthropicCache),
+			anthropicCacheCreationTokens(event.AnthropicCache),
+			anthropicCacheReadTokens(event.AnthropicCache),
+		)
+		if err != nil {
+			return fmt.Errorf("cache statistics store: insert event: %w", err)
+		}
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO cache_statistics_requests (
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, failed,
+    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
+    anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventKey,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
 		strings.TrimSpace(event.Model),
 		strings.TrimSpace(event.ReasoningEffort),
 		strings.TrimSpace(event.Source),
+		strings.TrimSpace(event.APIKey),
 		strings.TrimSpace(event.AuthID),
 		strings.TrimSpace(event.AuthIndex),
 		normaliseNonNegative(event.LatencyMs),
@@ -457,16 +574,17 @@ func (s *CacheStatisticsStore) StatisticsSnapshotByProvider(ctx context.Context,
 		return result, nil
 	}
 
-	query := `
+	query := fmt.Sprintf(`
 SELECT
     requested_at,
     provider,
     model,
+    api_key,
     source,
     auth_id,
     auth_index,
     latency_ms,
-    failed,
+    CASE WHEN failed THEN 1 ELSE 0 END,
     input_tokens,
     output_tokens,
     reasoning_tokens,
@@ -478,8 +596,8 @@ SELECT
     prompt_cache_retention,
     anthropic_cache_creation_input_tokens,
     anthropic_cache_read_input_tokens
-FROM cache_statistics_requests
-WHERE 1 = 1`
+FROM %s
+WHERE 1 = 1`, s.requestsTableName())
 	args := []any{}
 	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
 	query += `
@@ -493,9 +611,10 @@ ORDER BY requested_at ASC, id ASC`
 
 	for rows.Next() {
 		var (
-			requestedAt                  string
+			requestedAt                  any
 			provider                     string
 			model                        string
+			apiKey                       string
 			source                       string
 			authID                       string
 			authIndex                    string
@@ -517,6 +636,7 @@ ORDER BY requested_at ASC, id ASC`
 			&requestedAt,
 			&provider,
 			&model,
+			&apiKey,
 			&source,
 			&authID,
 			&authIndex,
@@ -537,7 +657,7 @@ ORDER BY requested_at ASC, id ASC`
 			return result, fmt.Errorf("cache statistics store: usage snapshot scan: %w", err)
 		}
 
-		timestamp, err := time.Parse(time.RFC3339Nano, requestedAt)
+		timestamp, err := scanCacheStatisticsTime(requestedAt)
 		if err != nil {
 			continue
 		}
@@ -545,7 +665,10 @@ ORDER BY requested_at ASC, id ASC`
 		if model == "" {
 			model = "unknown"
 		}
-		apiKey := strings.TrimSpace(authID)
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(authID)
+		}
 		if apiKey == "" {
 			apiKey = strings.TrimSpace(authIndex)
 		}
@@ -620,11 +743,11 @@ ORDER BY requested_at ASC, id ASC`
 
 func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string, provider string) (CacheStatisticsSummary, error) {
 	var summary CacheStatisticsSummary
-	query := `
+	query := fmt.Sprintf(`
 SELECT
     COUNT(*),
-    COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
-    COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN NOT failed THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
         WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
@@ -639,9 +762,9 @@ SELECT
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0)
-FROM cache_statistics_requests
-WHERE requested_at >= ?`
-	args := []any{since}
+FROM %s
+WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
 	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(
 		&summary.TotalRequests,
@@ -663,11 +786,11 @@ WHERE requested_at >= ?`
 }
 
 func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsModelSummary, error) {
-	query := `
+	query := fmt.Sprintf(`
 SELECT
     model,
     COUNT(*),
-    COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
         WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
@@ -682,14 +805,14 @@ SELECT
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0)
-FROM cache_statistics_requests
-WHERE requested_at >= ?`
-	args := []any{since}
+FROM %s
+WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
 	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
 	query += `
 GROUP BY model
 ORDER BY COUNT(*) DESC, model ASC
-LIMIT ?`
+LIMIT ` + s.bind(len(args)+1)
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -723,9 +846,13 @@ LIMIT ?`
 }
 
 func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, provider string) ([]CacheStatisticsDaySummary, error) {
-	query := `
+	dayExpr := "substr(requested_at, 1, 10)"
+	if s.isPostgres() {
+		dayExpr = "to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+	}
+	query := fmt.Sprintf(`
 SELECT
-    substr(requested_at, 1, 10) AS day,
+    %s AS day,
     COUNT(*),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
@@ -738,12 +865,12 @@ SELECT
     END), 0),
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0)
-FROM cache_statistics_requests
-WHERE requested_at >= ?`
-	args := []any{since}
+FROM %s
+WHERE requested_at >= %s`, dayExpr, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
 	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
 	query += `
-GROUP BY substr(requested_at, 1, 10)
+GROUP BY day
 ORDER BY day ASC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -766,20 +893,20 @@ ORDER BY day ASC`
 }
 
 func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsRequest, error) {
-	query := `
+	query := fmt.Sprintf(`
 SELECT
-    id, requested_at, provider, model, reasoning_effort, source, auth_id, auth_index, latency_ms, failed,
+    id, requested_at, provider, model, reasoning_effort, source, api_key, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-FROM cache_statistics_requests
-WHERE requested_at >= ?`
-	args := []any{since}
+FROM %s
+WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
 	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
 	query += `
 ORDER BY requested_at DESC, id DESC
-LIMIT ?`
+LIMIT ` + s.bind(len(args)+1)
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -789,7 +916,7 @@ LIMIT ?`
 	result := make([]CacheStatisticsRequest, 0)
 	for rows.Next() {
 		var item CacheStatisticsRequest
-		var requestedAt string
+		var requestedAt any
 		var failedInt int
 		if err := rows.Scan(
 			&item.ID,
@@ -798,6 +925,7 @@ LIMIT ?`
 			&item.Model,
 			&item.ReasoningEffort,
 			&item.Source,
+			&item.APIKey,
 			&item.AuthID,
 			&item.AuthIndex,
 			&item.LatencyMs,
@@ -822,7 +950,7 @@ LIMIT ?`
 			return nil, fmt.Errorf("cache statistics store: scan recent request: %w", err)
 		}
 		item.Failed = failedInt != 0
-		if ts, errParse := time.Parse(time.RFC3339Nano, requestedAt); errParse == nil {
+		if ts, errParse := scanCacheStatisticsTime(requestedAt); errParse == nil {
 			item.Timestamp = ts
 		}
 		item.EffectiveInputTokens = cacheStatisticsEffectiveInputTokens(item.Provider, item.InputTokens, item.CachedTokens, item.AnthropicCacheCreationInputTokens, item.AnthropicCacheReadInputTokens)
@@ -841,8 +969,13 @@ func appendCacheStatisticsProviderFilter(query string, args []any, provider stri
 		return query, args
 	}
 	placeholders := make([]string, 0, len(providers))
+	usePostgresBinds := strings.Contains(query, "$1")
 	for _, item := range providers {
-		placeholders = append(placeholders, "?")
+		if usePostgresBinds {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)+1))
+		} else {
+			placeholders = append(placeholders, "?")
+		}
 		args = append(args, item)
 	}
 	query += " AND provider IN (" + strings.Join(placeholders, ",") + ")"
@@ -919,6 +1052,19 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func scanCacheStatisticsTime(value any) (time.Time, error) {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC(), nil
+	case string:
+		return parseCacheStatisticsTime(typed)
+	case []byte:
+		return parseCacheStatisticsTime(string(typed))
+	default:
+		return time.Time{}, fmt.Errorf("unsupported time value type %T", value)
+	}
 }
 
 func ratio(numerator, denominator int64) float64 {

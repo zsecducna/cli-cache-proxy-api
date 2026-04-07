@@ -8,6 +8,7 @@ DEFAULT_SOURCE_CONFIG="/tmp/cli-proxy-api-test/config.yaml"
 DEFAULT_SOURCE_STATS_DIR="~/Desktop/CLIProxyAPI/stats"
 
 SKIP_SYSTEMD="${CLI_PROXY_INSTALLER_SKIP_SYSTEMD:-0}"
+SKIP_POSTGRES_PROVISION="${CLI_PROXY_INSTALLER_SKIP_POSTGRES_PROVISION:-0}"
 SOURCE_CONFIG_OVERRIDE="${CLI_PROXY_INSTALLER_SOURCE_CONFIG:-}"
 SOURCE_STATS_OVERRIDE="${CLI_PROXY_INSTALLER_SOURCE_STATS:-}"
 
@@ -122,6 +123,19 @@ sql_quote() {
   printf '%s' "$value"
 }
 
+env_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+quote_pg_identifier() {
+  local value="$1"
+  value="${value//\"/\"\"}"
+  printf '"%s"' "$value"
+}
+
 require_tools() {
   local missing=0
   local tool=""
@@ -133,6 +147,12 @@ require_tools() {
   done
   if [[ "$missing" -ne 0 ]]; then
     die "Install the missing tools and rerun ./install_linux.sh"
+  fi
+}
+
+require_postgres_tools() {
+  if ! command -v psql >/dev/null 2>&1; then
+    die "Postgres setup requires psql. Install PostgreSQL client tools and rerun ./install_linux.sh"
   fi
 }
 
@@ -410,6 +430,271 @@ write_minimal_config() {
 auth-dir: "$(escape_yaml_double "$auth_dir")"
 usage-statistics-enabled: true
 EOF
+}
+
+read_env_scalar() {
+  local file_path="$1"
+  local key="$2"
+  local line=""
+  local value=""
+
+  [[ -f "$file_path" ]] || return 1
+  line="$(grep -E "^[[:space:]]*$key=" "$file_path" | tail -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  value="${line#*=}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+set_env_scalar() {
+  local file_path="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_path="${file_path}.tmp.$$"
+  local found=0
+  local line=""
+
+  ensure_dir "$(dirname "$file_path")"
+  : > "$tmp_path"
+  if [[ -f "$file_path" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" =~ ^[[:space:]]*$key= ]]; then
+        printf '%s=%s\n' "$key" "$(env_quote "$value")" >> "$tmp_path"
+        found=1
+      else
+        printf '%s\n' "$line" >> "$tmp_path"
+      fi
+    done < "$file_path"
+  fi
+
+  if [[ "$found" -eq 0 ]]; then
+    printf '%s=%s\n' "$key" "$(env_quote "$value")" >> "$tmp_path"
+  fi
+
+  mv "$tmp_path" "$file_path"
+}
+
+remove_env_keys() {
+  local file_path="$1"
+  shift
+  local tmp_path="${file_path}.tmp.$$"
+  local line=""
+  local key=""
+  local remove=0
+
+  [[ -f "$file_path" ]] || return 0
+
+  : > "$tmp_path"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    remove=0
+    for key in "$@"; do
+      if [[ "$line" =~ ^[[:space:]]*$key= ]]; then
+        remove=1
+        break
+      fi
+    done
+    if [[ "$remove" -eq 0 ]]; then
+      printf '%s\n' "$line" >> "$tmp_path"
+    fi
+  done < "$file_path"
+
+  if [[ -s "$tmp_path" ]]; then
+    mv "$tmp_path" "$file_path"
+  else
+    rm -f "$tmp_path" "$file_path"
+  fi
+}
+
+write_pgstore_env() {
+  local env_path="$1"
+  local dsn="$2"
+  local schema="$3"
+  local local_path="$4"
+
+  set_env_scalar "$env_path" "PGSTORE_DSN" "$dsn"
+  set_env_scalar "$env_path" "PGSTORE_SCHEMA" "$schema"
+  set_env_scalar "$env_path" "PGSTORE_LOCAL_PATH" "$local_path"
+}
+
+clear_pgstore_env() {
+  local env_path="$1"
+  remove_env_keys "$env_path" "PGSTORE_DSN" "PGSTORE_SCHEMA" "PGSTORE_LOCAL_PATH"
+}
+
+prompt_required_value() {
+  local label="$1"
+  local default_value="$2"
+  local value=""
+
+  while true; do
+    value="$(prompt_with_default "$label" "$default_value")"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    say "A value is required."
+  done
+}
+
+parse_postgres_db_name() {
+  local dsn="$1"
+  local prefix="${dsn%%\?*}"
+  local db_name=""
+
+  case "$prefix" in
+    postgres://*|postgresql://*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  db_name="${prefix##*/}"
+  db_name="${db_name%%\#*}"
+  [[ -n "$db_name" ]] || return 1
+  printf '%s' "$db_name"
+}
+
+parse_postgres_user_name() {
+  local dsn="$1"
+  local prefix="${dsn%%\?*}"
+  local authority="${prefix#*://}"
+  local credentials=""
+  local user_name=""
+
+  authority="${authority%%/*}"
+  [[ "$authority" == *"@"* ]] || return 1
+  credentials="${authority%@*}"
+  user_name="${credentials%%:*}"
+  [[ -n "$user_name" ]] || return 1
+  printf '%s' "$user_name"
+}
+
+parse_postgres_password() {
+  local dsn="$1"
+  local prefix="${dsn%%\?*}"
+  local authority="${prefix#*://}"
+  local credentials=""
+
+  authority="${authority%%/*}"
+  [[ "$authority" == *"@"* ]] || return 1
+  credentials="${authority%@*}"
+  [[ "$credentials" == *:* ]] || return 1
+  printf '%s' "${credentials#*:}"
+}
+
+build_postgres_maintenance_dsn() {
+  local dsn="$1"
+  local prefix="${dsn%%\?*}"
+  local suffix=""
+
+  if [[ "$dsn" == *\?* ]]; then
+    suffix="?${dsn#*\?}"
+  fi
+  [[ "$prefix" == */* ]] || return 1
+  printf '%s/postgres%s' "${prefix%/*}" "$suffix"
+}
+
+print_postgres_manual_init() {
+  local target_dsn="$1"
+  local maintenance_dsn="$2"
+  local role_name="$3"
+  local role_password="$4"
+  local db_name="$5"
+  local create_role_sql=""
+  local create_db_sql=""
+
+  say "Could not provision Postgres automatically with the provided DSN."
+  say "Run these bash commands, then rerun ./install_linux.sh:"
+  say "  psql \"$maintenance_dsn\" -Atqc \"SELECT 1;\""
+  if [[ -n "$role_name" ]]; then
+    create_role_sql="DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(sql_quote "$role_name")') THEN CREATE ROLE $(quote_pg_identifier "$role_name") LOGIN"
+    if [[ -n "$role_password" ]]; then
+      create_role_sql="$create_role_sql PASSWORD '$(sql_quote "$role_password")'"
+    fi
+    create_role_sql="$create_role_sql; END IF; END \$\$;"
+    say "  psql \"$maintenance_dsn\" -v ON_ERROR_STOP=1 -c \"${create_role_sql}\""
+    create_db_sql="SELECT 'CREATE DATABASE $(quote_pg_identifier "$db_name") OWNER $(quote_pg_identifier "$role_name")' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$(sql_quote "$db_name")') \\gexec"
+  else
+    create_db_sql="SELECT 'CREATE DATABASE $(quote_pg_identifier "$db_name")' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$(sql_quote "$db_name")') \\gexec"
+  fi
+  say "  psql \"$maintenance_dsn\" -v ON_ERROR_STOP=1 -c \"${create_db_sql}\""
+  say "  psql \"$target_dsn\" -Atqc \"SELECT 1;\""
+}
+
+ensure_postgres_database() {
+  local target_dsn="$1"
+  local db_name=""
+  local maintenance_dsn=""
+  local exists=""
+  local role_name=""
+  local role_password=""
+  local create_role_sql=""
+  local create_db_sql=""
+
+  if [[ "$SKIP_POSTGRES_PROVISION" == "1" ]]; then
+    say "Skipping Postgres provisioning because CLI_PROXY_INSTALLER_SKIP_POSTGRES_PROVISION=1"
+    return 0
+  fi
+
+  db_name="$(parse_postgres_db_name "$target_dsn")" || die "Could not determine database name from Postgres DSN: $target_dsn"
+  role_name="$(parse_postgres_user_name "$target_dsn" || true)"
+  role_password="$(parse_postgres_password "$target_dsn" || true)"
+  if psql "$target_dsn" -Atqc "SELECT 1;" >/dev/null 2>&1; then
+    say "Validated Postgres DSN and detected existing Postgres database $db_name"
+    return 0
+  fi
+
+  maintenance_dsn="$(build_postgres_maintenance_dsn "$target_dsn")" || die "Could not derive maintenance DSN from Postgres DSN: $target_dsn"
+  if ! psql "$maintenance_dsn" -Atqc "SELECT 1;" >/dev/null 2>&1; then
+    print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
+    die "Could not reach PostgreSQL maintenance database using $maintenance_dsn"
+  fi
+
+  if [[ -n "$role_name" ]]; then
+    exists="$(psql "$maintenance_dsn" -Atqc "SELECT 1 FROM pg_roles WHERE rolname = '$(sql_quote "$role_name")';" 2>/dev/null || true)"
+    if [[ "$exists" != "1" ]]; then
+      say "Creating Postgres role $role_name"
+      create_role_sql="DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(sql_quote "$role_name")') THEN CREATE ROLE $(quote_pg_identifier "$role_name") LOGIN"
+      if [[ -n "$role_password" ]]; then
+        create_role_sql="$create_role_sql PASSWORD '$(sql_quote "$role_password")'"
+      fi
+      create_role_sql="$create_role_sql; END IF; END \$\$;"
+      if ! psql "$maintenance_dsn" -v ON_ERROR_STOP=1 -c "$create_role_sql" >/dev/null 2>&1; then
+        print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
+        die "Failed creating Postgres role $role_name using $maintenance_dsn"
+      fi
+    fi
+  fi
+
+  exists="$(psql "$maintenance_dsn" -Atqc "SELECT 1 FROM pg_database WHERE datname = '$(sql_quote "$db_name")';" 2>/dev/null || true)"
+  if [[ "$exists" == "1" ]]; then
+    print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
+    die "Postgres database $db_name already exists but the target DSN is not reachable: $target_dsn"
+  fi
+
+  say "Creating Postgres database $db_name"
+  create_db_sql="CREATE DATABASE $(quote_pg_identifier "$db_name")"
+  if [[ -n "$role_name" ]]; then
+    create_db_sql="$create_db_sql OWNER $(quote_pg_identifier "$role_name")"
+  fi
+  create_db_sql="$create_db_sql;"
+  if ! psql "$maintenance_dsn" -v ON_ERROR_STOP=1 -c "$create_db_sql" >/dev/null 2>&1; then
+    print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
+    die "Failed creating Postgres database $db_name using $maintenance_dsn"
+  fi
+  if ! psql "$target_dsn" -Atqc "SELECT 1;" >/dev/null 2>&1; then
+    print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
+    die "Created Postgres database $db_name but failed to connect using target DSN"
+  fi
+  say "Validated Postgres DSN after provisioning $db_name"
 }
 
 dir_has_entries() {
@@ -796,7 +1081,8 @@ print_next_steps() {
   local config_path="$3"
   local auth_dir="$4"
   local stats_db="$5"
-  local unit_path="${6:-}"
+  local env_path="${6:-}"
+  local unit_path="${7:-}"
 
   say
   say "Installation complete."
@@ -805,6 +1091,9 @@ print_next_steps() {
   say "  Config: $config_path"
   say "  Auth dir: $auth_dir"
   say "  Stats DB: $stats_db"
+  if [[ -f "$env_path" ]]; then
+    say "  Postgres env: $env_path"
+  fi
   say "  Logs dir: $install_root/logs"
   if [[ -n "$unit_path" ]]; then
     say "  Systemd user unit: $unit_path"
@@ -816,7 +1105,7 @@ print_next_steps() {
     say "    systemctl --user stop $INSTALLER_LABEL"
   fi
   say "  Run manually:"
-  say "    \"$binary_path\""
+  say "    cd \"$install_root\" && \"./$(basename "$binary_path")\""
 }
 
 main() {
@@ -833,10 +1122,19 @@ main() {
   local binary_path=""
   local stats_db_path=""
   local staging_binary=""
+  local env_path=""
   local unit_path=""
   local source=""
   local auth_merge_sources=()
   local db_merge_sources=()
+  local use_postgres=0
+  local pgstore_dsn=""
+  local pgstore_schema=""
+  local pgstore_local_path=""
+  local existing_pgstore_dsn=""
+  local existing_pgstore_schema=""
+  local existing_pgstore_local_path=""
+  local postgres_default_answer="N"
 
   require_tools
   repo_root="$(resolve_repo_root)"
@@ -867,6 +1165,7 @@ main() {
   config_path="$install_root/config.yaml"
   binary_path="$install_root/cli-proxy-api"
   stats_db_path="$install_root/stats/cache-statistics.sqlite"
+  env_path="$install_root/.env"
   while IFS= read -r source; do
     [[ -n "$source" ]] || continue
     auth_merge_sources+=("$source")
@@ -900,6 +1199,32 @@ main() {
     ensure_cache_stats_schema "$stats_db_path"
   fi
 
+  existing_pgstore_dsn="$(read_env_scalar "$env_path" "PGSTORE_DSN" || true)"
+  existing_pgstore_schema="$(read_env_scalar "$env_path" "PGSTORE_SCHEMA" || true)"
+  existing_pgstore_local_path="$(read_env_scalar "$env_path" "PGSTORE_LOCAL_PATH" || true)"
+  if [[ -z "$existing_pgstore_schema" ]]; then
+    existing_pgstore_schema="public"
+  fi
+  if [[ -z "$existing_pgstore_local_path" ]]; then
+    existing_pgstore_local_path="$install_root"
+  fi
+  if [[ -n "$existing_pgstore_dsn" ]]; then
+    postgres_default_answer="Y"
+  fi
+
+  if confirm_yes_no "Configure Postgres-backed auth/config/statistics store?" "$postgres_default_answer"; then
+    use_postgres=1
+    require_postgres_tools
+    pgstore_dsn="$(prompt_required_value "Postgres DSN" "$existing_pgstore_dsn")"
+    pgstore_schema="$(prompt_required_value "Postgres schema" "$existing_pgstore_schema")"
+    pgstore_local_path="$(prompt_required_value "Local migration seed path" "$existing_pgstore_local_path")"
+    pgstore_local_path="$(expand_path "$pgstore_local_path")"
+    ensure_postgres_database "$pgstore_dsn"
+    write_pgstore_env "$env_path" "$pgstore_dsn" "$pgstore_schema" "$pgstore_local_path"
+  else
+    clear_pgstore_env "$env_path"
+  fi
+
   if [[ "$build_now" -eq 1 ]]; then
     staging_binary="$(mktemp "$install_root/cli-proxy-api.staging.XXXXXX")"
     build_binary "$repo_root" "$config_path" "$staging_binary"
@@ -918,7 +1243,7 @@ main() {
     fi
   fi
 
-  print_next_steps "$install_root" "$binary_path" "$config_path" "$auth_dir" "$stats_db_path" "$unit_path"
+  print_next_steps "$install_root" "$binary_path" "$config_path" "$auth_dir" "$stats_db_path" "$env_path" "$unit_path"
 }
 
 main "$@"

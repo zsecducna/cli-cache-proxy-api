@@ -6,8 +6,8 @@ cleanup_tmp_root() {
   local root="${1:-}"
 
   [[ -n "$root" ]] || return 0
-  chmod -R u+w "$root" 2>/dev/null || true
-  rm -rf "$root"
+  chmod -R u+rwx "$root" 2>/dev/null || true
+  rm -rf "$root" 2>/dev/null || true
 }
 
 schema_sql() {
@@ -221,7 +221,8 @@ test_smoke_install() {
     "n" \
     "y" \
     "y" \
-    "y"
+    "y" \
+    "n"
 
   run_installer_capture \
     "$repo_root" \
@@ -273,6 +274,200 @@ test_smoke_install() {
   fi
 }
 
+test_postgres_install_writes_env_and_provisions_db() {
+  local repo_root tmp_root home_root install_root source_auth_dir source_config source_stats_dir
+  local source_db target_db answers_path output_path target_config target_auth env_path fake_bin
+  local psql_log psql_state existing_binary row_count gocache_dir gomodcache_dir
+
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tmp_root="$(mktemp -d)"
+  trap "cleanup_tmp_root '$tmp_root'" RETURN
+
+  home_root="$tmp_root/home"
+  install_root="$home_root/.cli-cache-proxy-test"
+  source_auth_dir="$tmp_root/source-auth"
+  source_config="$tmp_root/source-config.yaml"
+  source_stats_dir="$tmp_root/source-stats"
+  source_db="$source_stats_dir/cache-statistics.sqlite"
+  target_db="$install_root/stats/cache-statistics.sqlite"
+  answers_path="$tmp_root/answers.txt"
+  output_path="$tmp_root/install.log"
+  target_config="$install_root/config.yaml"
+  target_auth="$install_root/auth"
+  env_path="$install_root/.env"
+  fake_bin="$tmp_root/fake-bin"
+  psql_log="$tmp_root/psql.log"
+  psql_state="$tmp_root/psql-created"
+  existing_binary="$install_root/cli-proxy-api"
+  gocache_dir="$tmp_root/gocache"
+  gomodcache_dir="$tmp_root/gomodcache"
+
+  mkdir -p "$home_root" "$install_root" "$install_root/stats" "$source_auth_dir" "$source_stats_dir" "$fake_bin" "$gocache_dir" "$gomodcache_dir"
+  printf 'oauth-token\n' > "$source_auth_dir/sample-token.txt"
+  write_source_config "$source_config" "$source_auth_dir"
+  seed_db "$source_db" "source"
+  make_fake_binary "$existing_binary"
+  cat > "$fake_bin/psql" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+log_path="$psql_log"
+state_path="$psql_state"
+dsn="\${1:-}"
+shift || true
+printf '%s|%s\n' "\$dsn" "\$*" >> "\$log_path"
+if [[ "\$*" == *"SELECT 1;"* ]]; then
+  if [[ "\$dsn" == *"/postgres"* ]]; then
+    printf '1\n'
+    exit 0
+  fi
+  if [[ "\$dsn" == *"/cliproxy"* && -f "\$state_path" ]]; then
+    printf '1\n'
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "\$*" == *"SELECT 1 FROM pg_roles WHERE rolname = 'cheaprouter';"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"CREATE ROLE \"cheaprouter\" LOGIN PASSWORD 'cheaprouter';"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"SELECT 1 FROM pg_database WHERE datname = 'cliproxy';"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"CREATE DATABASE \"cliproxy\" OWNER \"cheaprouter\";"* ]]; then
+  : > "\$state_path"
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$fake_bin/psql"
+
+  write_answers \
+    "$answers_path" \
+    "$install_root" \
+    "$target_auth" \
+    "y" \
+    "n" \
+    "y" \
+    "y" \
+    "y" \
+    "y" \
+    "postgresql://cheaprouter:cheaprouter@localhost:5432/cliproxy?sslmode=disable" \
+    "public" \
+    "$install_root"
+
+  run_installer_capture \
+    "$repo_root" \
+    "$answers_path" \
+    "$output_path" \
+    HOME="$home_root" \
+    GOCACHE="$gocache_dir" \
+    GOMODCACHE="$gomodcache_dir" \
+    PATH="$fake_bin:$PATH" \
+    CLI_PROXY_INSTALLER_SKIP_LAUNCHD=1 \
+    CLI_PROXY_INSTALLER_SOURCE_CONFIG="$source_config" \
+    CLI_PROXY_INSTALLER_SOURCE_STATS="$source_stats_dir" \
+    CLI_PROXY_FAKE_CONFIG_HINT="$target_config"
+
+  test -f "$env_path"
+  grep -F 'PGSTORE_DSN="postgresql://cheaprouter:cheaprouter@localhost:5432/cliproxy?sslmode=disable"' "$env_path" >/dev/null
+  grep -F 'PGSTORE_SCHEMA="public"' "$env_path" >/dev/null
+  grep -F "PGSTORE_LOCAL_PATH=\"$install_root\"" "$env_path" >/dev/null
+  grep -F "Creating Postgres role cheaprouter" "$output_path" >/dev/null
+  grep -F "Creating Postgres database cliproxy" "$output_path" >/dev/null
+  grep -F "Validated Postgres DSN after provisioning cliproxy" "$output_path" >/dev/null
+  grep -F "Postgres env: $env_path" "$output_path" >/dev/null
+  grep -F "auth-dir: \"$target_auth\"" "$target_config" >/dev/null
+  test -f "$target_auth/sample-token.txt"
+  test -f "$target_db"
+  row_count="$(sqlite3 -readonly "$target_db" 'SELECT COUNT(*) FROM cache_statistics_requests;')"
+  test "$row_count" = "2"
+  grep -F '/postgres?sslmode=disable' "$psql_log" >/dev/null
+  grep -F "SELECT 1 FROM pg_roles WHERE rolname = 'cheaprouter';" "$psql_log" >/dev/null
+  grep -F 'CREATE ROLE "cheaprouter" LOGIN PASSWORD '\''cheaprouter'\'';' "$psql_log" >/dev/null
+  grep -F 'CREATE DATABASE "cliproxy" OWNER "cheaprouter";' "$psql_log" >/dev/null
+}
+
+test_postgres_install_failure_prints_manual_init_commands() {
+  local repo_root tmp_root home_root install_root source_auth_dir source_config source_stats_dir
+  local source_db answers_path output_path fake_bin psql_log
+
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tmp_root="$(mktemp -d)"
+  trap "cleanup_tmp_root '$tmp_root'" RETURN
+
+  home_root="$tmp_root/home"
+  install_root="$home_root/.cli-cache-proxy-test"
+  source_auth_dir="$tmp_root/source-auth"
+  source_config="$tmp_root/source-config.yaml"
+  source_stats_dir="$tmp_root/source-stats"
+  source_db="$source_stats_dir/cache-statistics.sqlite"
+  answers_path="$tmp_root/answers.txt"
+  output_path="$tmp_root/install.log"
+  fake_bin="$tmp_root/fake-bin"
+  psql_log="$tmp_root/psql.log"
+
+  mkdir -p "$home_root" "$install_root/stats" "$source_auth_dir" "$source_stats_dir" "$fake_bin"
+  printf 'oauth-token\n' > "$source_auth_dir/sample-token.txt"
+  write_source_config "$source_config" "$source_auth_dir"
+  seed_db "$source_db" "source"
+  cat > "$fake_bin/psql" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+dsn="\${1:-}"
+shift || true
+printf '%s|%s\n' "\$dsn" "\$*" >> "$psql_log"
+if [[ "\$*" == *"SELECT 1;"* ]]; then
+  if [[ "\$dsn" == *"/postgres"* ]]; then
+    printf '1\n'
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "\$*" == *"SELECT 1 FROM pg_roles WHERE rolname = 'cheaprouter';"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"CREATE ROLE \"cheaprouter\" LOGIN PASSWORD 'cheaprouter';"* ]]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$fake_bin/psql"
+
+  write_answers \
+    "$answers_path" \
+    "$install_root" \
+    "$install_root/auth" \
+    "n" \
+    "n" \
+    "y" \
+    "y" \
+    "y" \
+    "y" \
+    "postgresql://cheaprouter:cheaprouter@localhost:5432/cliproxy?sslmode=disable" \
+    "public" \
+    "$install_root"
+
+  if run_installer_capture \
+    "$repo_root" \
+    "$answers_path" \
+    "$output_path" \
+    HOME="$home_root" \
+    PATH="$fake_bin:$PATH" \
+    CLI_PROXY_INSTALLER_SKIP_LAUNCHD=1 \
+    CLI_PROXY_INSTALLER_SOURCE_CONFIG="$source_config" \
+    CLI_PROXY_INSTALLER_SOURCE_STATS="$source_stats_dir"; then
+    printf 'installer unexpectedly succeeded when Postgres role creation failed\n' >&2
+    return 1
+  fi
+
+  grep -F "Could not provision Postgres automatically with the provided DSN." "$output_path" >/dev/null
+  grep -F "Run these bash commands, then rerun ./install_mac.sh:" "$output_path" >/dev/null
+  grep -F "CREATE ROLE \"cheaprouter\" LOGIN PASSWORD 'cheaprouter';" "$output_path" >/dev/null
+  grep -F "CREATE DATABASE \"cliproxy\" OWNER \"cheaprouter\"" "$output_path" >/dev/null
+}
+
 test_existing_target_config_requires_replace_confirmation() {
   local repo_root tmp_root home_root install_root source_auth_dir source_config empty_stats_dir
   local answers_path output_path target_config existing_binary
@@ -309,6 +504,7 @@ EOF
     "n" \
     "y" \
     "2" \
+    "n" \
     "n" \
     "n"
 
@@ -363,7 +559,8 @@ test_auth_merge_preserves_existing_target_files() {
     "y" \
     "n" \
     "y" \
-    "y"
+    "y" \
+    "n"
 
   run_installer_capture \
     "$repo_root" \
@@ -408,7 +605,8 @@ test_db_merge_restores_backup_on_prompt_cache_failure() {
     "$install_root/auth" \
     "y" \
     "n" \
-    "y"
+    "y" \
+    "n"
 
   if run_installer_capture \
     "$repo_root" \
@@ -455,6 +653,7 @@ test_plist_escapes_xml_significant_paths() {
     "$install_root/auth" \
     "y" \
     "y" \
+    "n" \
     "n"
 
   run_installer_capture \
@@ -514,6 +713,7 @@ test_detection_uses_spec_default_fallbacks() {
     "$install_root" \
     "$install_root/auth" \
     "y" \
+    "n" \
     "n"
 
   run_installer_capture \
@@ -576,7 +776,8 @@ EOF
     "$install_root/auth" \
     "y" \
     "y" \
-    "y"
+    "y" \
+    "n"
 
   run_installer_capture \
     "$repo_root" \
@@ -648,6 +849,7 @@ EOF
     "$install_root/auth" \
     "y" \
     "y" \
+    "n" \
     "n"
 
   run_installer_capture \
@@ -674,6 +876,8 @@ EOF
 
 main() {
   test_smoke_install
+  test_postgres_install_writes_env_and_provisions_db
+  test_postgres_install_failure_prints_manual_init_commands
   test_existing_target_config_requires_replace_confirmation
   test_auth_merge_preserves_existing_target_files
   test_db_merge_restores_backup_on_prompt_cache_failure
@@ -684,4 +888,6 @@ main() {
   printf 'Installer smoke test passed.\n'
 }
 
-main "$@"
+if [[ "${CLI_PROXY_INSTALLER_RUN_MAIN:-1}" == "1" ]]; then
+  main "$@"
+fi

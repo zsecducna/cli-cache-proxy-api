@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -101,14 +102,14 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp      time.Time                           `json:"timestamp"`
-	LatencyMs      int64                               `json:"latency_ms"`
-	Source         string                              `json:"source"`
-	AuthIndex      string                              `json:"auth_index"`
-	Tokens         TokenStats                          `json:"tokens"`
-	Cache          *helps.CodexCacheObservability      `json:"cache,omitempty"`
-	AnthropicCache *helps.AnthropicCacheObservability  `json:"anthropic_cache,omitempty"`
-	Failed         bool                                `json:"failed"`
+	Timestamp      time.Time                          `json:"timestamp"`
+	LatencyMs      int64                              `json:"latency_ms"`
+	Source         string                             `json:"source"`
+	AuthIndex      string                             `json:"auth_index"`
+	Tokens         TokenStats                         `json:"tokens"`
+	Cache          *helps.CodexCacheObservability     `json:"cache,omitempty"`
+	AnthropicCache *helps.AnthropicCacheObservability `json:"anthropic_cache,omitempty"`
+	Failed         bool                               `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -133,6 +134,46 @@ type StatisticsSnapshot struct {
 	RequestsByHour map[string]int64 `json:"requests_by_hour"`
 	TokensByDay    map[string]int64 `json:"tokens_by_day"`
 	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
+}
+
+func (s StatisticsSnapshot) Redacted() StatisticsSnapshot {
+	result := StatisticsSnapshot{
+		TotalRequests:  s.TotalRequests,
+		SuccessCount:   s.SuccessCount,
+		FailureCount:   s.FailureCount,
+		TotalTokens:    s.TotalTokens,
+		APIs:           make(map[string]APISnapshot, len(s.APIs)),
+		RequestsByDay:  cloneStringInt64Map(s.RequestsByDay),
+		RequestsByHour: cloneStringInt64Map(s.RequestsByHour),
+		TokensByDay:    cloneStringInt64Map(s.TokensByDay),
+		TokensByHour:   cloneStringInt64Map(s.TokensByHour),
+	}
+	for apiKey, apiSnapshot := range s.APIs {
+		maskedKey := redactStatisticsAPIKey(apiKey)
+		redactedSnapshot := APISnapshot{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]ModelSnapshot, len(apiSnapshot.Models)),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			redactedModel := ModelSnapshot{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+				Details:       make([]RequestDetail, 0, len(modelSnapshot.Details)),
+			}
+			for _, detail := range modelSnapshot.Details {
+				redactedModel.Details = append(redactedModel.Details, redactRequestDetail(detail))
+			}
+			redactedSnapshot.Models[modelName] = redactedModel
+		}
+		existing, ok := result.APIs[maskedKey]
+		if !ok {
+			result.APIs[maskedKey] = redactedSnapshot
+			continue
+		}
+		result.APIs[maskedKey] = mergeRedactedAPISnapshot(existing, redactedSnapshot)
+	}
+	return result
 }
 
 // APISnapshot summarises metrics for a single API key.
@@ -406,10 +447,10 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 		timestamp = time.Now()
 	}
 	detail := RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
+		Timestamp:      timestamp,
+		LatencyMs:      normaliseLatency(record.Latency),
+		Source:         record.Source,
+		AuthIndex:      record.AuthIndex,
 		Tokens:         normaliseDetail(record.Detail),
 		Cache:          resolveCodexCacheMetadata(ctx),
 		AnthropicCache: resolveAnthropicCacheMetadata(ctx),
@@ -441,6 +482,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Model:           modelName,
 		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
 		Source:          detail.Source,
+		APIKey:          strings.TrimSpace(record.APIKey),
 		AuthID:          record.AuthID,
 		AuthIndex:       detail.AuthIndex,
 		LatencyMs:       detail.LatencyMs,
@@ -449,6 +491,55 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Cache:           detail.Cache,
 		AnthropicCache:  valueOrZeroAnthropic(detail.AnthropicCache),
 	}
+}
+
+func redactStatisticsAPIKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return "redacted"
+	}
+	return util.HideAPIKey(apiKey)
+}
+
+func redactRequestDetail(detail RequestDetail) RequestDetail {
+	detail.Source = ""
+	detail.AuthIndex = ""
+	detail.Cache = nil
+	return detail
+}
+
+func mergeRedactedAPISnapshot(left, right APISnapshot) APISnapshot {
+	merged := APISnapshot{
+		TotalRequests: left.TotalRequests + right.TotalRequests,
+		TotalTokens:   left.TotalTokens + right.TotalTokens,
+		Models:        make(map[string]ModelSnapshot, len(left.Models)+len(right.Models)),
+	}
+	for modelName, snapshot := range left.Models {
+		merged.Models[modelName] = snapshot
+	}
+	for modelName, snapshot := range right.Models {
+		existing, ok := merged.Models[modelName]
+		if !ok {
+			merged.Models[modelName] = snapshot
+			continue
+		}
+		existing.TotalRequests += snapshot.TotalRequests
+		existing.TotalTokens += snapshot.TotalTokens
+		existing.Details = append(existing.Details, snapshot.Details...)
+		merged.Models[modelName] = existing
+	}
+	return merged
+}
+
+func cloneStringInt64Map(source map[string]int64) map[string]int64 {
+	if len(source) == 0 {
+		return map[string]int64{}
+	}
+	cloned := make(map[string]int64, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
