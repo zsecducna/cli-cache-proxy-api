@@ -503,6 +503,13 @@
     }, Math.max(0, delayMs));
   }
 
+  function scheduleUsagePatchAfterNativeRefresh(delayMs) {
+    window.setTimeout(() => {
+      if (!isUsagePageReady() || document.hidden) return;
+      refreshUsagePage(false).catch(() => {});
+    }, Math.max(0, delayMs));
+  }
+
   function triggerNativeUsageRefresh(background) {
     if (!isUsagePageReady()) return false;
     const timeRange = getUsageTimeRange();
@@ -518,6 +525,7 @@
     if (triggered) {
       lastNativeUsageRefreshAt = Date.now();
       lastNativeUsageRefreshKey = key;
+      scheduleUsagePatchAfterNativeRefresh(background ? 500 : 250);
     } else if (background) {
       scheduleNativeUsageRefreshRetry(750);
     }
@@ -886,14 +894,14 @@
       'Total Requests',
       escapeHTML(formatCompact(totalRequests)),
       `${timeRange ? timeRange.label : 'Selected window'} persisted requests`,
-      ['usage-total-requests', timeRange && timeRange.key || '', totalRequests],
+      ['usage-total-requests', timeRange && timeRange.key || '', getUsageProviderFilter(), totalRequests],
     );
     setUsageCardValue(
       totalTokensCard,
       'Total Tokens',
       escapeHTML(formatCompact(totalTokens)),
       `${formatInteger(totalTokens)} tokens across ${formatInteger(totalRequests)} requests`,
-      ['usage-total-tokens', timeRange && timeRange.key || '', totalTokens, totalRequests],
+      ['usage-total-tokens', timeRange && timeRange.key || '', getUsageProviderFilter(), totalTokens, totalRequests],
     );
     setUsageCardValue(
       rpmCard,
@@ -902,7 +910,7 @@
       minutes > 0
         ? `${timeRange.label} average requests per minute`
         : `${timeRange ? timeRange.label : 'Selected window'} average unavailable`,
-      ['usage-rpm', timeRange && timeRange.key || '', totalRequests, Math.round(minutes), Math.round(avgLatencyMs)],
+      ['usage-rpm', timeRange && timeRange.key || '', getUsageProviderFilter(), totalRequests, Math.round(minutes), Math.round(avgLatencyMs)],
     );
     setUsageCardValue(
       tpmCard,
@@ -911,7 +919,7 @@
       minutes > 0
         ? `${timeRange.label} average tokens per minute`
         : `${timeRange ? timeRange.label : 'Selected window'} average unavailable`,
-      ['usage-tpm', timeRange && timeRange.key || '', totalTokens, Math.round(minutes)],
+      ['usage-tpm', timeRange && timeRange.key || '', getUsageProviderFilter(), totalTokens, Math.round(minutes)],
     );
     setUsageCardValue(
       totalCostCard,
@@ -920,11 +928,11 @@
       hasModelPrices
         ? `${timeRange ? timeRange.label : 'Selected window'} estimated cost from stored model pricing`
         : 'Set model pricing to estimate cost',
-      ['usage-total-cost', timeRange && timeRange.key || '', Math.round(totalCost * 100), Object.keys(modelPrices).length],
+      ['usage-total-cost', timeRange && timeRange.key || '', getUsageProviderFilter(), Math.round(totalCost * 100), Object.keys(modelPrices).length],
     );
   }
 
-  function patchCachedTokensCard(container, summary) {
+  function patchCachedTokensCard(container, summary, timeRange) {
     const metricsBlock = findUsageMetricsBlock(container);
     if (!metricsBlock) return;
     const totalCard = findUsageMetricCard(metricsBlock, 'Total Tokens');
@@ -942,7 +950,7 @@
     const inputTokens = Number(summary && summary.input_tokens || 0);
     const effectiveInputTokens = Number(summary && summary.effective_input_tokens || inputTokens || 0);
     const percentage = effectiveInputTokens > 0 ? ((cachedTokens / effectiveInputTokens) * 100).toFixed(2) : '0.00';
-    const signature = ['cached-card', cachedTokens, effectiveInputTokens, percentage].join(':');
+    const signature = ['cached-card', timeRange && timeRange.key || '', getUsageProviderFilter(), cachedTokens, effectiveInputTokens, percentage].join(':');
     setEnhancerMarkup(cachedCard, signature, `
       <div class="cliproxy-enhancer__label">Cached Tokens</div>
       <div class="cliproxy-enhancer__value">${escapeHTML(formatCompact(cachedTokens))}<span>${escapeHTML(percentage)}%</span></div>
@@ -1044,7 +1052,7 @@
   function renderUsageStatistics(container, stats, timeRange) {
     updateServiceHealthRow(ensureServiceHealthRow(container), stats.summary || {}, timeRange.label);
     patchUsageSummaryCards(container, stats || {}, timeRange);
-    patchCachedTokensCard(container, stats.summary || {});
+    patchCachedTokensCard(container, stats.summary || {}, timeRange);
     renderRequestEvents(container, stats, timeRange);
   }
 

@@ -327,6 +327,12 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "triggerNativeUsageRefresh") || !strings.Contains(body, "scheduleNativeUsageRefreshRetry") || !strings.Contains(body, "provider.addEventListener('change'") {
 		t.Fatalf("management enhancer should also trigger the native usage refresh path so React-owned cards and charts follow provider filter and auto-refresh updates: %s", body)
 	}
+	if !strings.Contains(body, "scheduleUsagePatchAfterNativeRefresh") || !strings.Contains(body, "window.setTimeout(() => {") || !strings.Contains(body, "refreshUsagePage(false).catch(() => {})") {
+		t.Fatalf("management enhancer should re-apply filtered summary-card patches after the native usage refresh completes: %s", body)
+	}
+	if !strings.Contains(body, "['usage-total-requests', timeRange && timeRange.key || '', getUsageProviderFilter(), totalRequests]") || !strings.Contains(body, "['cached-card', timeRange && timeRange.key || '', getUsageProviderFilter(), cachedTokens") {
+		t.Fatalf("management enhancer should encode time-range/provider context into summary-card signatures so filter changes always invalidate stale card markup: %s", body)
+	}
 	if !strings.Contains(body, "applyUsageChartPeriodDefaults") || !strings.Contains(body, "normalize(button.textContent) === 'By Hour'") || !strings.Contains(body, "normalize(button.textContent) === 'By Day'") || !strings.Contains(body, "usageChartDefaultsApplied = true") {
 		t.Fatalf("management enhancer should force chart period controls to default to By Hour once per usage page activation: %s", body)
 	}
