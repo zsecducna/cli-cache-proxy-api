@@ -3,6 +3,7 @@ package customerstate
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -99,5 +100,51 @@ func TestServiceIssueResolveRevokeAndLedger(t *testing.T) {
 	}
 	if _, err := svc.ResolveAPIKey(plainAPIKey); !errors.Is(err, ErrCustomerKeyMissing) {
 		t.Fatalf("ResolveAPIKey() after revoke error = %v, want ErrCustomerKeyMissing", err)
+	}
+}
+
+func TestTopUpCreditsIsAtomicAcrossConcurrentCalls(t *testing.T) {
+	svc := newTestService(t)
+	initialCredits := int64(10)
+	if _, err := svc.UpsertCustomer(UpsertCustomerInput{ID: "cust-atomic", InitialCredits: &initialCredits}); err != nil {
+		t.Fatalf("UpsertCustomer() error = %v", err)
+	}
+
+	const topUpCount = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, topUpCount)
+	for i := 0; i < topUpCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := svc.TopUpCredits("cust-atomic", 5, "manual top up", "admin"); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("TopUpCredits() concurrent error = %v", err)
+		}
+	}
+
+	customer, err := svc.GetCustomer("cust-atomic")
+	if err != nil {
+		t.Fatalf("GetCustomer() error = %v", err)
+	}
+	wantBalance := initialCredits + int64(topUpCount*5)
+	if customer.CreditsBalance != wantBalance {
+		t.Fatalf("credits balance = %d, want %d", customer.CreditsBalance, wantBalance)
+	}
+
+	ledger, err := svc.ListLedger("cust-atomic", 100)
+	if err != nil {
+		t.Fatalf("ListLedger() error = %v", err)
+	}
+	if len(ledger) != topUpCount {
+		t.Fatalf("ledger length = %d, want %d", len(ledger), topUpCount)
 	}
 }

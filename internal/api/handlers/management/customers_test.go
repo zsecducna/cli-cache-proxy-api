@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 
 	gin "github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func setupCustomerHandlerTest(t *testing.T) *gin.Engine {
@@ -27,6 +30,7 @@ func setupCustomerHandlerTest(t *testing.T) *gin.Engine {
 	router.PUT("/v1/internal/customers/:id", h.PutCustomer)
 	router.GET("/v1/internal/customers/:id", h.GetCustomer)
 	router.GET("/v1/internal/customers/:id/ledger", h.GetCustomerLedger)
+	router.GET("/v1/internal/customers/:id/usage", h.GetCustomerUsage)
 	router.POST("/v1/internal/customers/:id/api-keys", h.PostCustomerAPIKey)
 	router.DELETE("/v1/internal/customers/:id/api-keys/:key_id", h.DeleteCustomerAPIKey)
 	router.POST("/v1/internal/customers/resolve", h.ResolveCustomerAPIKey)
@@ -140,5 +144,69 @@ func TestCustomerHandlersEndToEnd(t *testing.T) {
 	})
 	if resolveAfterDelete.Code != http.StatusNotFound {
 		t.Fatalf("resolve after delete status = %d, want %d body=%s", resolveAfterDelete.Code, http.StatusNotFound, resolveAfterDelete.Body.String())
+	}
+}
+
+func TestGetCustomerUsageReturnsOnlyRequestedCustomer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc, err := customerstate.NewService(filepath.Join(t.TempDir(), "customers.json"))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	customerstate.SetDefaultService(svc)
+	t.Cleanup(func() { customerstate.SetDefaultService(nil) })
+
+	customerOneCredits := int64(50)
+	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "customer-1", InitialCredits: &customerOneCredits}); err != nil {
+		t.Fatalf("UpsertCustomer(customer-1) error = %v", err)
+	}
+	customerTwoCredits := int64(25)
+	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "customer-2", InitialCredits: &customerTwoCredits}); err != nil {
+		t.Fatalf("UpsertCustomer(customer-2) error = %v", err)
+	}
+
+	stats := usage.NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:   "openai",
+		Model:      "gpt-4.1",
+		APIKey:     "shared-system-key",
+		CustomerID: "customer-1",
+		Detail: coreusage.Detail{
+			TotalTokens: 17,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:   "openai",
+		Model:      "gpt-4.1",
+		APIKey:     "shared-system-key",
+		CustomerID: "customer-2",
+		Detail: coreusage.Detail{
+			TotalTokens: 23,
+		},
+	})
+
+	h := &Handler{}
+	h.SetUsageStatistics(stats)
+	router := gin.New()
+	router.GET("/v1/internal/customers/:id/usage", h.GetCustomerUsage)
+
+	resp := performJSONRequest(t, router, http.MethodGet, "/v1/internal/customers/customer-1/usage", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("usage status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	body := decodeJSONBody(t, resp)
+	usageBody := body["usage"].(map[string]any)
+	if usageBody["total_requests"].(float64) != 1 {
+		t.Fatalf("usage total_requests = %v, want 1", usageBody["total_requests"])
+	}
+	apis := usageBody["apis"].(map[string]any)
+	if len(apis) != 1 {
+		t.Fatalf("usage apis len = %d, want 1", len(apis))
+	}
+	if _, ok := apis["customer-1"]; !ok {
+		t.Fatalf("usage apis missing customer-1: %+v", apis)
+	}
+	if _, ok := apis["customer-2"]; ok {
+		t.Fatalf("usage apis unexpectedly contains customer-2: %+v", apis)
 	}
 }

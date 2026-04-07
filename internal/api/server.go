@@ -371,6 +371,7 @@ func (s *Server) setupRoutes() {
 		internalCustomers.GET("/:id", s.mgmt.GetCustomer)
 		internalCustomers.PUT("/:id", s.mgmt.PutCustomer)
 		internalCustomers.GET("/:id/ledger", s.mgmt.GetCustomerLedger)
+		internalCustomers.GET("/:id/usage", s.mgmt.GetCustomerUsage)
 		internalCustomers.POST("/:id/api-keys", s.mgmt.PostCustomerAPIKey)
 		internalCustomers.DELETE("/:id/api-keys/:key_id", s.mgmt.DeleteCustomerAPIKey)
 	}

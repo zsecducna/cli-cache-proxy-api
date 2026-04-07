@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 func (h *Handler) GetCustomers(c *gin.Context) {
@@ -110,6 +111,23 @@ func (h *Handler) GetCustomerLedger(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ledger": entries})
+}
+
+func (h *Handler) GetCustomerUsage(c *gin.Context) {
+	svc, ok := customerStateService(c)
+	if !ok {
+		return
+	}
+	customer, err := svc.GetCustomer(c.Param("id"))
+	if !handleCustomerStateError(c, err) {
+		return
+	}
+	snapshot := usage.FilterStatisticsSnapshotByCustomer(h.currentUsageSnapshot(c), customer.ID)
+	c.JSON(http.StatusOK, gin.H{
+		"customer":        customer,
+		"usage":           snapshot,
+		"failed_requests": snapshot.FailureCount,
+	})
 }
 
 func (h *Handler) PostCustomerCreditsTopUp(c *gin.Context) {

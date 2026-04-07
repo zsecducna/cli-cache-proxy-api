@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func setServerCustomerService(t *testing.T) *customerstate.Service {
@@ -82,6 +85,65 @@ func TestServerInternalCustomerResolveRouteWorks(t *testing.T) {
 	customer := payload["customer"].(map[string]any)
 	if customer["id"] != "cust-one" {
 		t.Fatalf("customer id = %v, want cust-one", customer["id"])
+	}
+}
+
+func TestServerInternalCustomerUsageRouteWorks(t *testing.T) {
+	server := newTestServer(t)
+	svc := setServerCustomerService(t)
+	customerOneCredits := int64(25)
+	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "cust-one", InitialCredits: &customerOneCredits}); err != nil {
+		t.Fatalf("UpsertCustomer(cust-one) error = %v", err)
+	}
+	customerTwoCredits := int64(25)
+	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "cust-two", InitialCredits: &customerTwoCredits}); err != nil {
+		t.Fatalf("UpsertCustomer(cust-two) error = %v", err)
+	}
+
+	stats := usage.NewRequestStatistics()
+	server.mgmt.SetUsageStatistics(stats)
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:   "openai",
+		Model:      "gpt-4.1",
+		APIKey:     "shared-system-key",
+		CustomerID: "cust-one",
+		Detail: coreusage.Detail{
+			TotalTokens: 17,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:   "openai",
+		Model:      "gpt-4.1",
+		APIKey:     "shared-system-key",
+		CustomerID: "cust-two",
+		Detail: coreusage.Detail{
+			TotalTokens: 23,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/internal/customers/cust-one/usage", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	usageBody := payload["usage"].(map[string]any)
+	if usageBody["total_requests"].(float64) != 1 {
+		t.Fatalf("usage total_requests = %v, want 1", usageBody["total_requests"])
+	}
+	apis := usageBody["apis"].(map[string]any)
+	if _, ok := apis["cust-one"]; !ok {
+		t.Fatalf("usage apis missing cust-one: %+v", apis)
+	}
+	if _, ok := apis["cust-two"]; ok {
+		t.Fatalf("usage apis unexpectedly contains cust-two: %+v", apis)
 	}
 }
 

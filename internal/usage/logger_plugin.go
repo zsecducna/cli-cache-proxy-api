@@ -556,6 +556,32 @@ func FilterStatisticsSnapshotByProvider(snapshot StatisticsSnapshot, provider st
 	return filtered.Snapshot()
 }
 
+// FilterStatisticsSnapshotByCustomer keeps only request details that belong to the
+// requested customer and recomputes aggregates from the retained details.
+func FilterStatisticsSnapshotByCustomer(snapshot StatisticsSnapshot, customerID string) StatisticsSnapshot {
+	customerID = strings.TrimSpace(customerID)
+	if customerID == "" {
+		return StatisticsSnapshot{}
+	}
+	filtered := NewRequestStatistics()
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				if strings.TrimSpace(detail.CustomerID) != customerID {
+					continue
+				}
+				stats, ok := filtered.apis[apiName]
+				if !ok {
+					stats = &apiStats{Models: make(map[string]*modelStats)}
+					filtered.apis[apiName] = stats
+				}
+				filtered.recordImported(apiName, modelName, stats, detail)
+			}
+		}
+	}
+	return filtered.Snapshot()
+}
+
 // MergeStatisticsSnapshots combines multiple snapshots into one deduplicated view.
 func MergeStatisticsSnapshots(snapshots ...StatisticsSnapshot) StatisticsSnapshot {
 	merged := NewRequestStatistics()
