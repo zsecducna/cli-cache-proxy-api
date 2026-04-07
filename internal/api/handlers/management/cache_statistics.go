@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -38,7 +39,7 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"cache_statistics": snapshot.Redacted()})
+	c.JSON(http.StatusOK, gin.H{"cache_statistics": enrichCacheStatisticsCustomerEmails(snapshot).Redacted()})
 }
 
 func readPositiveIntQuery(c *gin.Context, key string, fallback int) int {
@@ -54,4 +55,28 @@ func readPositiveIntQuery(c *gin.Context, key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func enrichCacheStatisticsCustomerEmails(snapshot usage.CacheStatisticsSnapshot) usage.CacheStatisticsSnapshot {
+	svc, err := customerstate.DefaultService()
+	if err != nil || svc == nil {
+		return snapshot
+	}
+	emailsByCustomerID := make(map[string]string, len(snapshot.RecentRequests))
+	for i := range snapshot.RecentRequests {
+		customerID := strings.TrimSpace(snapshot.RecentRequests[i].CustomerID)
+		if customerID == "" {
+			continue
+		}
+		email, ok := emailsByCustomerID[customerID]
+		if !ok {
+			customer, err := svc.GetCustomer(customerID)
+			if err == nil {
+				email = strings.TrimSpace(customer.Email)
+			}
+			emailsByCustomerID[customerID] = email
+		}
+		snapshot.RecentRequests[i].CustomerEmail = email
+	}
+	return snapshot
 }

@@ -86,6 +86,7 @@ type CacheStatisticsRequest struct {
 	Source                            string    `json:"source"`
 	APIKey                            string    `json:"api_key,omitempty"`
 	CustomerID                        string    `json:"customer_id,omitempty"`
+	CustomerEmail                     string    `json:"customer_email,omitempty"`
 	AuthID                            string    `json:"auth_id"`
 	AuthIndex                         string    `json:"auth_index"`
 	LatencyMs                         int64     `json:"latency_ms"`

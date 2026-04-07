@@ -107,6 +107,17 @@
         border-radius: 12px;
         background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 86%, transparent);
       }
+      [class*="UsagePage-module__statsGrid"] {
+        grid-auto-rows: 1fr;
+      }
+      [class*="UsagePage-module__statsGrid"] > [class*="UsagePage-module__statCard"],
+      [class*="UsagePage-module__statsGrid"] > [data-cliproxy-signature] {
+        height: 100%;
+        min-height: 132px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
       .cliproxy-enhancer__label {
         font-size: 12px;
         font-weight: 600;
@@ -143,7 +154,7 @@
       }
       .cliproxy-enhancer__table {
         width: 100%;
-        min-width: 920px;
+        min-width: 1040px;
         border-collapse: collapse;
       }
       .cliproxy-enhancer__table th,
@@ -777,6 +788,17 @@
     return Array.from(container.children).find((child) => !isEnhancerNode(child) && normalize(child.textContent).includes(needle));
   }
 
+  function isUsageMetricsBlock(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    const children = Array.from(node.children || []);
+    if (children.length < 4) return false;
+    const text = normalize(node.textContent);
+    if (!text.includes('Total Requests') || !text.includes('RPM') || !text.includes('TPM') || !text.includes('Total Cost')) {
+      return false;
+    }
+    return text.includes('Cached Tokens') || text.includes('Avg Latency') || text.includes('Total Tokens');
+  }
+
   function ensureUsageControls(container) {
     const header = container.querySelector('h1') && container.querySelector('h1').parentElement;
     if (!header || !header.parentElement) return null;
@@ -910,16 +932,22 @@
   }
 
   function findUsageMetricsBlock(container) {
-    return Array.from(container.children).find((child) => {
-      const text = normalize(child.textContent);
-      return text.includes('Total Requests') && text.includes('Total Tokens') && text.includes('RPM');
-    }) || null;
+    if (!container) return null;
+    const preferred = Array.from(container.querySelectorAll('div')).find((node) => {
+      const className = typeof node.className === 'string' ? node.className : '';
+      return className.includes('statsGrid') && isUsageMetricsBlock(node);
+    });
+    if (preferred) return preferred;
+    return Array.from(container.querySelectorAll('div')).find((node) => isUsageMetricsBlock(node)) || null;
   }
 
   function findUsageMetricCard(metricsBlock, label) {
     if (!metricsBlock) return null;
     const needle = normalize(label);
-    return Array.from(metricsBlock.children).find((child) => normalize(child.textContent).includes(needle)) || null;
+    const cards = Array.from(metricsBlock.children || []);
+    return cards.find((child) => Array.from(child.querySelectorAll('.cliproxy-enhancer__label, div, span')).some((node) => normalize(node.textContent) === needle))
+      || cards.find((child) => normalize(child.textContent).includes(needle))
+      || null;
   }
 
   function setUsageCardValue(card, label, value, hint, signatureParts) {
@@ -1084,6 +1112,7 @@
             <tr>
               <th>Timestamp</th>
               <th>Time</th>
+              <th>User</th>
               <th>Model Name</th>
               <th>Reasoning Effort</th>
               <th>Cache Policy</th>
@@ -1116,10 +1145,12 @@
               const inputLabel = isAnthropicRow && effectiveInput !== rawInput
                 ? `${formatInteger(effectiveInput)} (uncached ${formatInteger(rawInput)})`
                 : formatInteger(effectiveInput);
+              const userLabel = normalize(item.customer_email || item.customer_id) || 'Admin';
               return `
               <tr>
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
                 <td>${escapeHTML(formatDurationMs(item.latency_ms))}</td>
+                <td>${escapeHTML(userLabel)}</td>
                 <td>${escapeHTML(item.model || '')}</td>
                 <td>${escapeHTML(item.reasoning_effort || 'n/a')}</td>
                 <td>${escapeHTML(policy)}</td>
@@ -1131,7 +1162,7 @@
               </tr>
             `; }).join('') : `
               <tr>
-                <td colspan="10" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+                <td colspan="11" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
               </tr>
             `}
           </tbody>
@@ -1496,3 +1527,4 @@
   syncRouteSoon();
 })();
 </script>
+<!-- /cliproxy-cache-stats-overlay -->

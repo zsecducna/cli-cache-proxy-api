@@ -18,6 +18,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -324,8 +325,14 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "patchUsageSummaryCards") || !strings.Contains(body, "setUsageCardValue") || !strings.Contains(body, "summary.total_requests") || !strings.Contains(body, "summary.total_tokens") || !strings.Contains(body, "const tpmCard = findUsageMetricCard(metricsBlock, 'TPM');") || !strings.Contains(body, "const totalCostCard = findUsageMetricCard(metricsBlock, 'Total Cost');") || !strings.Contains(body, "calculateTotalCostFromModelSummaries") || !strings.Contains(body, "MODEL_PRICES_STORAGE_KEY") {
 		t.Fatalf("management enhancer should refresh all visible summary cards from persisted cache statistics and stored pricing, not only the request-events table: %s", body)
 	}
+	if !strings.Contains(body, "function isUsageMetricsBlock(node)") || !strings.Contains(body, "text.includes('Cached Tokens')") || !strings.Contains(body, "text.includes('Avg Latency')") || !strings.Contains(body, "className.includes('statsGrid') && isUsageMetricsBlock(node)") {
+		t.Fatalf("management enhancer should keep finding the usage stats grid after the first card rewrite so provider/time-range refreshes continue updating the visible cards: %s", body)
+	}
 	if !strings.Contains(body, "patchAverageLatencyCard") || !strings.Contains(body, "Avg Latency") || !strings.Contains(body, "summary.avg_latency_ms") {
 		t.Fatalf("management enhancer should render an average latency card from the usage summary: %s", body)
+	}
+	if !strings.Contains(body, "[class*=\"UsagePage-module__statsGrid\"]") || !strings.Contains(body, "min-height: 132px;") || !strings.Contains(body, "justify-content: space-between;") {
+		t.Fatalf("management enhancer should keep the six summary cards visually aligned after it rewrites their contents: %s", body)
 	}
 	if !strings.Contains(body, "triggerNativeUsageRefresh") || !strings.Contains(body, "scheduleNativeUsageRefreshRetry") || !strings.Contains(body, "provider.addEventListener('change'") {
 		t.Fatalf("management enhancer should also trigger the native usage refresh path so React-owned cards and charts follow provider filter and auto-refresh updates: %s", body)
@@ -345,8 +352,35 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "<th>Time</th>") || !strings.Contains(body, "formatDurationMs(item.latency_ms)") {
 		t.Fatalf("management enhancer should render request completion time in the Request Events table: %s", body)
 	}
+	if !strings.Contains(body, "<th>User</th>") || !strings.Contains(body, "normalize(item.customer_email || item.customer_id) || 'Admin'") {
+		t.Fatalf("management enhancer should render the trusted X-CheapRouter-User-ID value in the Request Events table and default empty values to Admin: %s", body)
+	}
 	if !strings.Contains(body, "applyUsageChartPeriodDefaults") || !strings.Contains(body, "normalize(button.textContent) === 'By Hour'") || !strings.Contains(body, "normalize(button.textContent) === 'By Day'") || !strings.Contains(body, "usageChartDefaultsApplied = true") {
 		t.Fatalf("management enhancer should force chart period controls to default to By Hour once per usage page activation: %s", body)
+	}
+}
+
+func TestEnhanceManagementControlPanelHTMLReplacesExistingInjectedOverlay(t *testing.T) {
+	page := []byte(`<html><body><main>panel</main><!-- cliproxy-cache-stats-overlay --><script>window.__cliproxyManagementEnhancer=true;const staleOverlay=true;</script></body></html>`)
+
+	body := string(enhanceManagementControlPanelHTML(page))
+
+	startComment := "<!-- " + managementCacheStatisticsMarker + " -->"
+	endComment := "<!-- " + managementCacheStatisticsEndMarker + " -->"
+	if strings.Count(body, startComment) != 1 {
+		t.Fatalf("overlay start marker count = %d, want 1; body=%s", strings.Count(body, startComment), body)
+	}
+	if strings.Count(body, endComment) != 1 {
+		t.Fatalf("overlay end marker count = %d, want 1; body=%s", strings.Count(body, endComment), body)
+	}
+	if strings.Contains(body, "<!-- <!--") {
+		t.Fatalf("management enhancer replacement should not leave nested comment prefixes behind: %s", body)
+	}
+	if strings.Contains(body, "staleOverlay=true") {
+		t.Fatalf("management enhancer should replace stale injected overlays instead of preserving them: %s", body)
+	}
+	if !strings.Contains(body, "function isUsageMetricsBlock(node)") || !strings.Contains(body, "<th>User</th>") || !strings.Contains(body, managementCacheStatisticsEndMarker) {
+		t.Fatalf("management enhancer replacement should inject the current overlay content: %s", body)
 	}
 }
 
@@ -668,6 +702,76 @@ func TestManagementCacheStatisticsEndpointIncludesAnthropicEffectiveInputTokens(
 	}
 	if payload.CacheStatistics.RecentRequests[0].EffectiveInputTokens != 165689 {
 		t.Fatalf("recent effective_input_tokens = %d, want 165689", payload.CacheStatistics.RecentRequests[0].EffectiveInputTokens)
+	}
+}
+
+func TestManagementCacheStatisticsEndpointIncludesCustomerEmail(t *testing.T) {
+	server := newManagementTestServer(t)
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	svc, err := customerstate.NewService(filepath.Join(t.TempDir(), "customers.json"))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	customerstate.SetDefaultService(svc)
+	t.Cleanup(func() { customerstate.SetDefaultService(nil) })
+
+	customer, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{
+		ID:    "cust_5080263b-fbd1-485a-b017-13437036d8e2",
+		Email: "client@example.com",
+	})
+	if err != nil {
+		t.Fatalf("UpsertCustomer() error = %v", err)
+	}
+	if customer.Email != "client@example.com" {
+		t.Fatalf("customer email = %q, want %q", customer.Email, "client@example.com")
+	}
+
+	event := usage.CacheStatisticsEvent{
+		Timestamp:  time.Now().UTC().Truncate(time.Second),
+		Provider:   "codex",
+		Model:      "gpt-5.4",
+		CustomerID: customer.ID,
+		Tokens: usage.TokenStats{
+			InputTokens:  10,
+			OutputTokens: 2,
+			TotalTokens:  12,
+		},
+	}
+	if err := store.InsertEvent(context.Background(), event); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/cache-statistics?days=7&limit=10&model_limit=10", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		CacheStatistics struct {
+			RecentRequests []struct {
+				CustomerID    string `json:"customer_id"`
+				CustomerEmail string `json:"customer_email"`
+			} `json:"recent_requests"`
+		} `json:"cache_statistics"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.CacheStatistics.RecentRequests) != 1 {
+		t.Fatalf("recent requests len = %d, want 1", len(payload.CacheStatistics.RecentRequests))
+	}
+	if payload.CacheStatistics.RecentRequests[0].CustomerID != customer.ID {
+		t.Fatalf("recent customer_id = %q, want %q", payload.CacheStatistics.RecentRequests[0].CustomerID, customer.ID)
+	}
+	if payload.CacheStatistics.RecentRequests[0].CustomerEmail != customer.Email {
+		t.Fatalf("recent customer_email = %q, want %q", payload.CacheStatistics.RecentRequests[0].CustomerEmail, customer.Email)
 	}
 }
 
