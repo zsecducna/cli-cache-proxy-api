@@ -702,6 +702,18 @@
     return date.toLocaleString();
   }
 
+  function formatDurationMs(value) {
+    const ms = Number(value || 0);
+    if (!Number.isFinite(ms) || ms <= 0) return 'n/a';
+    if (ms < 1000) return `${Math.round(ms)} ms`;
+    const seconds = ms / 1000;
+    if (seconds < 10) return `${seconds.toFixed(2)} s`;
+    if (seconds < 60) return `${seconds.toFixed(1)} s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds - (minutes * 60);
+    return `${minutes}m ${remainingSeconds.toFixed(0)}s`;
+  }
+
   function readModelPrices() {
     try {
       const raw = window.localStorage.getItem(MODEL_PRICES_STORAGE_KEY);
@@ -1009,6 +1021,32 @@
     `);
   }
 
+  function patchAverageLatencyCard(container, summary, timeRange) {
+    const metricsBlock = findUsageMetricsBlock(container);
+    if (!metricsBlock) return;
+    const cachedCard = findUsageMetricCard(metricsBlock, 'Cached Tokens');
+    const totalCard = findUsageMetricCard(metricsBlock, 'Total Tokens');
+    let latencyCard = findUsageMetricCard(metricsBlock, 'Avg Latency');
+    if (!latencyCard) {
+      latencyCard = document.createElement('div');
+      latencyCard.className = cachedCard ? cachedCard.className : (totalCard ? totalCard.className : 'cliproxy-enhancer__card');
+      if (cachedCard && cachedCard.parentElement) {
+        cachedCard.insertAdjacentElement('afterend', latencyCard);
+      } else if (totalCard && totalCard.parentElement) {
+        totalCard.insertAdjacentElement('afterend', latencyCard);
+      } else {
+        metricsBlock.appendChild(latencyCard);
+      }
+    }
+    const avgLatencyMs = Number(summary && summary.avg_latency_ms || 0);
+    const signature = ['avg-latency-card', timeRange && timeRange.key || '', getUsageProviderFilter(), Math.round(avgLatencyMs)].join(':');
+    setEnhancerMarkup(latencyCard, signature, `
+      <div class="cliproxy-enhancer__label">Avg Latency</div>
+      <div class="cliproxy-enhancer__value">${escapeHTML(formatDurationMs(avgLatencyMs))}</div>
+      <div class="cliproxy-enhancer__hint">${escapeHTML(timeRange ? timeRange.label : 'Selected window')} average request completion time</div>
+    `);
+  }
+
   function hideUsageBlocks(container) {
     const linesBlock = findUsageChildBlock(container, 'Lines to display');
     if (linesBlock) {
@@ -1036,7 +1074,7 @@
       requestBlock.insertAdjacentElement('afterend', panel);
     }
     const requests = filterRecentRequests(stats && stats.recent_requests || [], timeRange).slice(0, MAX_REQUEST_ROWS);
-    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}`).join('|')].join(':');
+    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}:${item.latency_ms || 0}`).join('|')].join(':');
     setEnhancerMarkup(panel, signature, `
       <div class="cliproxy-enhancer__label">Request Events</div>
       <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} persisted request events within ${escapeHTML(timeRange.label)}.</div>
@@ -1045,6 +1083,7 @@
           <thead>
             <tr>
               <th>Timestamp</th>
+              <th>Time</th>
               <th>Model Name</th>
               <th>Reasoning Effort</th>
               <th>Cache Policy</th>
@@ -1080,6 +1119,7 @@
               return `
               <tr>
                 <td>${escapeHTML(formatDateTime(item.timestamp))}</td>
+                <td>${escapeHTML(formatDurationMs(item.latency_ms))}</td>
                 <td>${escapeHTML(item.model || '')}</td>
                 <td>${escapeHTML(item.reasoning_effort || 'n/a')}</td>
                 <td>${escapeHTML(policy)}</td>
@@ -1091,7 +1131,7 @@
               </tr>
             `; }).join('') : `
               <tr>
-                <td colspan="9" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
+                <td colspan="10" class="cliproxy-enhancer__muted">No request events for the selected window.</td>
               </tr>
             `}
           </tbody>
@@ -1104,6 +1144,7 @@
     updateServiceHealthRow(ensureServiceHealthRow(container), stats.summary || {}, timeRange.label);
     patchUsageSummaryCards(container, stats || {}, timeRange);
     patchCachedTokensCard(container, stats.summary || {}, timeRange);
+    patchAverageLatencyCard(container, stats.summary || {}, timeRange);
     renderRequestEvents(container, stats, timeRange);
   }
 

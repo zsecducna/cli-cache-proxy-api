@@ -324,6 +324,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "patchUsageSummaryCards") || !strings.Contains(body, "setUsageCardValue") || !strings.Contains(body, "summary.total_requests") || !strings.Contains(body, "summary.total_tokens") || !strings.Contains(body, "const tpmCard = findUsageMetricCard(metricsBlock, 'TPM');") || !strings.Contains(body, "const totalCostCard = findUsageMetricCard(metricsBlock, 'Total Cost');") || !strings.Contains(body, "calculateTotalCostFromModelSummaries") || !strings.Contains(body, "MODEL_PRICES_STORAGE_KEY") {
 		t.Fatalf("management enhancer should refresh all visible summary cards from persisted cache statistics and stored pricing, not only the request-events table: %s", body)
 	}
+	if !strings.Contains(body, "patchAverageLatencyCard") || !strings.Contains(body, "Avg Latency") || !strings.Contains(body, "summary.avg_latency_ms") {
+		t.Fatalf("management enhancer should render an average latency card from the usage summary: %s", body)
+	}
 	if !strings.Contains(body, "triggerNativeUsageRefresh") || !strings.Contains(body, "scheduleNativeUsageRefreshRetry") || !strings.Contains(body, "provider.addEventListener('change'") {
 		t.Fatalf("management enhancer should also trigger the native usage refresh path so React-owned cards and charts follow provider filter and auto-refresh updates: %s", body)
 	}
@@ -338,6 +341,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	}
 	if !strings.Contains(body, "isNativeUsageRequestURL") || !strings.Contains(body, "scheduleUsagePatchAfterNativeRefresh(0)") {
 		t.Fatalf("management enhancer should re-apply filtered cards after the native usage endpoint actually returns, not only on speculative timers: %s", body)
+	}
+	if !strings.Contains(body, "<th>Time</th>") || !strings.Contains(body, "formatDurationMs(item.latency_ms)") {
+		t.Fatalf("management enhancer should render request completion time in the Request Events table: %s", body)
 	}
 	if !strings.Contains(body, "applyUsageChartPeriodDefaults") || !strings.Contains(body, "normalize(button.textContent) === 'By Hour'") || !strings.Contains(body, "normalize(button.textContent) === 'By Day'") || !strings.Contains(body, "usageChartDefaultsApplied = true") {
 		t.Fatalf("management enhancer should force chart period controls to default to By Hour once per usage page activation: %s", body)
