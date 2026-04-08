@@ -193,7 +193,9 @@ append_sources_excluding_target() {
     fi
   done"
 
-  printf '%s\n' "${filtered[@]}"
+  if ((${#filtered[@]})); then
+    printf '%s\n' "${filtered[@]}"
+  fi
 }
 
 extract_auth_dir_from_config() {
