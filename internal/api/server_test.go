@@ -1247,6 +1247,60 @@ func TestInstallerPlatformScriptsContainExpectedServiceSetup(t *testing.T) {
 	}
 }
 
+func TestInstallWindowsScriptContainsPostgresBootstrap(t *testing.T) {
+	_, filePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test file path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", ".."))
+
+	windowsBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_windows.ps1"))
+	if err != nil {
+		t.Fatalf("failed to read install_windows.ps1: %v", err)
+	}
+	windowsBody := string(windowsBytes)
+
+	for _, needle := range []string{
+		"CLI_PROXY_INSTALLER_POSTGRES_INSTALLER_URL",
+		"CLI_PROXY_INSTALLER_POSTGRES_SERVICE_NAME",
+		"Install-ManagedPostgres",
+		"get.enterprisedb.com/postgresql/postgresql-",
+		"'--mode', 'unattended'",
+		"'--servicename', $script:ManagedPostgresServiceName",
+	} {
+		if !strings.Contains(windowsBody, needle) {
+			t.Fatalf("expected install_windows.ps1 to contain PostgreSQL bootstrap marker %q", needle)
+		}
+	}
+}
+
+func TestInstallWindowsScriptContainsPostgresBootstrapSupport(t *testing.T) {
+	_, filePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("failed to resolve test file path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(filePath), "..", ".."))
+
+	windowsBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_windows.ps1"))
+	if err != nil {
+		t.Fatalf("failed to read install_windows.ps1: %v", err)
+	}
+	windowsBody := string(windowsBytes)
+
+	for _, needle := range []string{
+		"Wait-ManagedPostgresReady",
+		"Resolve-PostgresTool 'pg_isready'",
+		"Get-Service -Name $script:ManagedPostgresServiceName",
+		"Start-Process -FilePath $installerPath -ArgumentList $installerArgs -Wait -PassThru",
+		"Resolve-PostgresMaintenanceDsn",
+		"Build-ManagedPostgresMaintenanceDsn",
+	} {
+		if !strings.Contains(windowsBody, needle) {
+			t.Fatalf("expected install_windows.ps1 to include PostgreSQL bootstrap support containing %q", needle)
+		}
+	}
+}
+
 func TestInstallScriptRefusesSkipBuildWhenExistingBinaryWouldHideSourceChanges(t *testing.T) {
 	_, filePath, _, ok := runtime.Caller(0)
 	if !ok {
