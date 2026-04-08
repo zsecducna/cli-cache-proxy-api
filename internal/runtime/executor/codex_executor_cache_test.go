@@ -132,25 +132,38 @@ func TestCodexExecutorCacheHelper_OverridesPromptCacheRetentionForSupportedModel
 
 func TestCodexExecutorCacheHelper_AddsPromptCacheRetentionWhenMissingForSupportedModels(t *testing.T) {
 	executor := &CodexExecutor{}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4"}`),
+	tests := []struct {
+		name  string
+		model string
+	}{
+		{name: "gpt-5.4", model: "gpt-5.4"},
+		{name: "gpt-5.3-codex", model: "gpt-5.3-codex"},
+		{name: "gpt-5.3-codex-spark", model: "gpt-5.3-codex-spark"},
 	}
 
-	httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
-	if err != nil {
-		t.Fatalf("cacheHelper error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{
+				Model:   tt.model,
+				Payload: []byte(`{"model":"` + tt.model + `"}`),
+			}
 
-	body, err := io.ReadAll(httpReq.Body)
-	if err != nil {
-		t.Fatalf("read request body: %v", err)
-	}
-	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
-		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
-	}
-	if selection.TTL != codexPromptCache24hTTL {
-		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCache24hTTL)
+			httpReq, selection, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://api.openai.com/v1/responses", req, req.Payload)
+			if err != nil {
+				t.Fatalf("cacheHelper error: %v", err)
+			}
+
+			body, err := io.ReadAll(httpReq.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+				t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+			}
+			if selection.TTL != codexPromptCache24hTTL {
+				t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCache24hTTL)
+			}
+		})
 	}
 }
 
@@ -248,30 +261,43 @@ func TestCodexExecutorCacheHelper_NormalizesPromptCacheRetentionFormattingForSup
 }
 
 func TestCodexExecutorExecuteAddsPromptCacheRetentionForSupportedModels(t *testing.T) {
-	var capturedBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		capturedBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"output\":[]}}\n\n"))
-	}))
-	defer server.Close()
+	tests := []struct {
+		name  string
+		model string
+	}{
+		{name: "gpt-5.4", model: "gpt-5.4"},
+		{name: "gpt-5.3-codex", model: "gpt-5.3-codex"},
+		{name: "gpt-5.3-codex-spark", model: "gpt-5.3-codex-spark"},
+	}
 
-	executor := &CodexExecutor{}
-	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
-	}
-	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if got := gjson.GetBytes(capturedBody, "prompt_cache_retention").String(); got != "24h" {
-		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				capturedBody, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read body: %v", err)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"output\":[]}}\n\n"))
+			}))
+			defer server.Close()
+
+			executor := &CodexExecutor{}
+			auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{
+				Model:   tt.model,
+				Payload: []byte(`{"model":"` + tt.model + `","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+			}
+			_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if got := gjson.GetBytes(capturedBody, "prompt_cache_retention").String(); got != "24h" {
+				t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+			}
+		})
 	}
 }
 

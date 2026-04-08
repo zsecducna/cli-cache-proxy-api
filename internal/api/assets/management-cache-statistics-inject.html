@@ -18,6 +18,7 @@
   const DEFAULT_USAGE_INTERVAL = 5;
   const DEFAULT_QUOTA_INTERVAL = 5;
   const DEFAULT_QUOTA_PAGE_SIZE = 6;
+  const DEFAULT_COLLAPSED_SECTION_TITLES = ['API Details', 'Model Statistics', 'Credential Statistics', 'Model Pricing Settings'];
   const MAX_REQUEST_ROWS = 50;
   const RECENT_REQUEST_FETCH_LIMIT = 500;
   const MODEL_LIMIT = 10;
@@ -28,7 +29,7 @@
     { value: 'claude', label: 'Claude' },
     { value: 'vertex', label: 'Vertex' },
     { value: 'ampcode', label: 'ampcode' },
-    { value: 'openai-compatible', label: 'OpenAI Compatible Providers' },
+    { value: 'openai-compatible', label: 'OpenAI compatible Providers' },
   ];
 
   let managementAuthorization = '';
@@ -48,6 +49,8 @@
   let lastUsageStatistics = null;
   let lastUsageStatisticsRangeKey = '';
   let lastUsageStatisticsProvider = '';
+  let lastNativeUsageSnapshot = null;
+  let lastNativeUsageSnapshotProvider = '';
   let lastNativeUsageRefreshAt = 0;
   let lastNativeUsageRefreshKey = '';
   let quotaRefreshInFlight = false;
@@ -55,9 +58,14 @@
   let usageChartPeriodInterceptorInstalled = false;
   let usageChartDefaultsApplied = false;
   let lastObservedUsageFilterKey = '';
+  const collapsedSectionKeys = new Set();
   const quotaModes = new Map();
   let chartAnimationDisableTimers = [];
   let chartAnimationGuardTimer = null;
+  let openAICompatProviders = [];
+  let openAICompatProvidersLoading = false;
+  let openAICompatProvidersError = '';
+  const openAICompatSavingNames = new Set();
 
   function installStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -115,7 +123,7 @@
       }
       [class*="UsagePage-module__statsGrid"] > [class*="UsagePage-module__statCard"],
       [class*="UsagePage-module__statsGrid"] > [data-cliproxy-signature] {
-        height: 100%;
+        height: 132px;
         min-height: 132px;
         display: flex;
         flex-direction: column;
@@ -138,6 +146,7 @@
         display: flex;
         align-items: baseline;
         gap: 8px;
+        min-height: 34px;
         font-size: 24px;
         font-weight: 700;
         color: var(--text-primary, #111827);
@@ -148,8 +157,13 @@
         color: var(--text-secondary, #4b5563);
       }
       .cliproxy-enhancer__hint {
+        display: -webkit-box;
+        min-height: 32px;
         font-size: 12px;
         color: var(--text-tertiary, #6b7280);
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
       }
       .cliproxy-enhancer__request-events {
         margin-top: 8px;
@@ -255,6 +269,11 @@
         min-height: 240px;
         padding-top: 8px;
       }
+      .cliproxy-enhancer__bar-group {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
       .cliproxy-enhancer__bar-legend {
         display: flex;
         flex-wrap: wrap;
@@ -278,7 +297,7 @@
       .cliproxy-enhancer__bar-track {
         position: relative;
         width: 100%;
-        height: 16px;
+        height: 18px;
         border-radius: 999px;
         background: color-mix(in srgb, var(--border-color, #d5d9e0) 60%, transparent);
         overflow: hidden;
@@ -298,6 +317,13 @@
         font-weight: 600;
         white-space: nowrap;
       }
+      .cliproxy-enhancer__bar-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        font-size: 11px;
+        color: var(--text-tertiary, #6b7280);
+      }
       .cliproxy-enhancer__bar-empty {
         display: flex;
         align-items: center;
@@ -309,6 +335,66 @@
       .cliproxy-enhancer__warning-hidden {
         display: none !important;
       }
+      .cliproxy-enhancer__config-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        margin: 12px 0 16px;
+        padding: 16px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 88%, transparent);
+      }
+      .cliproxy-enhancer__config-status {
+        font-size: 12px;
+        color: var(--text-secondary, #4b5563);
+      }
+      .cliproxy-enhancer__config-status[data-state="error"] {
+        color: #b91c1c;
+      }
+      .cliproxy-enhancer__config-provider-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .cliproxy-enhancer__config-provider-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 14px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: var(--bg-primary, #fff);
+      }
+      .cliproxy-enhancer__config-provider-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+      }
+      .cliproxy-enhancer__config-provider-name {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--text-primary, #111827);
+      }
+      .cliproxy-enhancer__config-provider-url {
+        font-size: 12px;
+        color: var(--text-tertiary, #6b7280);
+        word-break: break-all;
+      }
+      .cliproxy-enhancer__config-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13px;
+        color: var(--text-secondary, #4b5563);
+        white-space: nowrap;
+      }
+      .cliproxy-enhancer__config-toggle input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+      }
       [data-cliproxy-hidden="true"] {
         display: none !important;
       }
@@ -318,6 +404,13 @@
       @media (max-width: 960px) {
         .cliproxy-enhancer__toolbar {
           align-items: stretch;
+        }
+        .cliproxy-enhancer__config-provider-row {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .cliproxy-enhancer__config-toggle {
+          white-space: normal;
         }
       }
     `;
@@ -426,6 +519,15 @@
 
   function isQuotaPageReady() {
     return isQuotaRoute() && getPageTitle() === 'Quota Management';
+  }
+
+  function isAIProvidersConfigPageReady() {
+    return getPageTitle() === 'AI Providers Configuration';
+  }
+
+  function currentRouteKey() {
+    const hash = normalize(window.location.hash || '');
+    return hash || normalize(window.location.pathname || '');
   }
 
   function sameOriginManagementURL(input) {
@@ -587,10 +689,12 @@
     window.fetch = async function patchedFetch(input, init) {
       let nextInput = input;
       let shouldRepatchUsage = false;
+      let usageURL = '';
       try {
         const originalURL = typeof input === 'string' ? input : (input && input.url) || '';
         const rewrittenURL = appendUsageProviderFilter(originalURL);
         shouldRepatchUsage = isNativeUsageRequestURL(rewrittenURL || originalURL);
+        usageURL = rewrittenURL || originalURL;
         if (typeof Request !== 'undefined' && input instanceof Request) {
           if (rewrittenURL && rewrittenURL !== input.url) {
             nextInput = new Request(rewrittenURL, input);
@@ -608,6 +712,7 @@
       } catch {}
       const response = await nativeFetch(nextInput, init);
       if (shouldRepatchUsage) {
+        await captureNativeUsageSnapshotFromResponse(response, usageURL);
         scheduleUsagePatchAfterNativeRefresh(0);
       }
       return response;
@@ -681,6 +786,8 @@
     lastUsageStatistics = null;
     lastUsageStatisticsRangeKey = '';
     lastUsageStatisticsProvider = '';
+    lastNativeUsageSnapshot = null;
+    lastNativeUsageSnapshotProvider = '';
     lastNativeUsageRefreshAt = 0;
     lastNativeUsageRefreshKey = '';
   }
@@ -689,6 +796,29 @@
     const timeRange = getUsageTimeRange();
     const provider = getUsageProviderFilter();
     return `${timeRange.key}:${provider}`;
+  }
+
+  function captureNativeUsageSnapshotPayload(payload, urlLike) {
+    const snapshot = payload && payload.usage && typeof payload.usage === 'object' ? payload.usage : null;
+    if (!snapshot) return false;
+    lastNativeUsageSnapshot = snapshot;
+    try {
+      const url = new URL(urlLike, window.location.origin);
+      lastNativeUsageSnapshotProvider = normalize(url.searchParams.get('provider'));
+    } catch {
+      lastNativeUsageSnapshotProvider = getUsageProviderFilter();
+    }
+    return true;
+  }
+
+  async function captureNativeUsageSnapshotFromResponse(response, urlLike) {
+    if (!response || typeof response.clone !== 'function' || !response.ok) return false;
+    try {
+      const payload = await response.clone().json();
+      return captureNativeUsageSnapshotPayload(payload, urlLike);
+    } catch {
+      return false;
+    }
   }
 
   function scheduleUsageFilterSync(delayMs, options = {}) {
@@ -818,6 +948,42 @@
     return payload && payload.cache_statistics ? payload.cache_statistics : null;
   }
 
+  async function fetchOpenAICompatProviders() {
+    const ready = await ensureManagementAuth();
+    if (!ready || !nativeFetch || !managementAuthorization) return [];
+    const response = await nativeFetch(new URL('/v0/management/openai-compatibility', window.location.origin).toString(), {
+      headers: { Authorization: managementAuthorization },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    return Array.isArray(payload && payload['openai-compatibility']) ? payload['openai-compatibility'] : [];
+  }
+
+  async function patchOpenAICompatProviderToggle(name, enabled) {
+    const ready = await ensureManagementAuth();
+    if (!ready || !nativeFetch || !managementAuthorization) {
+      throw new Error('Management authorization unavailable');
+    }
+    const response = await nativeFetch(new URL('/v0/management/openai-compatibility', window.location.origin).toString(), {
+      method: 'PATCH',
+      headers: {
+        Authorization: managementAuthorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name,
+        value: {
+          'append-reasoning-effort-to-model': enabled,
+        },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+  }
+
   function formatInteger(value) {
     return new Intl.NumberFormat().format(Number(value || 0));
   }
@@ -898,6 +1064,12 @@
     return `${month}-${day} ${hour}:00`;
   }
 
+  function formatModelAxisLabel(label) {
+    const text = normalize(label);
+    if (text.length <= 14) return text;
+    return `${text.slice(0, 13)}…`;
+  }
+
   function buildUsageTrendSeries(stats, period, metric) {
     const trendByModel = stats && stats.trend_by_model && typeof stats.trend_by_model === 'object'
       ? stats.trend_by_model
@@ -942,15 +1114,18 @@
     return { labels, datasets };
   }
 
-  function buildTrendChartSVG(labels, datasets, metric, period) {
+  function buildSeriesChartSVG(labels, datasets, options = {}) {
     if (!labels.length || !datasets.length) {
-      return '<div class="cliproxy-enhancer__trend-empty">No chart data for the selected window.</div>';
+      return `<div class="cliproxy-enhancer__trend-empty">${escapeHTML(options.emptyMessage || 'No chart data for the selected window.')}</div>`;
     }
     const width = 880;
     const height = 280;
     const padding = { top: 18, right: 18, bottom: 38, left: 52 };
     const innerWidth = width - padding.left - padding.right;
     const innerHeight = height - padding.top - padding.bottom;
+    const formatValue = typeof options.valueFormatter === 'function' ? options.valueFormatter : formatCompact;
+    const formatLabel = typeof options.labelFormatter === 'function' ? options.labelFormatter : ((label) => label);
+    const ariaLabel = normalize(options.ariaLabel || 'Usage chart');
     const allValues = datasets.flatMap((dataset) => dataset.values);
     const maxValue = Math.max(1, ...allValues);
     const gridValues = [0, 0.25, 0.5, 0.75, 1];
@@ -965,13 +1140,13 @@
       const value = Math.round(maxValue * (1 - ratio));
       return `
         <line class="cliproxy-enhancer__trend-grid" x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}"></line>
-        <text class="cliproxy-enhancer__trend-label" x="${padding.left - 8}" y="${y + 4}" text-anchor="end">${escapeHTML(metric === 'tokens' ? formatCompact(value) : formatInteger(value))}</text>
+        <text class="cliproxy-enhancer__trend-label" x="${padding.left - 8}" y="${y + 4}" text-anchor="end">${escapeHTML(formatValue(value))}</text>
       `;
     }).join('');
     const xLabels = labels.map((bucket, index) => {
       if (index % labelStep !== 0 && index !== labels.length - 1) return '';
       const x = xForIndex(index);
-      return `<text class="cliproxy-enhancer__trend-label" x="${x}" y="${height - 10}" text-anchor="middle">${escapeHTML(formatTrendBucketLabel(bucket, period))}</text>`;
+      return `<text class="cliproxy-enhancer__trend-label" x="${x}" y="${height - 10}" text-anchor="middle">${escapeHTML(formatLabel(bucket, index))}</text>`;
     }).join('');
     const paths = datasets.map((dataset) => {
       const points = dataset.values.map((value, index) => `${xForIndex(index)},${yForValue(value)}`).join(' ');
@@ -984,7 +1159,7 @@
     }).join('');
     return `
       <div class="cliproxy-enhancer__trend-chart">
-        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="${escapeHTML(metric === 'tokens' ? 'Token Usage Trends' : 'Request Trends')}">
+        <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="${escapeHTML(ariaLabel)}">
           <line class="cliproxy-enhancer__trend-axis" x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}"></line>
           <line class="cliproxy-enhancer__trend-axis" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}"></line>
           ${gridLines}
@@ -993,6 +1168,14 @@
         </svg>
       </div>
     `;
+  }
+
+  function buildTrendChartSVG(labels, datasets, metric, period) {
+    return buildSeriesChartSVG(labels, datasets, {
+      ariaLabel: metric === 'tokens' ? 'Token Usage Trends' : 'Request Trends',
+      valueFormatter: metric === 'tokens' ? formatCompact : formatInteger,
+      labelFormatter: (bucket) => formatTrendBucketLabel(bucket, period),
+    });
   }
 
   function renderUsageTrendChartCard(card, stats, metric) {
@@ -1093,15 +1276,23 @@
         if (value <= 0 || total <= 0) return '';
         return `<span class="cliproxy-enhancer__bar-segment" style="width:${(value / total) * 100}%;background:${segment.color};"></span>`;
       }).join('');
+      const meta = segments.map((segment) => {
+        const value = Math.max(0, Number(item.values && item.values[segment.key] || 0));
+        if (value <= 0) return '';
+        return `<span>${escapeHTML(segment.label)}: ${escapeHTML(valueFormatter(value))}</span>`;
+      }).filter(Boolean).join('');
       return `
-        <div class="cliproxy-enhancer__bar-row">
-          <div class="cliproxy-enhancer__bar-label">${escapeHTML(item.label)}</div>
-          <div class="cliproxy-enhancer__bar-track">
-            <div class="cliproxy-enhancer__bar-fill" style="width:${width}%;">
-              ${barSegments}
+        <div class="cliproxy-enhancer__bar-group">
+          <div class="cliproxy-enhancer__bar-row">
+            <div class="cliproxy-enhancer__bar-label">${escapeHTML(item.label)}</div>
+            <div class="cliproxy-enhancer__bar-track">
+              <div class="cliproxy-enhancer__bar-fill" style="width:${width}%;">
+                ${barSegments}
+              </div>
             </div>
+            <div class="cliproxy-enhancer__bar-value">${escapeHTML(valueFormatter(total))}</div>
           </div>
-          <div class="cliproxy-enhancer__bar-value">${escapeHTML(valueFormatter(total))}</div>
+          ${meta ? `<div class="cliproxy-enhancer__bar-meta">${meta}</div>` : ''}
         </div>
       `;
     }).join('');
@@ -1118,7 +1309,7 @@
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'cliproxy-token-type-breakdown';
-      panel.className = 'cliproxy-enhancer__bar-shell';
+      panel.className = 'cliproxy-enhancer__trend-shell';
       if (header && header.parentElement === card) {
         header.insertAdjacentElement('afterend', panel);
       } else {
@@ -1135,15 +1326,36 @@
         cached: Number(item && item.cached_tokens || 0),
         reasoning: Number(item && item.reasoning_tokens || 0),
       },
-    }));
+    })).filter((item) => item.total > 0).sort((left, right) => right.total - left.total);
     const segments = [
       { key: 'input', label: 'Input Tokens', color: '#8b8680' },
       { key: 'output', label: 'Output Tokens', color: '#0f766e' },
       { key: 'cached', label: 'Cached Tokens', color: '#2563eb' },
       { key: 'reasoning', label: 'Reasoning Tokens', color: '#b45309' },
     ];
+    const validItems = items.filter((item) => Number(item.total || 0) > 0);
+    const labels = validItems.map((item) => item.label);
+    const datasets = segments.map((segment) => ({
+      label: segment.label,
+      color: segment.color,
+      values: validItems.map((item) => Math.max(0, Number(item.values && item.values[segment.key] || 0))),
+    })).filter((dataset) => dataset.values.some((value) => value > 0));
+    const legend = datasets.map((dataset) => `
+      <div class="cliproxy-enhancer__trend-legend-item">
+        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${dataset.color};"></span>
+        <span>${escapeHTML(dataset.label)}</span>
+      </div>
+    `).join('');
     const signature = ['token-type-breakdown', items.map((item) => `${item.label}:${item.total}:${Object.values(item.values).join(',')}`).join('|')].join(':');
-    setEnhancerMarkup(panel, signature, buildModelBarChartHTML(items, segments, formatCompact, 'No token breakdown available for the selected window.'));
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__trend-legend">${legend || '<span class="cliproxy-enhancer__muted">No token breakdown available for the selected window.</span>'}</div>
+      ${buildSeriesChartSVG(labels, datasets, {
+        ariaLabel: 'Token Type Breakdown',
+        valueFormatter: formatCompact,
+        labelFormatter: (label) => formatModelAxisLabel(label),
+        emptyMessage: 'No token breakdown available for the selected window.',
+      })}
+    `);
   }
 
   function renderCostOverviewChart(card, stats) {
@@ -1153,7 +1365,7 @@
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'cliproxy-cost-overview';
-      panel.className = 'cliproxy-enhancer__bar-shell';
+      panel.className = 'cliproxy-enhancer__trend-shell';
       if (header && header.parentElement === card) {
         header.insertAdjacentElement('afterend', panel);
       } else {
@@ -1168,16 +1380,38 @@
       values: {
         cost: calculateModelCost(item, modelPrices),
       },
-    }));
+    })).filter((item) => item.total > 0).sort((left, right) => right.total - left.total);
     const segments = [
       { key: 'cost', label: 'Estimated Cost', color: '#047857' },
     ];
     const hasPricing = Object.keys(modelPrices).length > 0;
+    const validItems = items.filter((item) => Number(item.total || 0) > 0);
+    const labels = validItems.map((item) => item.label);
+    const datasets = segments.map((segment) => ({
+      label: segment.label,
+      color: segment.color,
+      values: validItems.map((item) => Math.max(0, Number(item.values && item.values[segment.key] || 0))),
+    })).filter((dataset) => dataset.values.some((value) => value > 0));
+    const legend = datasets.map((dataset) => `
+      <div class="cliproxy-enhancer__trend-legend-item">
+        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${dataset.color};"></span>
+        <span>${escapeHTML(dataset.label)}</span>
+      </div>
+    `).join('');
     const signature = ['cost-overview', hasPricing ? 'priced' : 'unpriced', items.map((item) => `${item.label}:${item.total}`).join('|')].join(':');
-    const html = hasPricing
-      ? buildModelBarChartHTML(items, segments, formatCurrency, 'No model cost data available for the selected window.')
-      : '<div class="cliproxy-enhancer__bar-empty">Set model prices to view per-model cost overview.</div>';
-    setEnhancerMarkup(panel, signature, html);
+    if (!hasPricing) {
+      setEnhancerMarkup(panel, signature, '<div class="cliproxy-enhancer__trend-empty">Set model prices to view per-model cost overview.</div>');
+      return;
+    }
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__trend-legend">${legend || '<span class="cliproxy-enhancer__muted">No model cost data available for the selected window.</span>'}</div>
+      ${buildSeriesChartSVG(labels, datasets, {
+        ariaLabel: 'Cost Overview',
+        valueFormatter: formatCurrency,
+        labelFormatter: (label) => formatModelAxisLabel(label),
+        emptyMessage: 'No model cost data available for the selected window.',
+      })}
+    `);
   }
 
   function renderUsageModelBreakdownCharts(container, stats) {
@@ -1242,6 +1476,236 @@
       const timestamp = new Date(item && item.timestamp || '').getTime();
       return Number.isFinite(timestamp) && timestamp >= cutoff;
     });
+  }
+
+  function isUsageSnapshot(value) {
+    return !!(value && typeof value === 'object' && value.apis && typeof value.apis === 'object');
+  }
+
+  function getUsageRenderSnapshot(stats) {
+    const candidates = [
+      stats && stats.filtered_usage_snapshot,
+      stats && stats.filteredUsageSnapshot,
+      stats && stats.usage_snapshot,
+      stats && stats.usage,
+      stats,
+      lastNativeUsageSnapshot,
+    ];
+    const provider = getUsageProviderFilter();
+    return candidates.find((candidate) => {
+      if (!isUsageSnapshot(candidate)) return false;
+      if (candidate === lastNativeUsageSnapshot && normalize(lastNativeUsageSnapshotProvider) !== provider) return false;
+      return true;
+    }) || null;
+  }
+
+  function getCacheStatisticsRenderSnapshot(stats) {
+    if (stats && stats.cache_statistics && typeof stats.cache_statistics === 'object') {
+      return stats.cache_statistics;
+    }
+    return stats && typeof stats === 'object' ? stats : {};
+  }
+
+  function filterUsageSnapshotDetails(snapshot, timeRange) {
+    if (!isUsageSnapshot(snapshot)) return [];
+    const details = [];
+    Object.entries(snapshot.apis || {}).forEach(([apiKey, apiSnapshot]) => {
+      const models = apiSnapshot && apiSnapshot.models && typeof apiSnapshot.models === 'object' ? apiSnapshot.models : {};
+      Object.entries(models).forEach(([modelName, modelSnapshot]) => {
+        const modelDetails = Array.isArray(modelSnapshot && modelSnapshot.details) ? modelSnapshot.details : [];
+        modelDetails.forEach((detail) => {
+          details.push({
+            apiKey,
+            model: normalize(modelName) || normalize(detail && detail.model) || 'unknown',
+            detail: detail || {},
+          });
+        });
+      });
+    });
+    if (!timeRange || timeRange.cutoffMs == null) return details;
+    const cutoff = Date.now() - timeRange.cutoffMs;
+    return details.filter((item) => {
+      const timestamp = new Date(item && item.detail && item.detail.timestamp || '').getTime();
+      return Number.isFinite(timestamp) && timestamp >= cutoff;
+    });
+  }
+
+  function collectUsageSnapshotModelRows(snapshot, timeRange) {
+    const rows = new Map();
+    filterUsageSnapshotDetails(snapshot, timeRange).forEach(({ apiKey, model, detail }) => {
+      const key = normalize(model) || 'unknown';
+      const current = rows.get(key) || {
+        model: key,
+        requests: 0,
+        failed: 0,
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        avgLatencyMs: 0,
+        latencyTotalMs: 0,
+        credentials: new Set(),
+      };
+      const tokens = detail && detail.tokens && typeof detail.tokens === 'object' ? detail.tokens : {};
+      current.requests += 1;
+      current.failed += detail && detail.failed ? 1 : 0;
+      current.totalTokens += Number(tokens.total_tokens || 0);
+      current.inputTokens += Number(tokens.input_tokens || 0);
+      current.outputTokens += Number(tokens.output_tokens || 0);
+      current.cachedTokens += Number(tokens.cached_tokens || 0);
+      current.latencyTotalMs += Number(detail && detail.latency_ms || 0);
+      if (apiKey) current.credentials.add(apiKey);
+      rows.set(key, current);
+    });
+    return Array.from(rows.values()).map((row) => ({
+      ...row,
+      avgLatencyMs: row.requests > 0 ? (row.latencyTotalMs / row.requests) : 0,
+      credentialCount: row.credentials.size,
+    })).sort((left, right) => right.totalTokens - left.totalTokens || right.requests - left.requests);
+  }
+
+  function collectUsageSnapshotCredentialRows(snapshot, timeRange) {
+    const rows = new Map();
+    filterUsageSnapshotDetails(snapshot, timeRange).forEach(({ apiKey, model, detail }) => {
+      const key = normalize(apiKey) || 'unknown';
+      const current = rows.get(key) || {
+        credential: key,
+        requests: 0,
+        failed: 0,
+        totalTokens: 0,
+        latencyTotalMs: 0,
+        latestTimestamp: '',
+        models: new Set(),
+        users: new Set(),
+      };
+      const tokens = detail && detail.tokens && typeof detail.tokens === 'object' ? detail.tokens : {};
+      const customer = normalize(detail && (detail.customer_email || detail.customer_id));
+      const timestamp = String(detail && detail.timestamp || '');
+      current.requests += 1;
+      current.failed += detail && detail.failed ? 1 : 0;
+      current.totalTokens += Number(tokens.total_tokens || 0);
+      current.latencyTotalMs += Number(detail && detail.latency_ms || 0);
+      if (model) current.models.add(model);
+      if (customer) current.users.add(customer);
+      if (!current.latestTimestamp || timestamp > current.latestTimestamp) {
+        current.latestTimestamp = timestamp;
+      }
+      rows.set(key, current);
+    });
+    return Array.from(rows.values()).map((row) => ({
+      ...row,
+      avgLatencyMs: row.requests > 0 ? (row.latencyTotalMs / row.requests) : 0,
+      modelCount: row.models.size,
+      userCount: row.users.size,
+    })).sort((left, right) => right.totalTokens - left.totalTokens || right.requests - left.requests);
+  }
+
+  function ensureUsageSnapshotSectionPanel(container, block, panelId) {
+    if (!(container instanceof HTMLElement) || !(block instanceof HTMLElement)) return null;
+    block.style.display = 'none';
+    block.dataset.cliproxyHidden = 'true';
+    let panel = container.querySelector(`#${panelId}`);
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = panelId;
+      panel.className = 'cliproxy-enhancer__request-events';
+    }
+    if (block.nextElementSibling !== panel) {
+      block.insertAdjacentElement('afterend', panel);
+    }
+    return panel;
+  }
+
+  function renderCredentialStatistics(container, snapshot, timeRange) {
+    const block = findUsageChildBlock(container, 'Credential Statistics');
+    if (!block) return;
+    const panel = ensureUsageSnapshotSectionPanel(container, block, 'cliproxy-credential-statistics');
+    if (!panel) return;
+    const rows = collectUsageSnapshotCredentialRows(snapshot, timeRange);
+    const signature = ['credential-statistics', timeRange && timeRange.key || '', getUsageProviderFilter(), rows.map((row) => `${row.credential}:${row.requests}:${row.totalTokens}:${row.latestTimestamp}`).join('|')].join(':');
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__label">Credential Statistics</div>
+      <div class="cliproxy-enhancer__hint">Filtered live usage snapshot grouped by credential for ${escapeHTML(timeRange ? timeRange.label : 'the selected window')}.</div>
+      <div class="cliproxy-enhancer__table-wrap">
+        <table class="cliproxy-enhancer__table">
+          <thead>
+            <tr>
+              <th>Credential</th>
+              <th>Requests</th>
+              <th>Total Tokens</th>
+              <th>Models</th>
+              <th>Users</th>
+              <th>Avg Latency</th>
+              <th>Latest Request</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.length ? rows.map((row) => `
+              <tr>
+                <td>${escapeHTML(row.credential)}</td>
+                <td>${escapeHTML(formatInteger(row.requests))}</td>
+                <td>${escapeHTML(formatInteger(row.totalTokens))}</td>
+                <td>${escapeHTML(formatInteger(row.modelCount))}</td>
+                <td>${escapeHTML(formatInteger(row.userCount))}</td>
+                <td>${escapeHTML(formatDurationMs(row.avgLatencyMs))}</td>
+                <td>${escapeHTML(formatDateTime(row.latestTimestamp))}</td>
+              </tr>
+            `).join('') : `
+              <tr>
+                <td colspan="7" class="cliproxy-enhancer__muted">No credential statistics for the selected window.</td>
+              </tr>
+            `}
+          </tbody>
+        </table>
+      </div>
+    `);
+  }
+
+  function renderModelStatistics(container, snapshot, timeRange) {
+    const block = findUsageChildBlock(container, 'Model Statistics');
+    if (!block) return;
+    const panel = ensureUsageSnapshotSectionPanel(container, block, 'cliproxy-model-statistics');
+    if (!panel) return;
+    const rows = collectUsageSnapshotModelRows(snapshot, timeRange);
+    const signature = ['model-statistics', timeRange && timeRange.key || '', getUsageProviderFilter(), rows.map((row) => `${row.model}:${row.requests}:${row.totalTokens}:${Math.round(row.avgLatencyMs)}`).join('|')].join(':');
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__label">Model Statistics</div>
+      <div class="cliproxy-enhancer__hint">Filtered live usage snapshot grouped by model for ${escapeHTML(timeRange ? timeRange.label : 'the selected window')}.</div>
+      <div class="cliproxy-enhancer__table-wrap">
+        <table class="cliproxy-enhancer__table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Requests</th>
+              <th>Total Tokens</th>
+              <th>Input Tokens</th>
+              <th>Output Tokens</th>
+              <th>Cached Tokens</th>
+              <th>Credentials</th>
+              <th>Avg Latency</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.length ? rows.map((row) => `
+              <tr>
+                <td>${escapeHTML(row.model)}</td>
+                <td>${escapeHTML(formatInteger(row.requests))}</td>
+                <td>${escapeHTML(formatInteger(row.totalTokens))}</td>
+                <td>${escapeHTML(formatInteger(row.inputTokens))}</td>
+                <td>${escapeHTML(formatInteger(row.outputTokens))}</td>
+                <td>${escapeHTML(formatInteger(row.cachedTokens))}</td>
+                <td>${escapeHTML(formatInteger(row.credentialCount))}</td>
+                <td>${escapeHTML(formatDurationMs(row.avgLatencyMs))}</td>
+              </tr>
+            `).join('') : `
+              <tr>
+                <td colspan="8" class="cliproxy-enhancer__muted">No model statistics for the selected window.</td>
+              </tr>
+            `}
+          </tbody>
+        </table>
+      </div>
+    `);
   }
 
   function findUsageChildBlock(container, needle) {
@@ -1713,7 +2177,154 @@
     }
   }
 
-  function renderRequestEvents(container, stats, timeRange) {
+  function hideUsageActionButtons(container) {
+    const header = container && container.querySelector('h1') && container.querySelector('h1').parentElement;
+    if (!(header instanceof HTMLElement)) return;
+    Array.from(header.querySelectorAll('button')).forEach((button) => {
+      const text = normalize(button.textContent);
+      if (text !== 'Export' && text !== 'Import' && text !== 'Refresh') return;
+      button.style.display = 'none';
+      button.dataset.cliproxyHidden = 'true';
+      button.setAttribute('aria-hidden', 'true');
+    });
+  }
+
+  function findConfigSectionAnchor(container, title) {
+    if (!(container instanceof HTMLElement)) return null;
+    const needle = normalize(title).toLowerCase();
+    const nodes = Array.from(container.querySelectorAll('.title, h2, h3, h4, label, span, div'));
+    const titleNode = nodes.find((node) => normalize(node.textContent).toLowerCase() === needle)
+      || nodes.find((node) => normalize(node.textContent).toLowerCase().includes(needle));
+    if (!titleNode) return null;
+    return titleNode.closest('.card, section, article, [class*="card"], [class*="section"]') || titleNode.parentElement;
+  }
+
+  function ensureOpenAICompatTogglePanel(container) {
+    if (!(container instanceof HTMLElement)) return null;
+    let panel = container.querySelector('#cliproxy-openai-compat-toggle-panel');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'cliproxy-openai-compat-toggle-panel';
+      panel.className = 'cliproxy-enhancer__config-panel';
+    }
+    const anchor = findConfigSectionAnchor(container, 'OpenAI Compatible Providers')
+      || findConfigSectionAnchor(container, 'OpenAI compatible Providers');
+    if (anchor instanceof HTMLElement && anchor.parentElement) {
+      if (anchor.nextElementSibling !== panel) {
+        anchor.insertAdjacentElement('afterend', panel);
+      }
+      return panel;
+    }
+    const header = container.querySelector('h1') && container.querySelector('h1').parentElement;
+    if (header instanceof HTMLElement && header.parentElement && header.nextElementSibling !== panel) {
+      header.insertAdjacentElement('afterend', panel);
+      return panel;
+    }
+    if (!panel.isConnected) {
+      container.insertBefore(panel, container.children[1] || null);
+    }
+    return panel;
+  }
+
+  function bindOpenAICompatTogglePanel(panel) {
+    if (!(panel instanceof HTMLElement)) return;
+    const inputs = Array.from(panel.querySelectorAll('input[data-cliproxy-compat-index]'));
+    inputs.forEach((input) => {
+      if (!(input instanceof HTMLInputElement) || input.dataset.cliproxyBound === 'true') return;
+      input.dataset.cliproxyBound = 'true';
+      input.addEventListener('change', async () => {
+        const index = Number(input.dataset.cliproxyCompatIndex);
+        const provider = openAICompatProviders[index];
+        if (!provider || !provider.name) return;
+        const previous = !input.checked;
+        openAICompatSavingNames.add(provider.name);
+        openAICompatProvidersError = '';
+        renderOpenAICompatTogglePanel(getPageContainer());
+        try {
+          await patchOpenAICompatProviderToggle(provider.name, input.checked);
+          openAICompatProviders = openAICompatProviders.map((item, itemIndex) => itemIndex === index
+            ? { ...item, 'append-reasoning-effort-to-model': input.checked }
+            : item);
+        } catch (error) {
+          input.checked = previous;
+          openAICompatProvidersError = `Failed to update ${provider.name}: ${error instanceof Error ? error.message : 'request failed'}`;
+        } finally {
+          openAICompatSavingNames.delete(provider.name);
+          renderOpenAICompatTogglePanel(getPageContainer());
+        }
+      });
+    });
+  }
+
+  function renderOpenAICompatTogglePanel(container) {
+    if (!isAIProvidersConfigPageReady() || !(container instanceof HTMLElement)) return;
+    const panel = ensureOpenAICompatTogglePanel(container);
+    if (!(panel instanceof HTMLElement)) return;
+    const providers = Array.isArray(openAICompatProviders) ? openAICompatProviders : [];
+    const signature = [
+      'openai-compat-toggle-panel',
+      openAICompatProvidersLoading ? 'loading' : 'ready',
+      openAICompatProvidersError,
+      Array.from(openAICompatSavingNames).sort().join(','),
+      providers.map((provider) => [
+        normalize(provider && provider.name),
+        provider && provider['append-reasoning-effort-to-model'] ? 'enabled' : 'disabled',
+        normalize(provider && provider['base-url']),
+      ].join(':')).join('|'),
+    ].join(':');
+    const rows = providers.map((provider, index) => {
+      const name = normalize(provider && provider.name) || `Provider ${index + 1}`;
+      const baseURL = normalize(provider && provider['base-url']) || 'No base URL configured';
+      const checked = !!(provider && provider['append-reasoning-effort-to-model']);
+      const saving = openAICompatSavingNames.has(name);
+      return `
+        <div class="cliproxy-enhancer__config-provider-row">
+          <div class="cliproxy-enhancer__config-provider-meta">
+            <div class="cliproxy-enhancer__config-provider-name">${escapeHTML(name)}</div>
+            <div class="cliproxy-enhancer__config-provider-url">${escapeHTML(baseURL)}</div>
+          </div>
+          <label class="cliproxy-enhancer__config-toggle">
+            <input type="checkbox" data-cliproxy-compat-index="${index}" ${checked ? 'checked' : ''} ${saving ? 'disabled' : ''}>
+            <span>Forward model ID as <code>&lt;model&gt;-&lt;reasoning_effort&gt;</code></span>
+          </label>
+        </div>
+      `;
+    }).join('');
+    const status = openAICompatProvidersError
+      ? `<div class="cliproxy-enhancer__config-status" data-state="error">${escapeHTML(openAICompatProvidersError)}</div>`
+      : `<div class="cliproxy-enhancer__config-status">${openAICompatProvidersLoading ? 'Loading OpenAI-compatible provider settings…' : 'Examples: gpt-5.4-high, gpt-5.3-codex-low. The toggle applies to all requests sent through that provider.'}</div>`;
+    setEnhancerMarkup(panel, signature, `
+      <div class="cliproxy-enhancer__label">OpenAI Compatible Providers</div>
+      <div class="cliproxy-enhancer__hint">Per-provider control for forwarding the selected reasoning effort as part of the upstream model ID.</div>
+      ${status}
+      <div class="cliproxy-enhancer__config-provider-list">
+        ${rows || '<div class="cliproxy-enhancer__muted">No OpenAI-compatible providers are configured.</div>'}
+      </div>
+    `);
+    bindOpenAICompatTogglePanel(panel);
+  }
+
+  async function refreshOpenAICompatTogglePanel(force) {
+    if (!isAIProvidersConfigPageReady()) return;
+    if (openAICompatProvidersLoading) return;
+    if (!force && openAICompatProviders.length > 0) {
+      renderOpenAICompatTogglePanel(getPageContainer());
+      return;
+    }
+    openAICompatProvidersLoading = true;
+    openAICompatProvidersError = '';
+    renderOpenAICompatTogglePanel(getPageContainer());
+    try {
+      openAICompatProviders = await fetchOpenAICompatProviders();
+    } catch (error) {
+      openAICompatProvidersError = `Failed to load OpenAI-compatible providers: ${error instanceof Error ? error.message : 'request failed'}`;
+    } finally {
+      openAICompatProvidersLoading = false;
+      renderOpenAICompatTogglePanel(getPageContainer());
+    }
+  }
+
+  function renderRequestEvents(container, stats, timeRange, usageSnapshot) {
     const requestBlock = findUsageChildBlock(container, 'Request Events');
     if (!requestBlock) return;
     requestBlock.style.display = 'none';
@@ -1726,11 +2337,49 @@
     if (requestBlock.nextElementSibling !== panel) {
       requestBlock.insertAdjacentElement('afterend', panel);
     }
-    const requests = filterRecentRequests(stats && stats.recent_requests || [], timeRange).slice(0, MAX_REQUEST_ROWS);
-    const signature = ['request-events', timeRange.key, requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.total_tokens || 0}:${item.latency_ms || 0}:${item.customer_id || ''}:${item.customer_email || ''}`).join('|')].join(':');
+    const snapshotRequests = filterUsageSnapshotDetails(usageSnapshot, timeRange).map(({ apiKey, model, detail }) => {
+      const tokens = detail && detail.tokens && typeof detail.tokens === 'object' ? detail.tokens : {};
+      const anthropicCache = detail && detail.anthropic_cache && typeof detail.anthropic_cache === 'object' ? detail.anthropic_cache : {};
+      const anthropicCacheRead = Number(anthropicCache.anthropic_cache_read_input_tokens || 0);
+      const anthropicCacheWrite = Number(anthropicCache.anthropic_cache_creation_input_tokens || 0);
+      const rawInput = Number(tokens.input_tokens || 0);
+      const effectiveInput = anthropicCacheRead > 0 || anthropicCacheWrite > 0
+        ? rawInput + anthropicCacheRead + anthropicCacheWrite
+        : rawInput;
+      return {
+        id: `${apiKey}:${model}:${detail && detail.timestamp || ''}`,
+        timestamp: detail && detail.timestamp,
+        model,
+        apiKey,
+        latency_ms: Number(detail && detail.latency_ms || 0),
+        customer_id: detail && detail.customer_id || '',
+        customer_email: detail && detail.customer_email || '',
+        reasoning_effort: 'n/a',
+        anthropic_rewrite_applied: !!anthropicCache.rewrite_applied,
+        anthropic_cache_ttl: anthropicCache.ttl || '',
+        anthropic_breakpoints: [
+          anthropicCache.tools_breakpoint ? 'tools' : '',
+          anthropicCache.system_breakpoint ? 'system' : '',
+          anthropicCache.messages_breakpoint ? 'messages' : '',
+        ].filter(Boolean).join(', '),
+        anthropic_overwrote_client_layout: !!anthropicCache.overwrote_client_layout,
+        anthropic_matched_agentic_loop: !!anthropicCache.matched_agentic_coding_loop,
+        anthropic_cache_read_input_tokens: anthropicCacheRead,
+        anthropic_cache_creation_input_tokens: anthropicCacheWrite,
+        input_tokens: rawInput,
+        effective_input_tokens: effectiveInput,
+        output_tokens: Number(tokens.output_tokens || 0),
+        reasoning_tokens: Number(tokens.reasoning_tokens || 0),
+        cached_tokens: Number(tokens.cached_tokens || 0),
+      };
+    });
+    const requests = (snapshotRequests.length ? snapshotRequests : filterRecentRequests(stats && stats.recent_requests || [], timeRange))
+      .sort((left, right) => new Date(right && right.timestamp || 0).getTime() - new Date(left && left.timestamp || 0).getTime())
+      .slice(0, MAX_REQUEST_ROWS);
+    const signature = ['request-events', timeRange.key, getUsageProviderFilter(), requests.map((item) => `${item.id || ''}:${item.timestamp || ''}:${item.apiKey || ''}:${item.model || ''}:${item.output_tokens || 0}:${item.customer_email || ''}`).join('|')].join(':');
     setEnhancerMarkup(panel, signature, `
       <div class="cliproxy-enhancer__label">Request Events</div>
-      <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} persisted request events within ${escapeHTML(timeRange.label)}.</div>
+      <div class="cliproxy-enhancer__hint">Latest ${MAX_REQUEST_ROWS} filtered request events within ${escapeHTML(timeRange.label)}.</div>
       <div class="cliproxy-enhancer__table-wrap">
         <table class="cliproxy-enhancer__table">
           <thead>
@@ -1797,13 +2446,17 @@
   }
 
   function renderUsageStatistics(container, stats, timeRange) {
-    updateServiceHealthRow(ensureServiceHealthRow(container), stats.summary || {}, timeRange.label);
-    patchUsageSummaryCards(container, stats || {}, timeRange);
-    patchCachedTokensCard(container, stats.summary || {}, timeRange);
-    patchAverageLatencyCard(container, stats.summary || {}, timeRange);
-    renderUsageTrendCharts(container, stats || {});
-    renderUsageModelBreakdownCharts(container, stats || {});
-    renderRequestEvents(container, stats, timeRange);
+    const cacheStats = getCacheStatisticsRenderSnapshot(stats);
+    const usageSnapshot = getUsageRenderSnapshot(stats);
+    updateServiceHealthRow(ensureServiceHealthRow(container), cacheStats.summary || {}, timeRange.label);
+    patchUsageSummaryCards(container, cacheStats || {}, timeRange);
+    patchCachedTokensCard(container, cacheStats.summary || {}, timeRange);
+    patchAverageLatencyCard(container, cacheStats.summary || {}, timeRange);
+    renderUsageTrendCharts(container, cacheStats || {});
+    renderUsageModelBreakdownCharts(container, cacheStats || {});
+    renderCredentialStatistics(container, usageSnapshot, timeRange);
+    renderModelStatistics(container, usageSnapshot, timeRange);
+    renderRequestEvents(container, cacheStats, timeRange, usageSnapshot);
   }
 
   function scheduleUsageRefreshRetry(delayMs) {
@@ -1822,6 +2475,7 @@
       const container = getPageContainer();
       if (!container) return;
       scheduleChartAnimationDisable();
+      hideUsageActionButtons(container);
       ensureUsageControls(container);
       applyUsageChartPeriodDefaults(container);
       hideUsageBlocks(container);
@@ -1876,6 +2530,8 @@
     let warningDispatch = null;
     let currentPageDispatch = null;
     let pageSizeDispatch = null;
+    let currentPage = null;
+    let pageSize = null;
     while (hook) {
       const value = hook.memoizedState;
       const dispatch = hook.queue && hook.queue.dispatch;
@@ -1884,8 +2540,10 @@
       } else if (viewModeDispatch && !warningDispatch && typeof value === 'boolean' && dispatch) {
         warningDispatch = dispatch;
       } else if (viewModeDispatch && warningDispatch && !currentPageDispatch && typeof value === 'number' && dispatch) {
+        currentPage = value;
         currentPageDispatch = dispatch;
       } else if (currentPageDispatch && !pageSizeDispatch && typeof value === 'number' && dispatch) {
+        pageSize = value;
         pageSizeDispatch = dispatch;
         break;
       }
@@ -1895,7 +2553,9 @@
       fiber,
       viewModeDispatch,
       warningDispatch,
+      currentPage,
       currentPageDispatch,
+      pageSize,
       pageSizeDispatch,
     };
   }
@@ -1922,14 +2582,16 @@
     }).filter(Boolean);
   }
 
-  function applyQuotaMode(context, mode) {
+  function applyQuotaMode(context, mode, options) {
+    const settings = options || {};
     const storedPageSize = getQuotaPageSize();
     const nextPageSize = mode === 'all' ? Math.max(context.count, 1) : storedPageSize;
+    const shouldUpdatePageSize = context.state.pageSize !== nextPageSize;
     quotaModes.set(context.key, mode);
     if (context.state.viewModeDispatch) context.state.viewModeDispatch('paged');
     if (context.state.warningDispatch) context.state.warningDispatch(false);
-    if (context.state.currentPageDispatch) context.state.currentPageDispatch(1);
-    if (context.state.pageSizeDispatch) context.state.pageSizeDispatch(nextPageSize);
+    if (settings.resetPage !== false && context.state.currentPageDispatch) context.state.currentPageDispatch(1);
+    if (shouldUpdatePageSize && context.state.pageSizeDispatch) context.state.pageSizeDispatch(nextPageSize);
   }
 
   function hideQuotaWarnings() {
@@ -2042,7 +2704,7 @@
       const contexts = getQuotaSectionContexts(container);
       contexts.forEach((context) => {
         const mode = quotaModes.get(context.key) || 'paged';
-        applyQuotaMode(context, mode);
+        applyQuotaMode(context, mode, { resetPage: false });
       });
     } finally {
       quotaRefreshInFlight = false;
@@ -2115,6 +2777,40 @@
     });
   }
 
+  function findDefaultCollapsedSectionToggle(container, title) {
+    if (!(container instanceof HTMLElement)) return null;
+    const needle = normalize(title);
+    const toggles = Array.from(container.querySelectorAll('button, [role="button"], summary'));
+    const directMatch = toggles.find((node) => normalize(node.textContent) === needle)
+      || toggles.find((node) => normalize(node.textContent).includes(needle));
+    if (directMatch) return directMatch;
+    const titleNode = Array.from(container.querySelectorAll('.title, h2, h3, h4, span, div')).find((node) => {
+      const text = normalize(node.textContent);
+      return text === needle || text.includes(needle);
+    });
+    return titleNode && titleNode.closest
+      ? (titleNode.closest('button, [role="button"], summary') || null)
+      : null;
+  }
+
+  function collapseDefaultSections(container) {
+    if (!(container instanceof HTMLElement)) return;
+    const routeKey = currentRouteKey();
+    DEFAULT_COLLAPSED_SECTION_TITLES.forEach((title) => {
+      const stateKey = `${routeKey}:${title}`;
+      if (collapsedSectionKeys.has(stateKey)) return;
+      const toggle = findDefaultCollapsedSectionToggle(container, title);
+      if (!toggle) return;
+      const expanded = normalize(toggle.getAttribute('aria-expanded'));
+      if (expanded && expanded !== 'true') {
+        collapsedSectionKeys.add(stateKey);
+        return;
+      }
+      toggle.click();
+      collapsedSectionKeys.add(stateKey);
+    });
+  }
+
   function syncRouteSoon() {
     if (routeSyncTimer) return;
     routeSyncTimer = window.setTimeout(() => {
@@ -2123,6 +2819,8 @@
       if (window.location.hash === '#cache-statistics') {
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/usage`);
       }
+      const container = getPageContainer();
+      collapseDefaultSections(container);
       if (isUsagePageReady()) {
         stopQuotaTimer();
         scheduleUsageFilterSync(lastObservedUsageFilterKey ? 150 : 0, { force: !lastObservedUsageFilterKey });
@@ -2136,6 +2834,15 @@
         lastObservedUsageFilterKey = '';
         refreshQuotaPage(false).catch(() => {});
         startQuotaTimer();
+        return;
+      }
+      if (isAIProvidersConfigPageReady()) {
+        stopUsageTimer();
+        stopQuotaTimer();
+        clearUsageFilterSyncTimer();
+        usageChartDefaultsApplied = false;
+        lastObservedUsageFilterKey = '';
+        refreshOpenAICompatTogglePanel(false).catch(() => {});
         return;
       }
       stopUsageTimer();

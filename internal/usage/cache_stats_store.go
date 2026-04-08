@@ -357,9 +357,6 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "event_key", "ALTER TABLE cache_statistics_requests ADD COLUMN event_key TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_statistics_event_key ON cache_statistics_requests(event_key)`); err != nil {
-		return fmt.Errorf("cache statistics store: init schema: %w", err)
-	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "reasoning_effort", "ALTER TABLE cache_statistics_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
@@ -397,6 +394,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_cache_read_input_tokens", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := s.backfillCacheStatisticsEventKeys(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_statistics_event_key ON cache_statistics_requests(event_key)`); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
 	if err := s.initPromptCacheIndex(); err != nil {
@@ -516,25 +519,37 @@ func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelL
 	return s.SnapshotByProvider(ctx, recentLimit, modelLimit, days, "")
 }
 
-func (s *CacheStatisticsStore) SnapshotByProvider(ctx context.Context, recentLimit, modelLimit, days int, provider string) (CacheStatisticsSnapshot, error) {
+func (s *CacheStatisticsStore) SnapshotByProviders(ctx context.Context, recentLimit, modelLimit, days int, providers []string) (CacheStatisticsSnapshot, error) {
 	if days <= 0 {
 		days = defaultCacheStatisticsDays
 	}
-	return s.snapshotSince(ctx, recentLimit, modelLimit, snapshotSince(days), provider)
+	return s.snapshotSinceProviders(ctx, recentLimit, modelLimit, snapshotSince(days), providers)
+}
+
+func (s *CacheStatisticsStore) SnapshotByProvider(ctx context.Context, recentLimit, modelLimit, days int, provider string) (CacheStatisticsSnapshot, error) {
+	return s.SnapshotByProviders(ctx, recentLimit, modelLimit, days, cacheStatisticsProvidersForFilter(provider))
 }
 
 func (s *CacheStatisticsStore) SnapshotSince(ctx context.Context, recentLimit, modelLimit int, since time.Time) (CacheStatisticsSnapshot, error) {
 	return s.SnapshotSinceByProvider(ctx, recentLimit, modelLimit, since, "")
 }
 
-func (s *CacheStatisticsStore) SnapshotSinceByProvider(ctx context.Context, recentLimit, modelLimit int, since time.Time, provider string) (CacheStatisticsSnapshot, error) {
+func (s *CacheStatisticsStore) SnapshotSinceByProviders(ctx context.Context, recentLimit, modelLimit int, since time.Time, providers []string) (CacheStatisticsSnapshot, error) {
 	if since.IsZero() {
-		return s.SnapshotByProvider(ctx, recentLimit, modelLimit, defaultCacheStatisticsDays, provider)
+		return s.SnapshotByProviders(ctx, recentLimit, modelLimit, defaultCacheStatisticsDays, providers)
 	}
-	return s.snapshotSince(ctx, recentLimit, modelLimit, since.UTC().Format(time.RFC3339Nano), provider)
+	return s.snapshotSinceProviders(ctx, recentLimit, modelLimit, since.UTC().Format(time.RFC3339Nano), providers)
+}
+
+func (s *CacheStatisticsStore) SnapshotSinceByProvider(ctx context.Context, recentLimit, modelLimit int, since time.Time, provider string) (CacheStatisticsSnapshot, error) {
+	return s.SnapshotSinceByProviders(ctx, recentLimit, modelLimit, since, cacheStatisticsProvidersForFilter(provider))
 }
 
 func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, modelLimit int, since string, provider string) (CacheStatisticsSnapshot, error) {
+	return s.snapshotSinceProviders(ctx, recentLimit, modelLimit, since, cacheStatisticsProvidersForFilter(provider))
+}
+
+func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recentLimit, modelLimit int, since string, providers []string) (CacheStatisticsSnapshot, error) {
 	result := CacheStatisticsSnapshot{Enabled: s != nil && s.db != nil}
 	if ctx == nil {
 		ctx = context.Background()
@@ -550,23 +565,23 @@ func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, m
 	}
 	result.DBPath = s.path
 
-	summary, err := s.querySummary(ctx, since, provider)
+	summary, err := s.querySummary(ctx, since, providers)
 	if err != nil {
 		return result, err
 	}
-	byModel, err := s.queryModelSummaries(ctx, modelLimit, since, provider)
+	byModel, err := s.queryModelSummaries(ctx, modelLimit, since, providers)
 	if err != nil {
 		return result, err
 	}
-	byDay, err := s.queryDaySummaries(ctx, since, provider)
+	byDay, err := s.queryDaySummaries(ctx, since, providers)
 	if err != nil {
 		return result, err
 	}
-	trendByModel, err := s.queryModelTrends(ctx, since, provider)
+	trendByModel, err := s.queryModelTrends(ctx, since, providers)
 	if err != nil {
 		return result, err
 	}
-	recent, err := s.queryRecentRequests(ctx, recentLimit, since, provider)
+	recent, err := s.queryRecentRequests(ctx, recentLimit, since, providers)
 	if err != nil {
 		return result, err
 	}
@@ -591,7 +606,7 @@ func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (Statisti
 	return s.StatisticsSnapshotByProvider(ctx, "")
 }
 
-func (s *CacheStatisticsStore) StatisticsSnapshotByProvider(ctx context.Context, provider string) (StatisticsSnapshot, error) {
+func (s *CacheStatisticsStore) StatisticsSnapshotByProviders(ctx context.Context, providers []string) (StatisticsSnapshot, error) {
 	result := StatisticsSnapshot{
 		APIs:           make(map[string]APISnapshot),
 		RequestsByDay:  make(map[string]int64),
@@ -633,7 +648,7 @@ SELECT
 FROM %s
 WHERE 1 = 1`, s.requestsTableName())
 	args := []any{}
-	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 	query += `
 ORDER BY requested_at ASC, id ASC`
 
@@ -770,7 +785,11 @@ ORDER BY requested_at ASC, id ASC`
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string, provider string) (CacheStatisticsSummary, error) {
+func (s *CacheStatisticsStore) StatisticsSnapshotByProvider(ctx context.Context, provider string) (StatisticsSnapshot, error) {
+	return s.StatisticsSnapshotByProviders(ctx, cacheStatisticsProvidersForFilter(provider))
+}
+
+func (s *CacheStatisticsStore) querySummary(ctx context.Context, since string, providers []string) (CacheStatisticsSummary, error) {
 	var summary CacheStatisticsSummary
 	query := fmt.Sprintf(`
 SELECT
@@ -794,7 +813,7 @@ SELECT
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
-	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(
 		&summary.TotalRequests,
 		&summary.SuccessRequests,
@@ -814,7 +833,7 @@ WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	return summary, nil
 }
 
-func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsModelSummary, error) {
+func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string, providers []string) ([]CacheStatisticsModelSummary, error) {
 	query := fmt.Sprintf(`
 SELECT
     model,
@@ -837,7 +856,7 @@ SELECT
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
-	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 	query += `
 GROUP BY model
 ORDER BY COUNT(*) DESC, model ASC
@@ -874,7 +893,7 @@ LIMIT ` + s.bind(len(args)+1)
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, provider string) ([]CacheStatisticsDaySummary, error) {
+func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, providers []string) ([]CacheStatisticsDaySummary, error) {
 	dayExpr := "substr(requested_at, 1, 10)"
 	if s.isPostgres() {
 		dayExpr = "to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
@@ -897,7 +916,7 @@ SELECT
 FROM %s
 WHERE requested_at >= %s`, dayExpr, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
-	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 	query += `
 GROUP BY day
 ORDER BY day ASC`
@@ -921,7 +940,7 @@ ORDER BY day ASC`
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) queryModelTrends(ctx context.Context, since string, provider string) (map[string]CacheStatisticsModelTrend, error) {
+func (s *CacheStatisticsStore) queryModelTrends(ctx context.Context, since string, providers []string) (map[string]CacheStatisticsModelTrend, error) {
 	result := make(map[string]CacheStatisticsModelTrend)
 	if ctx == nil {
 		ctx = context.Background()
@@ -947,7 +966,7 @@ SELECT
 FROM %s
 WHERE requested_at >= %s`, bucketExpr, s.requestsTableName(), s.bind(1))
 		args := []any{s.sinceArg(since)}
-		query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+		query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 		query += `
 GROUP BY model, bucket
 ORDER BY model ASC, bucket ASC`
@@ -1008,7 +1027,7 @@ ORDER BY model ASC, bucket ASC`
 	return result, nil
 }
 
-func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, provider string) ([]CacheStatisticsRequest, error) {
+func (s *CacheStatisticsStore) queryRecentRequests(ctx context.Context, limit int, since string, providers []string) ([]CacheStatisticsRequest, error) {
 	query := fmt.Sprintf(`
 SELECT
     id, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, CASE WHEN failed THEN 1 ELSE 0 END,
@@ -1019,7 +1038,7 @@ SELECT
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
-	query, args = appendCacheStatisticsProviderFilter(query, args, provider)
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
 	query += `
 ORDER BY requested_at DESC, id DESC
 LIMIT ` + s.bind(len(args)+1)
@@ -1082,7 +1101,11 @@ LIMIT ` + s.bind(len(args)+1)
 }
 
 func appendCacheStatisticsProviderFilter(query string, args []any, provider string) (string, []any) {
-	providers := cacheStatisticsProvidersForFilter(provider)
+	return appendCacheStatisticsProvidersFilter(query, args, cacheStatisticsProvidersForFilter(provider))
+}
+
+func appendCacheStatisticsProvidersFilter(query string, args []any, providers []string) (string, []any) {
+	providers = uniqueProviderNames(providers)
 	if len(providers) == 0 {
 		return query, args
 	}
@@ -1096,12 +1119,49 @@ func appendCacheStatisticsProviderFilter(query string, args []any, provider stri
 		}
 		args = append(args, item)
 	}
-	query += " AND provider IN (" + strings.Join(placeholders, ",") + ")"
+	query += " AND LOWER(provider) IN (" + strings.Join(placeholders, ",") + ")"
 	return query, args
 }
 
 func cacheStatisticsProvidersForFilter(provider string) []string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
+	return ProviderNamesForFilter(provider, nil)
+}
+
+func normalizeProviderName(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func uniqueProviderNames(names ...[]string) []string {
+	total := 0
+	for _, group := range names {
+		total += len(group)
+	}
+	if total == 0 {
+		return nil
+	}
+	result := make([]string, 0, total)
+	seen := make(map[string]struct{}, total)
+	for _, group := range names {
+		for _, name := range group {
+			normalized := normalizeProviderName(name)
+			if normalized == "" {
+				continue
+			}
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			result = append(result, normalized)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func ProviderNamesForFilter(provider string, openAICompatProviders []string) []string {
+	switch normalizeProviderName(provider) {
 	case "":
 		return nil
 	case "gemini":
@@ -1115,9 +1175,9 @@ func cacheStatisticsProvidersForFilter(provider string) []string {
 	case "ampcode":
 		return []string{"ampcode"}
 	case "openai-compatible", "openai_compatible", "openai compatible providers":
-		return []string{"openai-compatibility", "openrouter"}
+		return uniqueProviderNames([]string{"openai-compatibility", "openrouter"}, openAICompatProviders)
 	default:
-		return []string{strings.TrimSpace(provider)}
+		return uniqueProviderNames([]string{provider})
 	}
 }
 
@@ -1135,6 +1195,229 @@ func ensureCacheStatisticsColumn(db *sql.DB, tableName, columnName, alterSQL str
 	}
 	_, err := db.Exec(alterSQL)
 	return err
+}
+
+type cacheStatisticsEventKeyBackfillRow struct {
+	ID                                int64
+	EventKey                          string
+	RequestedAt                       any
+	Provider                          string
+	Model                             string
+	ReasoningEffort                   string
+	Source                            string
+	APIKey                            string
+	CustomerID                        string
+	CustomerEmail                     string
+	AuthID                            string
+	AuthIndex                         string
+	LatencyMs                         int64
+	Failed                            int
+	InputTokens                       int64
+	OutputTokens                      int64
+	ReasoningTokens                   int64
+	CachedTokens                      int64
+	TotalTokens                       int64
+	PromptCacheKey                    string
+	PreviousResponseID                string
+	ResponseID                        string
+	PromptCacheRetention              string
+	AnthropicRewriteApplied           int
+	AnthropicOverwroteClientLayout    int
+	AnthropicMatchedAgenticLoop       int
+	AnthropicCacheTTL                 string
+	AnthropicBreakpoints              string
+	AnthropicCacheCreationInputTokens int64
+	AnthropicCacheReadInputTokens     int64
+}
+
+func (r cacheStatisticsEventKeyBackfillRow) toEvent() (CacheStatisticsEvent, error) {
+	timestamp, err := scanCacheStatisticsTime(r.RequestedAt)
+	if err != nil {
+		return CacheStatisticsEvent{}, err
+	}
+	event := CacheStatisticsEvent{
+		Timestamp:       timestamp,
+		Provider:        r.Provider,
+		Model:           r.Model,
+		ReasoningEffort: r.ReasoningEffort,
+		Source:          r.Source,
+		APIKey:          r.APIKey,
+		CustomerID:      r.CustomerID,
+		CustomerEmail:   r.CustomerEmail,
+		AuthID:          r.AuthID,
+		AuthIndex:       r.AuthIndex,
+		LatencyMs:       r.LatencyMs,
+		Failed:          r.Failed != 0,
+		Tokens: TokenStats{
+			InputTokens:     r.InputTokens,
+			OutputTokens:    r.OutputTokens,
+			ReasoningTokens: r.ReasoningTokens,
+			CachedTokens:    r.CachedTokens,
+			TotalTokens:     r.TotalTokens,
+		},
+	}
+	if r.PromptCacheKey != "" || r.PreviousResponseID != "" || r.ResponseID != "" || r.PromptCacheRetention != "" {
+		event.Cache = &helps.CodexCacheObservability{
+			PromptCacheKey:       r.PromptCacheKey,
+			PreviousResponseID:   r.PreviousResponseID,
+			ResponseID:           r.ResponseID,
+			PromptCacheRetention: r.PromptCacheRetention,
+		}
+	}
+	if r.AnthropicRewriteApplied != 0 || r.AnthropicOverwroteClientLayout != 0 || r.AnthropicMatchedAgenticLoop != 0 || r.AnthropicCacheTTL != "" || r.AnthropicBreakpoints != "" || r.AnthropicCacheCreationInputTokens != 0 || r.AnthropicCacheReadInputTokens != 0 {
+		event.AnthropicCache = helps.AnthropicCacheObservability{
+			RewriteApplied:           r.AnthropicRewriteApplied != 0,
+			OverwroteClientLayout:    r.AnthropicOverwroteClientLayout != 0,
+			MatchedAgenticCodingLoop: r.AnthropicMatchedAgenticLoop != 0,
+			TTL:                      r.AnthropicCacheTTL,
+			CacheCreationInputTokens: r.AnthropicCacheCreationInputTokens,
+			CacheReadInputTokens:     r.AnthropicCacheReadInputTokens,
+		}
+	}
+	return event, nil
+}
+
+func (s *CacheStatisticsStore) backfillCacheStatisticsEventKeys() error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("cache statistics store: not initialized")
+	}
+	rows, err := s.db.Query(`
+SELECT
+    id,
+    event_key,
+    requested_at,
+    provider,
+    model,
+    reasoning_effort,
+    source,
+    api_key,
+    customer_id,
+    customer_email,
+    auth_id,
+    auth_index,
+    latency_ms,
+    failed,
+    input_tokens,
+    output_tokens,
+    reasoning_tokens,
+    cached_tokens,
+    total_tokens,
+    prompt_cache_key,
+    previous_response_id,
+    response_id,
+    prompt_cache_retention,
+    anthropic_rewrite_applied,
+    anthropic_overwrote_client_layout,
+    anthropic_matched_agentic_loop,
+    anthropic_cache_ttl,
+    anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens,
+    anthropic_cache_read_input_tokens
+FROM cache_statistics_requests
+ORDER BY id ASC`)
+	if err != nil {
+		return fmt.Errorf("cache statistics store: backfill event keys query: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]cacheStatisticsEventKeyBackfillRow, 0, 128)
+	for rows.Next() {
+		var entry cacheStatisticsEventKeyBackfillRow
+		if err := rows.Scan(
+			&entry.ID,
+			&entry.EventKey,
+			&entry.RequestedAt,
+			&entry.Provider,
+			&entry.Model,
+			&entry.ReasoningEffort,
+			&entry.Source,
+			&entry.APIKey,
+			&entry.CustomerID,
+			&entry.CustomerEmail,
+			&entry.AuthID,
+			&entry.AuthIndex,
+			&entry.LatencyMs,
+			&entry.Failed,
+			&entry.InputTokens,
+			&entry.OutputTokens,
+			&entry.ReasoningTokens,
+			&entry.CachedTokens,
+			&entry.TotalTokens,
+			&entry.PromptCacheKey,
+			&entry.PreviousResponseID,
+			&entry.ResponseID,
+			&entry.PromptCacheRetention,
+			&entry.AnthropicRewriteApplied,
+			&entry.AnthropicOverwroteClientLayout,
+			&entry.AnthropicMatchedAgenticLoop,
+			&entry.AnthropicCacheTTL,
+			&entry.AnthropicBreakpoints,
+			&entry.AnthropicCacheCreationInputTokens,
+			&entry.AnthropicCacheReadInputTokens,
+		); err != nil {
+			return fmt.Errorf("cache statistics store: backfill event keys scan: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("cache statistics store: backfill event keys iterate: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(entries))
+	updates := make([]struct {
+		id       int64
+		eventKey string
+	}, 0, len(entries))
+	for _, entry := range entries {
+		event, err := entry.toEvent()
+		if err != nil {
+			return fmt.Errorf("cache statistics store: backfill event keys build event: %w", err)
+		}
+		canonical := buildCacheStatisticsEventKey(event)
+		current := strings.TrimSpace(entry.EventKey)
+		nextKey := canonical
+		if nextKey == "" || hasSeenEventKey(seen, nextKey) {
+			nextKey = fmt.Sprintf("%s|%d", canonical, entry.ID)
+		}
+		if nextKey == "" {
+			nextKey = fmt.Sprintf("%d", entry.ID)
+		}
+		for hasSeenEventKey(seen, nextKey) {
+			nextKey = fmt.Sprintf("%s|%d", canonical, entry.ID)
+		}
+		seen[nextKey] = struct{}{}
+		if nextKey != current {
+			updates = append(updates, struct {
+				id       int64
+				eventKey string
+			}{id: entry.ID, eventKey: nextKey})
+		}
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("cache statistics store: backfill event keys begin tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	for _, update := range updates {
+		if _, err := tx.Exec(`UPDATE cache_statistics_requests SET event_key = ? WHERE id = ?`, update.eventKey, update.id); err != nil {
+			return fmt.Errorf("cache statistics store: backfill event keys update: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cache statistics store: backfill event keys commit: %w", err)
+	}
+	return nil
+}
+
+func hasSeenEventKey(seen map[string]struct{}, key string) bool {
+	_, ok := seen[key]
+	return ok
 }
 
 func resolveCacheStatisticsDBPath(cfg *config.Config, configFilePath string) (string, error) {

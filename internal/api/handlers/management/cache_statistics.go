@@ -16,6 +16,7 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 	modelLimit := readPositiveIntQuery(c, "model_limit", 10)
 	days := readPositiveIntQuery(c, "days", 14)
 	provider := strings.TrimSpace(c.Query("provider"))
+	providers := providerNamesForUsageFilter(h.cfg, provider)
 
 	store := usage.GetCacheStatisticsStore()
 	var (
@@ -31,9 +32,9 @@ func (h *Handler) GetCacheStatistics(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid since parameter"})
 			return
 		}
-		snapshot, err = store.SnapshotSinceByProvider(c.Request.Context(), limit, modelLimit, since, provider)
+		snapshot, err = store.SnapshotSinceByProviders(c.Request.Context(), limit, modelLimit, since, providers)
 	} else {
-		snapshot, err = store.SnapshotByProvider(c.Request.Context(), limit, modelLimit, days, provider)
+		snapshot, err = store.SnapshotByProviders(c.Request.Context(), limit, modelLimit, days, providers)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

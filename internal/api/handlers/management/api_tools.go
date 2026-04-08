@@ -21,6 +21,8 @@ import (
 
 const defaultAPICallTimeout = 60 * time.Second
 
+const quotaRefreshAPICallMaxConcurrent = 6
+
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiOAuthClientSecret = "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"
@@ -38,6 +40,8 @@ const (
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
+
+var quotaRefreshAPICallLimiter = make(chan struct{}, quotaRefreshAPICallMaxConcurrent)
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -132,6 +136,15 @@ func (h *Handler) APICall(c *gin.Context) {
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
+	releaseQuotaRefreshSlot, errThrottle := acquireQuotaRefreshAPICallSlot(c.Request.Context(), method, parsedURL)
+	if errThrottle != nil {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request canceled"})
+		return
+	}
+	if releaseQuotaRefreshSlot != nil {
+		defer releaseQuotaRefreshSlot()
+	}
+
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
@@ -213,6 +226,43 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func acquireQuotaRefreshAPICallSlot(ctx context.Context, method string, parsedURL *url.URL) (func(), error) {
+	if !isQuotaRefreshAPICall(method, parsedURL) {
+		return nil, nil
+	}
+	select {
+	case quotaRefreshAPICallLimiter <- struct{}{}:
+		return func() {
+			<-quotaRefreshAPICallLimiter
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func isQuotaRefreshAPICall(method string, parsedURL *url.URL) bool {
+	if !strings.EqualFold(strings.TrimSpace(method), http.MethodPost) || parsedURL == nil {
+		return false
+	}
+	path := strings.ToLower(strings.TrimSpace(parsedURL.EscapedPath()))
+	if path == "" {
+		return false
+	}
+	for _, needle := range []string{
+		"fetchavailablemodels",
+		"retrieveuserquota",
+		"loadcodeassist",
+		"/backend-api/wham/usage",
+		"/coding/v1/usages",
+		"/api/oauth/usage",
+	} {
+		if strings.Contains(path, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmptyString(values ...*string) string {

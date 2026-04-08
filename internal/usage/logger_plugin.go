@@ -429,7 +429,7 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		apiName,
 		modelName,
 		timestamp,
-		detail.Provider,
+		normalizeProviderName(detail.Provider),
 		detail.CustomerID,
 		detail.Source,
 		detail.AuthIndex,
@@ -453,7 +453,7 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 	}
 	detail := RequestDetail{
 		Timestamp:      timestamp,
-		Provider:       strings.TrimSpace(record.Provider),
+		Provider:       normalizeProviderName(record.Provider),
 		CustomerID:     strings.TrimSpace(record.CustomerID),
 		CustomerEmail:  strings.TrimSpace(record.CustomerEmail),
 		LatencyMs:      normaliseLatency(record.Latency),
@@ -477,7 +477,7 @@ func prepareRequestDetail(ctx context.Context, record coreusage.Record) (string,
 
 func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) CacheStatisticsEvent {
 	_, modelName, detail := prepareRequestDetail(ctx, record)
-	provider := strings.TrimSpace(record.Provider)
+	provider := normalizeProviderName(record.Provider)
 	if provider == "" {
 		provider = "unknown"
 	}
@@ -528,13 +528,18 @@ func redactRequestDetail(detail RequestDetail) RequestDetail {
 // FilterStatisticsSnapshotByProvider keeps only request details that belong to the
 // requested provider group and recomputes aggregates from the retained details.
 func FilterStatisticsSnapshotByProvider(snapshot StatisticsSnapshot, provider string) StatisticsSnapshot {
-	providers := cacheStatisticsProvidersForFilter(provider)
+	return FilterStatisticsSnapshotByProviders(snapshot, cacheStatisticsProvidersForFilter(provider))
+}
+
+// FilterStatisticsSnapshotByProviders keeps only request details that belong to
+// the supplied provider set and recomputes aggregates from the retained details.
+func FilterStatisticsSnapshotByProviders(snapshot StatisticsSnapshot, providers []string) StatisticsSnapshot {
 	if len(providers) == 0 {
 		return snapshot
 	}
 	allowed := make(map[string]struct{}, len(providers))
 	for _, item := range providers {
-		item = strings.ToLower(strings.TrimSpace(item))
+		item = normalizeProviderName(item)
 		if item == "" {
 			continue
 		}
@@ -595,7 +600,7 @@ func MergeStatisticsSnapshots(snapshots ...StatisticsSnapshot) StatisticsSnapsho
 }
 
 func statisticsDetailMatchesProvider(detail RequestDetail, allowed map[string]struct{}) bool {
-	provider := strings.ToLower(strings.TrimSpace(detail.Provider))
+	provider := normalizeProviderName(detail.Provider)
 	if provider == "" {
 		return false
 	}

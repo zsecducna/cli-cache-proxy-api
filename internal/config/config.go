@@ -510,6 +510,10 @@ type OpenAICompatibility struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// AppendReasoningEffortToModel rewrites upstream model IDs as
+	// "<model>-<reasoning_effort>" when a non-empty reasoning effort is present.
+	AppendReasoningEffortToModel bool `yaml:"append-reasoning-effort-to-model,omitempty" json:"append-reasoning-effort-to-model,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

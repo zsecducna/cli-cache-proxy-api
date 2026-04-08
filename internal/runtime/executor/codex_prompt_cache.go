@@ -152,7 +152,7 @@ func normalizeCodexPromptCacheRetention(rawJSON []byte, model string, allowPromp
 
 func supportsCodexExtendedPromptCacheRetention(model string) bool {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt-5.4", "gpt-5.2", "gpt-5.1-codex-max", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest", "gpt-5", "gpt-5-codex", "gpt-4.1":
+	case "gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.1-codex-max", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest", "gpt-5", "gpt-5-codex", "gpt-4.1":
 		return true
 	default:
 		return false

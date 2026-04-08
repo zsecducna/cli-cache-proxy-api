@@ -1016,6 +1016,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	applyQuotaAutomation(auth, nil)
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.mu.Lock()
@@ -1041,11 +1042,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
 		}
+		applyQuotaAutomation(auth, existing)
 		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
+	} else {
+		applyQuotaAutomation(auth, nil)
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()

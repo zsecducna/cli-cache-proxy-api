@@ -319,3 +319,96 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestFilterStatisticsSnapshotByProvidersRebuildsConsistentAggregates(t *testing.T) {
+	filterProviders := ProviderNamesForFilter("openai-compatible", []string{"BoHe"})
+	snapshot := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"persisted-openrouter": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{{
+							Timestamp: time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC),
+							Provider:  "OpenRouter",
+							Source:    "persisted@example.com",
+							AuthIndex: "0",
+							Tokens: TokenStats{
+								InputTokens:  10,
+								OutputTokens: 2,
+								TotalTokens:  12,
+							},
+						}},
+					},
+				},
+			},
+			"live-bohe-key": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1-mini": {
+						Details: []RequestDetail{{
+							Timestamp: time.Date(2026, 4, 9, 10, 1, 0, 0, time.UTC),
+							Provider:  "BoHe",
+							Source:    "live@example.com",
+							AuthIndex: "1",
+							Tokens: TokenStats{
+								InputTokens:  3,
+								OutputTokens: 1,
+								TotalTokens:  4,
+							},
+						}},
+					},
+				},
+			},
+			"claude-key": {
+				Models: map[string]ModelSnapshot{
+					"claude-opus-4-6": {
+						Details: []RequestDetail{{
+							Timestamp: time.Date(2026, 4, 9, 10, 2, 0, 0, time.UTC),
+							Provider:  "claude",
+							Source:    "claude@example.com",
+							AuthIndex: "2",
+							Tokens: TokenStats{
+								InputTokens:  50,
+								OutputTokens: 10,
+								TotalTokens:  60,
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	filtered := FilterStatisticsSnapshotByProviders(snapshot, filterProviders)
+	if filtered.TotalRequests != 2 {
+		t.Fatalf("total_requests = %d, want 2", filtered.TotalRequests)
+	}
+	if filtered.TotalTokens != 16 {
+		t.Fatalf("total_tokens = %d, want 16", filtered.TotalTokens)
+	}
+	if filtered.RequestsByDay["2026-04-09"] != 2 {
+		t.Fatalf("requests_by_day = %+v, want one day with 2 requests", filtered.RequestsByDay)
+	}
+	if len(filtered.APIs) != 2 {
+		t.Fatalf("apis len = %d, want 2", len(filtered.APIs))
+	}
+	if _, ok := filtered.APIs["claude-key"]; ok {
+		t.Fatalf("unexpected claude bucket in %+v", filtered.APIs)
+	}
+
+	modelRequests := int64(0)
+	for _, apiSnapshot := range filtered.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			modelRequests += modelSnapshot.TotalRequests
+			for _, detail := range modelSnapshot.Details {
+				switch detail.Provider {
+				case "OpenRouter", "BoHe":
+				default:
+					t.Fatalf("unexpected provider %q in detail %+v", detail.Provider, detail)
+				}
+			}
+		}
+	}
+	if modelRequests != filtered.TotalRequests {
+		t.Fatalf("summed model requests = %d, want %d", modelRequests, filtered.TotalRequests)
+	}
+}

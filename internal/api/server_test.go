@@ -293,6 +293,12 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "Quota auto refresh") || !strings.Contains(body, "Paged view size") {
 		t.Fatalf("management page missing quota control copy: %s", body)
 	}
+	if !strings.Contains(body, "function applyQuotaMode(context, mode, options)") || !strings.Contains(body, "const shouldUpdatePageSize = context.state.pageSize !== nextPageSize;") || !strings.Contains(body, "if (shouldUpdatePageSize && context.state.pageSizeDispatch) context.state.pageSizeDispatch(nextPageSize);") || !strings.Contains(body, "applyQuotaMode(context, mode, { resetPage: false });") {
+		t.Fatalf("management enhancer should preserve the active quota page during background route syncs by skipping redundant page-size dispatches and only resetting pagination for explicit quota mode changes: %s", body)
+	}
+	if !strings.Contains(body, "DEFAULT_COLLAPSED_SECTION_TITLES") || !strings.Contains(body, "API Details") || !strings.Contains(body, "Model Statistics") || !strings.Contains(body, "Credential Statistics") || !strings.Contains(body, "Model Pricing Settings") || !strings.Contains(body, "collapseDefaultSections(container);") {
+		t.Fatalf("management page should auto-collapse the requested detail sections by default, including model pricing settings: %s", body)
+	}
 	if !strings.Contains(body, "cliproxy-usage-service-health") || !strings.Contains(body, "cliproxy-request-events") {
 		t.Fatalf("management page missing stable custom section markers: %s", body)
 	}
@@ -308,8 +314,11 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if strings.Contains(body, "Total Input") {
 		t.Fatalf("management page should not render the removed Total Input column: %s", body)
 	}
-	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI Compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") || !strings.Contains(body, "function getUsageProviderFilter()") || !strings.Contains(body, "appendUsageProviderFilter") {
+	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") || !strings.Contains(body, "function getUsageProviderFilter()") || !strings.Contains(body, "appendUsageProviderFilter") {
 		t.Fatalf("management page missing provider filter controls/options and usage request rewrite: %s", body)
+	}
+	if !strings.Contains(body, "hideUsageActionButtons(container);") || !strings.Contains(body, "text !== 'Export' && text !== 'Import' && text !== 'Refresh'") {
+		t.Fatalf("management page should hide the native usage Export/Import/Refresh buttons while keeping refresh automation available: %s", body)
 	}
 	if !strings.Contains(body, "const sameFilter = lastUsageStatisticsProvider === getUsageProviderFilter();") || !strings.Contains(body, "lastUsageStatisticsProvider = getUsageProviderFilter();") {
 		t.Fatalf("management page should invalidate cached usage stats when provider filter changes: %s", body)
@@ -344,8 +353,8 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "patchAverageLatencyCard") || !strings.Contains(body, "Avg Latency") || !strings.Contains(body, "summary.avg_latency_ms") {
 		t.Fatalf("management enhancer should render an average latency card from the usage summary: %s", body)
 	}
-	if !strings.Contains(body, "[class*=\"UsagePage-module__statsGrid\"]") || !strings.Contains(body, "min-height: 132px;") || !strings.Contains(body, "justify-content: space-between;") {
-		t.Fatalf("management enhancer should keep the six summary cards visually aligned after it rewrites their contents: %s", body)
+	if !strings.Contains(body, "[class*=\"UsagePage-module__statsGrid\"]") || !strings.Contains(body, "height: 132px;") || !strings.Contains(body, "min-height: 132px;") || !strings.Contains(body, "justify-content: space-between;") || !strings.Contains(body, "-webkit-line-clamp: 2;") {
+		t.Fatalf("management enhancer should keep the six summary cards visually aligned to one consistent card height after it rewrites their contents: %s", body)
 	}
 	if !strings.Contains(body, "triggerNativeUsageRefresh") || !strings.Contains(body, "scheduleNativeUsageRefreshRetry") || !strings.Contains(body, "provider.addEventListener('change'") {
 		t.Fatalf("management enhancer should also trigger the native usage refresh path so React-owned cards and charts follow provider filter and auto-refresh updates: %s", body)
@@ -377,8 +386,11 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "renderUsageTrendCharts") || !strings.Contains(body, "trend_by_model") || !strings.Contains(body, "Token Usage Trends") || !strings.Contains(body, "Request Trends") {
 		t.Fatalf("management enhancer should replace the native aggregate trend charts with provider/time-filtered model trend charts driven by cache statistics: %s", body)
 	}
-	if !strings.Contains(body, "renderUsageModelBreakdownCharts") || !strings.Contains(body, "Token Type Breakdown") || !strings.Contains(body, "Cost Overview") || !strings.Contains(body, "Set model prices to view per-model cost overview.") {
+	if !strings.Contains(body, "renderUsageModelBreakdownCharts") || !strings.Contains(body, "Token Type Breakdown") || !strings.Contains(body, "Cost Overview") || !strings.Contains(body, "Set model prices to view per-model cost overview.") || !strings.Contains(body, "buildSeriesChartSVG") || !strings.Contains(body, "formatModelAxisLabel") {
 		t.Fatalf("management enhancer should replace the remaining aggregate usage breakdown cards with model-based token and cost charts driven by cache statistics summaries: %s", body)
+	}
+	if !strings.Contains(body, "captureNativeUsageSnapshotFromResponse") || !strings.Contains(body, "getUsageRenderSnapshot") || !strings.Contains(body, "filterUsageSnapshotDetails") || !strings.Contains(body, "renderCredentialStatistics") || !strings.Contains(body, "renderModelStatistics") {
+		t.Fatalf("management enhancer should capture the filtered native usage snapshot and reuse it for the drift-prone usage detail sections: %s", body)
 	}
 	if !strings.Contains(body, "disableChartAnimationOptions") || !strings.Contains(body, "scheduleChartAnimationDisable") || !strings.Contains(body, "canvas.$chartjs") || !strings.Contains(body, "options.animation = false;") || !strings.Contains(body, "findChartInstanceForCanvas") || !strings.Contains(body, "chart.update('none')") {
 		t.Fatalf("management enhancer should disable canvas chart animations through both the chart fiber options path and the live chart instance redraw path so all management charts redraw without motion: %s", body)
@@ -577,6 +589,12 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 
 func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testing.T) {
 	server := newManagementTestServer(t)
+	server.cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{
+		{
+			Name:    "Bohe",
+			BaseURL: "https://bohe.example.com/v1",
+		},
+	}
 	store := usage.GetCacheStatisticsStore()
 	if store == nil {
 		t.Fatal("expected cache statistics store to be configured")
@@ -607,6 +625,12 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 			Provider:  "openrouter",
 			Model:     "gpt-4.1-mini",
 			Tokens:    usage.TokenStats{InputTokens: 40, OutputTokens: 5, TotalTokens: 45},
+		},
+		{
+			Timestamp: now.Add(-90 * time.Second),
+			Provider:  "bohe",
+			Model:     "gpt-4.1-nano",
+			Tokens:    usage.TokenStats{InputTokens: 35, OutputTokens: 5, TotalTokens: 40},
 		},
 		{
 			Timestamp: now.Add(-1 * time.Minute),
@@ -668,7 +692,7 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 	}
 
 	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=gemini", 2, "gemini", "gemini-cli")
-	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 2, "openai-compatibility", "openrouter")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 3, "openai-compatibility", "openrouter", "bohe")
 	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", 1, "claude")
 }
 
@@ -1042,6 +1066,100 @@ func TestManagementUsageEndpointMergesPersistedAndLiveInMemoryStatistics(t *test
 	}
 	if _, ok := payload.Usage.APIs["claude-live-key-789"]; ok {
 		t.Fatalf("unexpected provider-mismatched live api bucket in filtered snapshot")
+	}
+}
+
+func TestManagementUsageEndpointFiltersOpenAICompatibleProviderGroup(t *testing.T) {
+	server := newManagementTestServer(t)
+	server.cfg.OpenAICompatibility = []proxyconfig.OpenAICompatibility{
+		{
+			Name:    "Bohe",
+			BaseURL: "https://bohe.example.com/v1",
+		},
+	}
+	store := usage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store to be configured")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, event := range []usage.CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-2 * time.Minute),
+			Provider:  "openrouter",
+			Model:     "gpt-4.1",
+			AuthID:    "openrouter-persisted.json",
+			AuthIndex: "idx-openrouter",
+			Tokens:    usage.TokenStats{InputTokens: 20, OutputTokens: 5, TotalTokens: 25},
+		},
+		{
+			Timestamp: now.Add(-90 * time.Second),
+			Provider:  "bohe",
+			Model:     "gpt-4.1-mini",
+			AuthID:    "bohe-persisted.json",
+			AuthIndex: "idx-bohe",
+			Tokens:    usage.TokenStats{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+		},
+	} {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	liveStats := usage.NewRequestStatistics()
+	server.mgmt.SetUsageStatistics(liveStats)
+	liveStats.Record(context.Background(), coreusage.Record{
+		Provider:    "bohe",
+		Model:       "gpt-4.1-nano",
+		APIKey:      "bohe-live-key",
+		RequestedAt: now.Add(-30 * time.Second),
+		AuthID:      "bohe-live.json",
+		AuthIndex:   "idx-bohe-live",
+		Detail:      coreusage.Detail{InputTokens: 3, OutputTokens: 1, TotalTokens: 4},
+	})
+	liveStats.Record(context.Background(), coreusage.Record{
+		Provider:    "claude",
+		Model:       "claude-sonnet-4-6",
+		APIKey:      "claude-live-key",
+		RequestedAt: now.Add(-20 * time.Second),
+		AuthID:      "claude-live.json",
+		AuthIndex:   "idx-claude-live",
+		Detail:      coreusage.Detail{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/usage?provider=openai-compatible", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var payload struct {
+		Usage          usage.StatisticsSnapshot `json:"usage"`
+		FailedRequests int64                    `json:"failed_requests"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if payload.Usage.TotalRequests != 3 {
+		t.Fatalf("total_requests = %d, want 3", payload.Usage.TotalRequests)
+	}
+	if payload.Usage.TotalTokens != 41 {
+		t.Fatalf("total_tokens = %d, want 41", payload.Usage.TotalTokens)
+	}
+	if _, ok := payload.Usage.APIs["openrouter-persisted.json"]; !ok {
+		t.Fatalf("missing openrouter persisted bucket")
+	}
+	if _, ok := payload.Usage.APIs["bohe-persisted.json"]; !ok {
+		t.Fatalf("missing bohe persisted bucket")
+	}
+	if _, ok := payload.Usage.APIs["bohe-live-key"]; !ok {
+		t.Fatalf("missing bohe live bucket")
+	}
+	if _, ok := payload.Usage.APIs["claude-live-key"]; ok {
+		t.Fatalf("unexpected non-openai-compatible live bucket in filtered snapshot")
 	}
 }
 

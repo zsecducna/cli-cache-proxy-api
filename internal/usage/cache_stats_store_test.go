@@ -286,6 +286,283 @@ INSERT INTO cache_statistics_requests (
 	}
 }
 
+func TestCacheStatisticsStoreBackfillsDuplicateEventKeysAndPreservesDedupe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	seedTime := time.Date(2026, 4, 8, 15, 4, 5, 0, time.UTC)
+	_, err = db.Exec(`
+CREATE TABLE cache_statistics_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL DEFAULT '',
+    requested_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    reasoning_effort TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
+    customer_id TEXT NOT NULL DEFAULT '',
+    customer_email TEXT NOT NULL DEFAULT '',
+    auth_id TEXT NOT NULL,
+    auth_index TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    cached_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    prompt_cache_key TEXT NOT NULL,
+    previous_response_id TEXT NOT NULL,
+    response_id TEXT NOT NULL,
+    prompt_cache_retention TEXT NOT NULL,
+    anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0,
+    anthropic_overwrote_client_layout INTEGER NOT NULL DEFAULT 0,
+    anthropic_matched_agentic_loop INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_ttl TEXT NOT NULL DEFAULT '',
+    anthropic_breakpoints TEXT NOT NULL DEFAULT '',
+    anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO cache_statistics_requests (
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, failed,
+    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
+    anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
+) VALUES (
+    '', ?, 'codex', 'gpt-5.4', '', 'user@example.com', '', '', '', 'auth-1', '0', 1000, 0,
+    100, 20, 10, 30, 130,
+    'cache-key', 'prev-id', 'resp-id', '24h',
+    0, 0, 0, '', '', 0, 0
+), (
+    'legacy-duplicate', ?, 'codex', 'gpt-5.4', '', 'user@example.com', '', '', '', 'auth-1', '0', 1000, 0,
+    100, 20, 10, 30, 130,
+    'cache-key', 'prev-id', 'resp-id', '24h',
+    0, 0, 0, '', '', 0, 0
+);`, seedTime.Format(time.RFC3339Nano), seedTime.Add(1*time.Second).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("seed legacy schema error = %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var totalRows, distinctEventKeys, emptyEventKeys int
+	if err := store.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT event_key), SUM(CASE WHEN event_key = '' THEN 1 ELSE 0 END) FROM cache_statistics_requests`).Scan(&totalRows, &distinctEventKeys, &emptyEventKeys); err != nil {
+		t.Fatalf("query backfilled keys error = %v", err)
+	}
+	if totalRows != 2 {
+		t.Fatalf("total rows = %d, want 2", totalRows)
+	}
+	if distinctEventKeys != 2 {
+		t.Fatalf("distinct event_key count = %d, want 2", distinctEventKeys)
+	}
+	if emptyEventKeys != 0 {
+		t.Fatalf("empty event_key rows = %d, want 0", emptyEventKeys)
+	}
+
+	expectedKey := buildCacheStatisticsEventKey(CacheStatisticsEvent{
+		Timestamp: seedTime,
+		Provider:  "codex",
+		Model:     "gpt-5.4",
+		Source:    "user@example.com",
+		AuthID:    "auth-1",
+		AuthIndex: "0",
+		LatencyMs: 1000,
+		Tokens: TokenStats{
+			InputTokens:     100,
+			OutputTokens:    20,
+			ReasoningTokens: 10,
+			CachedTokens:    30,
+			TotalTokens:     130,
+		},
+		Cache: &helps.CodexCacheObservability{
+			PromptCacheKey:       "cache-key",
+			PreviousResponseID:   "prev-id",
+			ResponseID:           "resp-id",
+			PromptCacheRetention: "24h",
+		},
+	})
+	var matchingRows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM cache_statistics_requests WHERE event_key = ?`, expectedKey).Scan(&matchingRows); err != nil {
+		t.Fatalf("query canonical event key error = %v", err)
+	}
+	if matchingRows != 1 {
+		t.Fatalf("canonical event_key rows = %d, want 1", matchingRows)
+	}
+
+	if err := store.InsertEvent(context.Background(), CacheStatisticsEvent{
+		Timestamp: seedTime,
+		Provider:  "codex",
+		Model:     "gpt-5.4",
+		Source:    "user@example.com",
+		AuthID:    "auth-1",
+		AuthIndex: "0",
+		LatencyMs: 1000,
+		Tokens: TokenStats{
+			InputTokens:     100,
+			OutputTokens:    20,
+			ReasoningTokens: 10,
+			CachedTokens:    30,
+			TotalTokens:     130,
+		},
+		Cache: &helps.CodexCacheObservability{
+			PromptCacheKey:       "cache-key",
+			PreviousResponseID:   "prev-id",
+			ResponseID:           "resp-id",
+			PromptCacheRetention: "24h",
+		},
+	}); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM cache_statistics_requests`).Scan(&totalRows); err != nil {
+		t.Fatalf("query total rows after dedupe error = %v", err)
+	}
+	if totalRows != 2 {
+		t.Fatalf("total rows after dedupe = %d, want 2", totalRows)
+	}
+}
+
+func TestCacheStatisticsStoreCanonicalizesLegacyEventKeyForFutureDedupe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	seedTime := time.Date(2026, 4, 8, 15, 4, 5, 0, time.UTC)
+	_, err = db.Exec(`
+CREATE TABLE cache_statistics_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL DEFAULT '',
+    requested_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    reasoning_effort TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT '',
+    customer_id TEXT NOT NULL DEFAULT '',
+    customer_email TEXT NOT NULL DEFAULT '',
+    auth_id TEXT NOT NULL,
+    auth_index TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    cached_tokens INTEGER NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    prompt_cache_key TEXT NOT NULL,
+    previous_response_id TEXT NOT NULL,
+    response_id TEXT NOT NULL,
+    prompt_cache_retention TEXT NOT NULL,
+    anthropic_rewrite_applied INTEGER NOT NULL DEFAULT 0,
+    anthropic_overwrote_client_layout INTEGER NOT NULL DEFAULT 0,
+    anthropic_matched_agentic_loop INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_ttl TEXT NOT NULL DEFAULT '',
+    anthropic_breakpoints TEXT NOT NULL DEFAULT '',
+    anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO cache_statistics_requests (
+    event_key, requested_at, provider, model, reasoning_effort, source, api_key, customer_id, customer_email, auth_id, auth_index, latency_ms, failed,
+    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+    prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
+    anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
+) VALUES (
+    'legacy-placeholder', ?, 'codex', 'gpt-5.4', '', 'user@example.com', '', '', '', 'auth-1', '0', 1000, 0,
+    100, 20, 10, 30, 130,
+    'cache-key', 'prev-id', 'resp-id', '24h',
+    0, 0, 0, '', '', 0, 0
+);`, seedTime.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("seed legacy schema error = %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	expectedKey := buildCacheStatisticsEventKey(CacheStatisticsEvent{
+		Timestamp: seedTime,
+		Provider:  "codex",
+		Model:     "gpt-5.4",
+		Source:    "user@example.com",
+		AuthID:    "auth-1",
+		AuthIndex: "0",
+		LatencyMs: 1000,
+		Tokens: TokenStats{
+			InputTokens:     100,
+			OutputTokens:    20,
+			ReasoningTokens: 10,
+			CachedTokens:    30,
+			TotalTokens:     130,
+		},
+		Cache: &helps.CodexCacheObservability{
+			PromptCacheKey:       "cache-key",
+			PreviousResponseID:   "prev-id",
+			ResponseID:           "resp-id",
+			PromptCacheRetention: "24h",
+		},
+	})
+
+	var storedKey string
+	if err := store.db.QueryRow(`SELECT event_key FROM cache_statistics_requests`).Scan(&storedKey); err != nil {
+		t.Fatalf("query stored event_key error = %v", err)
+	}
+	if storedKey != expectedKey {
+		t.Fatalf("stored event_key = %q, want canonical %q", storedKey, expectedKey)
+	}
+
+	if err := store.InsertEvent(context.Background(), CacheStatisticsEvent{
+		Timestamp: seedTime,
+		Provider:  "codex",
+		Model:     "gpt-5.4",
+		Source:    "user@example.com",
+		AuthID:    "auth-1",
+		AuthIndex: "0",
+		LatencyMs: 1000,
+		Tokens: TokenStats{
+			InputTokens:     100,
+			OutputTokens:    20,
+			ReasoningTokens: 10,
+			CachedTokens:    30,
+			TotalTokens:     130,
+		},
+		Cache: &helps.CodexCacheObservability{
+			PromptCacheKey:       "cache-key",
+			PreviousResponseID:   "prev-id",
+			ResponseID:           "resp-id",
+			PromptCacheRetention: "24h",
+		},
+	}); err != nil {
+		t.Fatalf("InsertEvent() error = %v", err)
+	}
+
+	var totalRows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM cache_statistics_requests`).Scan(&totalRows); err != nil {
+		t.Fatalf("query total rows after dedupe error = %v", err)
+	}
+	if totalRows != 1 {
+		t.Fatalf("total rows after dedupe = %d, want 1", totalRows)
+	}
+}
+
 func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	store, err := OpenCacheStatisticsStore(path)
@@ -381,6 +658,91 @@ func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 		wantEmail := customerID + "@example.com"
 		if modelSnapshot.Details[0].CustomerEmail != wantEmail {
 			t.Fatalf("detail customer_email = %q, want %q", modelSnapshot.Details[0].CustomerEmail, wantEmail)
+		}
+	}
+}
+
+func TestCacheStatisticsStoreProviderSetFiltersAreCaseInsensitive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	for _, event := range []CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-2 * time.Minute),
+			Provider:  "OpenRouter",
+			Model:     "gpt-4.1",
+			AuthID:    "persisted-openrouter",
+			AuthIndex: "0",
+			Tokens:    TokenStats{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Minute),
+			Provider:  "BoHe",
+			Model:     "gpt-4.1-mini",
+			AuthID:    "persisted-bohe",
+			AuthIndex: "1",
+			Tokens:    TokenStats{InputTokens: 3, OutputTokens: 1, TotalTokens: 4},
+		},
+		{
+			Timestamp: now.Add(-30 * time.Second),
+			Provider:  "claude",
+			Model:     "claude-opus-4-6",
+			AuthID:    "persisted-claude",
+			AuthIndex: "2",
+			Tokens:    TokenStats{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+		},
+	} {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	providers := ProviderNamesForFilter("openai-compatible", []string{"BoHe"})
+	cacheSnapshot, err := store.SnapshotByProviders(context.Background(), 10, 10, 14, providers)
+	if err != nil {
+		t.Fatalf("SnapshotByProviders() error = %v", err)
+	}
+	if cacheSnapshot.Summary.TotalRequests != 2 {
+		t.Fatalf("summary total_requests = %d, want 2", cacheSnapshot.Summary.TotalRequests)
+	}
+	if len(cacheSnapshot.ByModel) != 2 {
+		t.Fatalf("by_model len = %d, want 2", len(cacheSnapshot.ByModel))
+	}
+	if len(cacheSnapshot.RecentRequests) != 2 {
+		t.Fatalf("recent requests len = %d, want 2", len(cacheSnapshot.RecentRequests))
+	}
+	for _, item := range cacheSnapshot.RecentRequests {
+		switch item.Provider {
+		case "OpenRouter", "BoHe":
+		default:
+			t.Fatalf("unexpected provider %q in recent requests %+v", item.Provider, cacheSnapshot.RecentRequests)
+		}
+	}
+
+	usageSnapshot, err := store.StatisticsSnapshotByProviders(context.Background(), providers)
+	if err != nil {
+		t.Fatalf("StatisticsSnapshotByProviders() error = %v", err)
+	}
+	if usageSnapshot.TotalRequests != 2 {
+		t.Fatalf("usage total_requests = %d, want 2", usageSnapshot.TotalRequests)
+	}
+	if len(usageSnapshot.APIs) != 2 {
+		t.Fatalf("usage apis len = %d, want 2", len(usageSnapshot.APIs))
+	}
+	for bucket, apiSnapshot := range usageSnapshot.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				switch detail.Provider {
+				case "OpenRouter", "BoHe":
+				default:
+					t.Fatalf("unexpected provider %q in bucket %q detail %+v", detail.Provider, bucket, detail)
+				}
+			}
 		}
 	}
 }

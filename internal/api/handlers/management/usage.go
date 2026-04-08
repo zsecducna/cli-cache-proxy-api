@@ -23,10 +23,17 @@ type usageImportPayload struct {
 
 func (h *Handler) currentUsageSnapshot(ctx *gin.Context) usage.StatisticsSnapshot {
 	provider := strings.TrimSpace(ctx.Query("provider"))
+	providers := providerNamesForUsageFilter(h.cfg, provider)
+	filterSnapshot := func(snapshot usage.StatisticsSnapshot) usage.StatisticsSnapshot {
+		if len(providers) == 0 {
+			return snapshot
+		}
+		return usage.FilterStatisticsSnapshotByProviders(snapshot, providers)
+	}
 	var persisted usage.StatisticsSnapshot
 	hasPersisted := false
 	if store := usage.GetCacheStatisticsStore(); store != nil {
-		if snapshot, err := store.StatisticsSnapshotByProvider(ctx.Request.Context(), provider); err == nil {
+		if snapshot, err := store.StatisticsSnapshotByProviders(ctx.Request.Context(), providers); err == nil {
 			persisted = snapshot
 			hasPersisted = true
 		}
@@ -34,18 +41,16 @@ func (h *Handler) currentUsageSnapshot(ctx *gin.Context) usage.StatisticsSnapsho
 	hasLive := h != nil && h.usageStats != nil
 	if !hasLive {
 		if hasPersisted {
-			return persisted
+			return filterSnapshot(persisted)
 		}
 		return usage.StatisticsSnapshot{}
 	}
 	live := h.usageStats.Snapshot()
-	if provider != "" {
-		live = usage.FilterStatisticsSnapshotByProvider(live, provider)
-	}
+	live = filterSnapshot(live)
 	if !hasPersisted {
 		return live
 	}
-	return usage.MergeStatisticsSnapshots(persisted, live)
+	return filterSnapshot(usage.MergeStatisticsSnapshots(persisted, live))
 }
 
 // GetUsageStatistics returns the request statistics snapshot, preferring persisted cache-statistics history when available.

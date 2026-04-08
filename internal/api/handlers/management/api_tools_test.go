@@ -1,10 +1,18 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -109,5 +117,141 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestIsQuotaRefreshAPICallMatchesKnownQuotaEndpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "antigravity models", raw: "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", want: true},
+		{name: "gemini quota", raw: "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", want: true},
+		{name: "gemini code assist", raw: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", want: true},
+		{name: "claude quota", raw: "https://api.anthropic.com/api/oauth/usage", want: true},
+		{name: "codex quota", raw: "https://chatgpt.com/backend-api/wham/usage", want: true},
+		{name: "kimi quota", raw: "https://api.kimi.com/coding/v1/usages", want: true},
+		{name: "unrelated endpoint", raw: "https://api.example.com/v1/ping", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error = %v", tt.raw, err)
+			}
+			if got := isQuotaRefreshAPICall(http.MethodPost, parsed); got != tt.want {
+				t.Fatalf("isQuotaRefreshAPICall(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAPICallThrottlesQuotaRefreshFanoutRequests(t *testing.T) {
+	t.Parallel()
+
+	const requestCount = 3
+
+	var current int32
+	var peak int32
+	entered := make(chan struct{}, requestCount)
+	release := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := atomic.AddInt32(&current, 1)
+		for {
+			prev := atomic.LoadInt32(&peak)
+			if cur <= prev {
+				break
+			}
+			if atomic.CompareAndSwapInt32(&peak, prev, cur) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		atomic.AddInt32(&current, -1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{}
+	var wg sync.WaitGroup
+	recorders := make([]*httptest.ResponseRecorder, requestCount)
+	errCh := make(chan error, requestCount)
+	requestURL := upstream.URL + "/v1internal:fetchAvailableModels"
+
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			payload, errMarshal := json.Marshal(apiCallRequest{
+				Method: http.MethodPost,
+				URL:    requestURL,
+				Data:   "{}",
+			})
+			if errMarshal != nil {
+				errCh <- errMarshal
+				return
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			ctx.Request = req
+			h.APICall(ctx)
+			recorders[index] = rec
+		}(i)
+	}
+
+	waitForEnter := func(want int) {
+		t.Helper()
+		for i := 0; i < want; i++ {
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for %d throttled upstream requests", want)
+			}
+		}
+	}
+
+	initialBurst := quotaRefreshAPICallMaxConcurrent
+	if initialBurst > requestCount {
+		initialBurst = requestCount
+	}
+	waitForEnter(initialBurst)
+
+	if requestCount > quotaRefreshAPICallMaxConcurrent {
+		select {
+		case <-entered:
+			t.Fatalf("quota refresh fanout exceeded throttle limit %d", quotaRefreshAPICallMaxConcurrent)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+
+	close(release)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent APICall setup failed: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&peak); got > quotaRefreshAPICallMaxConcurrent {
+		t.Fatalf("peak upstream concurrency = %d, want <= %d", got, quotaRefreshAPICallMaxConcurrent)
+	}
+	for i, rec := range recorders {
+		if rec == nil {
+			t.Fatalf("missing recorder for request %d", i)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want %d (body=%s)", i, rec.Code, http.StatusOK, rec.Body.String())
+		}
 	}
 }
