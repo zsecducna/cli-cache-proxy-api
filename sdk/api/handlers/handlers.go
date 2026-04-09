@@ -793,8 +793,12 @@ func statusFromError(err error) int {
 func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (requestDetails, *interfaces.ErrorMessage) {
 	route := classifyRequestRoute(handlerType, modelName)
 	if route.Route == RequestRouteClaudeViaOpenAICompat {
+		providers := util.GetProviderName(route.RequestedModel)
+		if len(providers) == 0 {
+			providers = append([]string(nil), claudeViaGPTProviders...)
+		}
 		return requestDetails{
-			Providers:       append([]string(nil), claudeViaGPTProviders...),
+			Providers:       providers,
 			NormalizedModel: route.RequestedModel,
 			RequestedModel:  route.RequestedModel,
 			Route:           route.Route,

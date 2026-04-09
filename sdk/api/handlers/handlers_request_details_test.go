@@ -119,6 +119,19 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 
 func TestGetRequestDetails_ClassifiesClaudeViaOpenAICompat(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	modelRegistry.RegisterClient("test-request-details-codex", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.4-custom", Created: now + 10},
+	})
+	modelRegistry.RegisterClient("test-request-details-llmgate", "llmgate", []*registry.ModelInfo{
+		{ID: "gpt-5.4-custom", Created: now + 9},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-request-details-codex")
+		modelRegistry.UnregisterClient("test-request-details-llmgate")
+	})
 
 	details, errMsg := handler.getRequestDetails("claude", "  gpt-5.4-custom  ")
 	if errMsg != nil {
@@ -134,7 +147,7 @@ func TestGetRequestDetails_ClassifiesClaudeViaOpenAICompat(t *testing.T) {
 	if got, want := details.NormalizedModel, "gpt-5.4-custom"; got != want {
 		t.Fatalf("getRequestDetails() normalized model = %q, want %q", got, want)
 	}
-	if got, want := details.Providers, []string{CodexProvider, OpenAICompatibilityProvider}; !reflect.DeepEqual(got, want) {
+	if got, want := details.Providers, []string{CodexProvider, "llmgate"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("getRequestDetails() providers = %v, want %v", got, want)
 	}
 }

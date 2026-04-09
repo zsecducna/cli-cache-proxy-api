@@ -320,6 +320,13 @@ func isOpenAICompatAPIKeyAuth(auth *Auth) bool {
 	if !isAPIKeyAuth(auth) {
 		return false
 	}
+	return isOpenAICompatAuth(auth)
+}
+
+func isOpenAICompatAuth(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 		return true
 	}
@@ -1854,16 +1861,34 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	}
 	result := make([]string, 0, len(providers))
 	seen := make(map[string]struct{}, len(providers))
+	appendProvider := func(provider string) {
+		p := strings.TrimSpace(strings.ToLower(provider))
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		result = append(result, p)
+	}
 	for _, provider := range providers {
 		p := strings.TrimSpace(strings.ToLower(provider))
 		if p == "" {
 			continue
 		}
-		if _, ok := seen[p]; ok {
+		appendProvider(p)
+		if p != "openai-compatibility" || m == nil {
 			continue
 		}
-		seen[p] = struct{}{}
-		result = append(result, p)
+		m.mu.RLock()
+		for _, auth := range m.auths {
+			if auth == nil || !isOpenAICompatAuth(auth) {
+				continue
+			}
+			appendProvider(openAICompatProviderKey(auth))
+		}
+		m.mu.RUnlock()
 	}
 	return result
 }
@@ -2713,29 +2738,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	return authCopy, executor, nil
 }
 
-func (m *Manager) pickNextOrderedProviders(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	var lastErr error
-	for _, provider := range providers {
-		providerKey := strings.TrimSpace(strings.ToLower(provider))
-		if providerKey == "" {
-			continue
-		}
-		auth, executor, errPick := m.pickNext(ctx, providerKey, model, opts, tried)
-		if errPick == nil {
-			return auth, executor, providerKey, nil
-		}
-		lastErr = errPick
-	}
-	if lastErr != nil {
-		return nil, nil, "", lastErr
-	}
-	return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
-}
-
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	if isClaudeViaGPTRoute(opts.Metadata) {
-		return m.pickNextOrderedProviders(ctx, providers, model, opts, tried)
-	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -2824,9 +2827,6 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	if isClaudeViaGPTRoute(opts.Metadata) {
-		return m.pickNextOrderedProviders(ctx, providers, model, opts, tried)
-	}
 	if !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
