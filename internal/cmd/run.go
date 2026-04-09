@@ -25,34 +25,43 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
-	builder := cliproxy.NewBuilder().
-		WithConfig(cfg).
-		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+	run := func(ctx context.Context) {
+		builder := cliproxy.NewBuilder().
+			WithConfig(cfg).
+			WithConfigPath(configPath).
+			WithLocalManagementPassword(localPassword)
 
-	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+		runCtx := ctx
+		if localPassword != "" {
+			var keepAliveCancel context.CancelFunc
+			runCtx, keepAliveCancel = context.WithCancel(ctx)
+			builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {
+				log.Warn("keep-alive endpoint idle for 10s, shutting down")
+				keepAliveCancel()
+			}))
+		}
 
-	runCtx := ctxSignal
-	if localPassword != "" {
-		var keepAliveCancel context.CancelFunc
-		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
-		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {
-			log.Warn("keep-alive endpoint idle for 10s, shutting down")
-			keepAliveCancel()
-		}))
+		service, err := builder.Build()
+		if err != nil {
+			log.Errorf("failed to build proxy service: %v", err)
+			return
+		}
+
+		if err = service.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Errorf("proxy service exited with error: %v", err)
+		}
 	}
 
-	service, err := builder.Build()
-	if err != nil {
-		log.Errorf("failed to build proxy service: %v", err)
+	if isWindowsService() {
+		if err := runAsWindowsService("CLIProxyAPI", run); err != nil {
+			log.Errorf("windows service exited with error: %v", err)
+		}
 		return
 	}
 
-	err = service.Run(runCtx)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("proxy service exited with error: %v", err)
-	}
+	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	run(ctxSignal)
 }
 
 // StartServiceBackground starts the proxy service in a background goroutine
