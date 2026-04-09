@@ -484,16 +484,16 @@ function Show-PostgresManualInitCommands($TargetDsn, $MaintenanceDsn, $UserName,
     Say 'Run these commands, then rerun install_windows.ps1:'
     Say "  psql `"$MaintenanceDsn`" -Atqc `"SELECT 1;`""
     if (-not [string]::IsNullOrWhiteSpace($UserName)) {
-        $createRoleSql = "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$($UserName.Replace(\"'\", \"''\"))') THEN CREATE ROLE $(Quote-PgIdentifier $UserName) LOGIN"
+        $createRoleSql = "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$($UserName.Replace("'", "''"))') THEN CREATE ROLE $(Quote-PgIdentifier $UserName) LOGIN"
         if (-not [string]::IsNullOrWhiteSpace($Password)) {
-            $createRoleSql += " PASSWORD '$($Password.Replace(\"'\", \"''\"))'"
+            $createRoleSql += " PASSWORD '$($Password.Replace("'", "''"))'"
         }
         $createRoleSql += "; END IF; END `$`$;"
         Say "  psql `"$MaintenanceDsn`" -v ON_ERROR_STOP=1 -c `"$createRoleSql`""
-        $createDbSql = "SELECT 'CREATE DATABASE $(Quote-PgIdentifier $DbName) OWNER $(Quote-PgIdentifier $UserName)' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$($DbName.Replace(\"'\", \"''\"))') \gexec"
+        $createDbSql = "SELECT 'CREATE DATABASE $(Quote-PgIdentifier $DbName) OWNER $(Quote-PgIdentifier $UserName)' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$($DbName.Replace("'", "''"))') \gexec"
     }
     else {
-        $createDbSql = "SELECT 'CREATE DATABASE $(Quote-PgIdentifier $DbName)' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$($DbName.Replace(\"'\", \"''\"))') \gexec"
+        $createDbSql = "SELECT 'CREATE DATABASE $(Quote-PgIdentifier $DbName)' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$($DbName.Replace("'", "''"))') \gexec"
     }
     Say "  psql `"$MaintenanceDsn`" -v ON_ERROR_STOP=1 -c `"$createDbSql`""
     Say "  psql `"$TargetDsn`" -Atqc `"SELECT 1;`""
@@ -531,12 +531,12 @@ function Ensure-PostgresDatabase($TargetDsn) {
         Fail "Could not reach PostgreSQL maintenance database using $maintenanceDsn"
     }
     if (-not [string]::IsNullOrWhiteSpace($userName)) {
-        $roleExists = (& (Resolve-PostgresTool 'psql') $maintenanceDsn -Atqc "SELECT 1 FROM pg_roles WHERE rolname = '$($userName.Replace(\"'\", \"''\"))';" 2>$null)
+        $roleExists = (& (Resolve-PostgresTool 'psql') $maintenanceDsn -Atqc "SELECT 1 FROM pg_roles WHERE rolname = '$($userName.Replace("'", "''"))';" 2>$null)
         if ($LASTEXITCODE -ne 0 -or $roleExists -notmatch '^1\s*$') {
             Say "Creating Postgres role $userName"
-            $createRoleSql = "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$($userName.Replace(\"'\", \"''\"))') THEN CREATE ROLE $(Quote-PgIdentifier $userName) LOGIN"
+            $createRoleSql = "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$($userName.Replace("'", "''"))') THEN CREATE ROLE $(Quote-PgIdentifier $userName) LOGIN"
             if (-not [string]::IsNullOrWhiteSpace($password)) {
-                $createRoleSql += " PASSWORD '$($password.Replace(\"'\", \"''\"))'"
+                $createRoleSql += " PASSWORD '$($password.Replace("'", "''"))'"
             }
             $createRoleSql += "; END IF; END `$`$;"
             & (Resolve-PostgresTool 'psql') $maintenanceDsn -v ON_ERROR_STOP=1 -c $createRoleSql *> $null
@@ -546,7 +546,7 @@ function Ensure-PostgresDatabase($TargetDsn) {
             }
         }
     }
-    $exists = (& (Resolve-PostgresTool 'psql') $maintenanceDsn -Atqc "SELECT 1 FROM pg_database WHERE datname = '$($dbName.Replace(\"'\", \"''\"))';" 2>$null)
+    $exists = (& (Resolve-PostgresTool 'psql') $maintenanceDsn -Atqc "SELECT 1 FROM pg_database WHERE datname = '$($dbName.Replace("'", "''"))';" 2>$null)
     if ($LASTEXITCODE -eq 0 -and $exists -match '^1$') {
         Show-PostgresManualInitCommands $TargetDsn $maintenanceDsn $userName $password $dbName
         Fail "Postgres database $dbName already exists but the target DSN is not reachable: $TargetDsn"
