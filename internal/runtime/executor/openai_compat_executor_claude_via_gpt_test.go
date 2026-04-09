@@ -5,9 +5,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -89,6 +93,95 @@ func TestOpenAICompatExecutorClaudeViaGPTPrefersResponsesSurface(t *testing.T) {
 	events := parseAnthropicSSEEvents(t, translated)
 	if got := findAnthropicMessageDeltaStopReason(t, events); got != "end_turn" {
 		t.Fatalf("message_delta stop_reason = %q, want %q", got, "end_turn")
+	}
+}
+
+func TestOpenAICompatExecutorClaudeViaGPTResponsesPersistsNestedUsage(t *testing.T) {
+	t.Cleanup(func() {
+		_ = internalusage.ClosePersistentStore()
+	})
+	cfg := &config.Config{UsageStatisticsEnabled: true}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := internalusage.ConfigurePersistentStore(cfg, configPath); err != nil {
+		t.Fatalf("ConfigurePersistentStore() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\",\"stop_reason\":\"stop\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12,\"output_tokens_details\":{\"reasoning_tokens\":3}}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openrouter", cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                  server.URL + "/v1",
+		"api_key":                   "test",
+		"provider_key":              "openrouter",
+		"supports_openai_responses": "true",
+		"supports_chat_completions": "true",
+		"supports_tools":            "true",
+		"supports_streaming":        "true",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "apiKey", "test-admin-key")
+	ctx = helps.WithUsageReasoningEffort(ctx, "xhigh")
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	_ = collectOpenAICompatStreamChunks(t, result)
+
+	store := internalusage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, err := store.Snapshot(context.Background(), 10, 10, 1)
+		if err != nil {
+			t.Fatalf("Snapshot() error = %v", err)
+		}
+		if snapshot.Summary.TotalRequests == 1 {
+			if snapshot.Summary.TotalTokens != 12 {
+				t.Fatalf("total_tokens = %d, want 12", snapshot.Summary.TotalTokens)
+			}
+			if len(snapshot.RecentRequests) != 1 {
+				t.Fatalf("recent requests len = %d, want 1", len(snapshot.RecentRequests))
+			}
+			item := snapshot.RecentRequests[0]
+			if item.Provider != "openrouter" {
+				t.Fatalf("provider = %q, want %q", item.Provider, "openrouter")
+			}
+			if item.ReasoningEffort != "xhigh" {
+				t.Fatalf("reasoning_effort = %q, want %q", item.ReasoningEffort, "xhigh")
+			}
+			if item.InputTokens != 5 || item.OutputTokens != 7 || item.TotalTokens != 12 {
+				t.Fatalf("usage = %+v, want input/output/total 5/7/12", item)
+			}
+			if item.ReasoningTokens != 3 {
+				t.Fatalf("reasoning_tokens = %d, want 3", item.ReasoningTokens)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for persisted usage snapshot")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
