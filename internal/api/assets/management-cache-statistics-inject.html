@@ -123,13 +123,40 @@
       [class*="UsagePage-module__statsGrid"] {
         grid-auto-rows: 1fr;
       }
-      [class*="UsagePage-module__statsGrid"] > [class*="UsagePage-module__statCard"],
-      [class*="UsagePage-module__statsGrid"] > [data-cliproxy-signature] {
+      .cliproxy-enhancer__usage-metrics-grid {
+        display: grid !important;
+        grid-template-columns: repeat(12, minmax(0, 1fr)) !important;
+        grid-auto-rows: 1fr;
+        gap: 16px !important;
+        align-items: stretch;
+      }
+      .cliproxy-enhancer__usage-metrics-grid > * {
+        grid-column: span 12 !important;
+      }
+      @media (min-width: 900px) {
+        .cliproxy-enhancer__usage-metrics-grid > * {
+          grid-column: span 6 !important;
+        }
+      }
+      @media (min-width: 1280px) {
+        .cliproxy-enhancer__usage-metrics-grid > * {
+          grid-column: span 4 !important;
+        }
+      }
+      [class*="UsagePage-module__statsGrid"] > * {
         height: 132px;
         min-height: 132px;
+        width: 100%;
+        box-sizing: border-box;
         display: flex;
         flex-direction: column;
+        gap: 8px;
         justify-content: space-between;
+        padding: 16px;
+        border: 1px solid var(--border-color, #d5d9e0);
+        border-radius: 12px;
+        background: var(--bg-primary, #fff);
+        overflow: hidden;
       }
       [class*="chartCanvas"] canvas,
       [class*="chartWrapper"] canvas,
@@ -1066,12 +1093,6 @@
     return `${month}-${day} ${hour}:00`;
   }
 
-  function formatModelAxisLabel(label) {
-    const text = normalize(label);
-    if (text.length <= 14) return text;
-    return `${text.slice(0, 13)}…`;
-  }
-
   function buildUsageTrendSeries(stats, period, metric) {
     const trendByModel = stats && stats.trend_by_model && typeof stats.trend_by_model === 'object'
       ? stats.trend_by_model
@@ -1256,203 +1277,6 @@
       (cappedLongContextOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0)) * OPENAI_LONG_CONTEXT_COMPLETION_MULTIPLIER)
     ) / 1000000;
     return Number.isFinite(cost) ? cost : 0;
-  }
-
-  function calculateModelCost(summary, modelPrices) {
-    const modelName = normalize(summary && summary.model);
-    const pricing = modelName ? modelPrices[modelName] : null;
-    if (!pricing) return 0;
-    return calculateModelCostFromBreakdown(
-      modelName,
-      pricing,
-      summary && summary.input_tokens,
-      summary && summary.cached_tokens,
-      summary && summary.output_tokens,
-      summary && summary.long_context_input_tokens,
-      summary && summary.long_context_cached_tokens,
-      summary && summary.long_context_output_tokens,
-    );
-  }
-
-  function hideUsageChartCardChildren(card, hideHeaderControls) {
-    if (!(card instanceof HTMLElement)) return null;
-    const header = card.querySelector('.card-header');
-    Array.from(card.children).forEach((child) => {
-      if (child === header || isEnhancerNode(child)) return;
-      child.style.display = 'none';
-      child.dataset.cliproxyHidden = 'true';
-    });
-    if (hideHeaderControls && header instanceof HTMLElement) {
-      Array.from(header.children).forEach((child) => {
-        if (String(child.className || '').includes('title')) return;
-        child.style.display = 'none';
-        child.dataset.cliproxyHidden = 'true';
-      });
-    }
-    return header;
-  }
-
-  function buildModelBarChartHTML(items, segments, valueFormatter, emptyMessage) {
-    const validItems = Array.isArray(items) ? items.filter((item) => Number(item && item.total || 0) > 0) : [];
-    if (!validItems.length) {
-      return `<div class="cliproxy-enhancer__bar-empty">${escapeHTML(emptyMessage)}</div>`;
-    }
-    const maxTotal = Math.max(1, ...validItems.map((item) => Number(item.total || 0)));
-    const legend = segments.map((segment) => `
-      <div class="cliproxy-enhancer__trend-legend-item">
-        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${segment.color};"></span>
-        <span>${escapeHTML(segment.label)}</span>
-      </div>
-    `).join('');
-    const rows = validItems.map((item) => {
-      const width = Math.max(2, (Number(item.total || 0) / maxTotal) * 100);
-      const total = Math.max(0, Number(item.total || 0));
-      const barSegments = segments.map((segment) => {
-        const value = Math.max(0, Number(item.values && item.values[segment.key] || 0));
-        if (value <= 0 || total <= 0) return '';
-        return `<span class="cliproxy-enhancer__bar-segment" style="width:${(value / total) * 100}%;background:${segment.color};"></span>`;
-      }).join('');
-      const meta = segments.map((segment) => {
-        const value = Math.max(0, Number(item.values && item.values[segment.key] || 0));
-        if (value <= 0) return '';
-        return `<span>${escapeHTML(segment.label)}: ${escapeHTML(valueFormatter(value))}</span>`;
-      }).filter(Boolean).join('');
-      return `
-        <div class="cliproxy-enhancer__bar-group">
-          <div class="cliproxy-enhancer__bar-row">
-            <div class="cliproxy-enhancer__bar-label">${escapeHTML(item.label)}</div>
-            <div class="cliproxy-enhancer__bar-track">
-              <div class="cliproxy-enhancer__bar-fill" style="width:${width}%;">
-                ${barSegments}
-              </div>
-            </div>
-            <div class="cliproxy-enhancer__bar-value">${escapeHTML(valueFormatter(total))}</div>
-          </div>
-          ${meta ? `<div class="cliproxy-enhancer__bar-meta">${meta}</div>` : ''}
-        </div>
-      `;
-    }).join('');
-    return `
-      <div class="cliproxy-enhancer__bar-legend">${legend}</div>
-      <div class="cliproxy-enhancer__bar-shell">${rows}</div>
-    `;
-  }
-
-  function renderTokenTypeBreakdownChart(card, stats) {
-    if (!(card instanceof HTMLElement)) return;
-    const header = hideUsageChartCardChildren(card, true);
-    let panel = card.querySelector('#cliproxy-token-type-breakdown');
-    if (!panel) {
-      panel = document.createElement('div');
-      panel.id = 'cliproxy-token-type-breakdown';
-      panel.className = 'cliproxy-enhancer__trend-shell';
-      if (header && header.parentElement === card) {
-        header.insertAdjacentElement('afterend', panel);
-      } else {
-        card.appendChild(panel);
-      }
-    }
-    const summaries = Array.isArray(stats && stats.by_model) ? stats.by_model : [];
-    const items = summaries.map((item) => ({
-      label: normalize(item && item.model) || 'unknown',
-      total: Number(item && item.total_tokens || 0),
-      values: {
-        input: Number(item && item.input_tokens || 0),
-        output: Number(item && item.output_tokens || 0),
-        cached: Number(item && item.cached_tokens || 0),
-        reasoning: Number(item && item.reasoning_tokens || 0),
-      },
-    })).filter((item) => item.total > 0).sort((left, right) => right.total - left.total);
-    const segments = [
-      { key: 'input', label: 'Input Tokens', color: '#8b8680' },
-      { key: 'output', label: 'Output Tokens', color: '#0f766e' },
-      { key: 'cached', label: 'Cached Tokens', color: '#2563eb' },
-      { key: 'reasoning', label: 'Reasoning Tokens', color: '#b45309' },
-    ];
-    const validItems = items.filter((item) => Number(item.total || 0) > 0);
-    const labels = validItems.map((item) => item.label);
-    const datasets = segments.map((segment) => ({
-      label: segment.label,
-      color: segment.color,
-      values: validItems.map((item) => Math.max(0, Number(item.values && item.values[segment.key] || 0))),
-    })).filter((dataset) => dataset.values.some((value) => value > 0));
-    const legend = datasets.map((dataset) => `
-      <div class="cliproxy-enhancer__trend-legend-item">
-        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${dataset.color};"></span>
-        <span>${escapeHTML(dataset.label)}</span>
-      </div>
-    `).join('');
-    const signature = ['token-type-breakdown', items.map((item) => `${item.label}:${item.total}:${Object.values(item.values).join(',')}`).join('|')].join(':');
-    setEnhancerMarkup(panel, signature, `
-      <div class="cliproxy-enhancer__trend-legend">${legend || '<span class="cliproxy-enhancer__muted">No token breakdown available for the selected window.</span>'}</div>
-      ${buildSeriesChartSVG(labels, datasets, {
-        ariaLabel: 'Token Type Breakdown',
-        valueFormatter: formatCompact,
-        labelFormatter: (label) => formatModelAxisLabel(label),
-        emptyMessage: 'No token breakdown available for the selected window.',
-      })}
-    `);
-  }
-
-  function renderCostOverviewChart(card, stats) {
-    if (!(card instanceof HTMLElement)) return;
-    const header = hideUsageChartCardChildren(card, true);
-    let panel = card.querySelector('#cliproxy-cost-overview');
-    if (!panel) {
-      panel = document.createElement('div');
-      panel.id = 'cliproxy-cost-overview';
-      panel.className = 'cliproxy-enhancer__trend-shell';
-      if (header && header.parentElement === card) {
-        header.insertAdjacentElement('afterend', panel);
-      } else {
-        card.appendChild(panel);
-      }
-    }
-    const modelPrices = readModelPrices();
-    const summaries = Array.isArray(stats && stats.by_model) ? stats.by_model : [];
-    const items = summaries.map((item) => ({
-      label: normalize(item && item.model) || 'unknown',
-      total: calculateModelCost(item, modelPrices),
-      values: {
-        cost: calculateModelCost(item, modelPrices),
-      },
-    })).filter((item) => item.total > 0).sort((left, right) => right.total - left.total);
-    const segments = [
-      { key: 'cost', label: 'Estimated Cost', color: '#047857' },
-    ];
-    const hasPricing = Object.keys(modelPrices).length > 0;
-    const validItems = items.filter((item) => Number(item.total || 0) > 0);
-    const labels = validItems.map((item) => item.label);
-    const datasets = segments.map((segment) => ({
-      label: segment.label,
-      color: segment.color,
-      values: validItems.map((item) => Math.max(0, Number(item.values && item.values[segment.key] || 0))),
-    })).filter((dataset) => dataset.values.some((value) => value > 0));
-    const legend = datasets.map((dataset) => `
-      <div class="cliproxy-enhancer__trend-legend-item">
-        <span class="cliproxy-enhancer__trend-legend-dot" style="background:${dataset.color};"></span>
-        <span>${escapeHTML(dataset.label)}</span>
-      </div>
-    `).join('');
-    const signature = ['cost-overview', hasPricing ? 'priced' : 'unpriced', items.map((item) => `${item.label}:${item.total}`).join('|')].join(':');
-    if (!hasPricing) {
-      setEnhancerMarkup(panel, signature, '<div class="cliproxy-enhancer__trend-empty">Set model prices to view per-model cost overview.</div>');
-      return;
-    }
-    setEnhancerMarkup(panel, signature, `
-      <div class="cliproxy-enhancer__trend-legend">${legend || '<span class="cliproxy-enhancer__muted">No model cost data available for the selected window.</span>'}</div>
-      ${buildSeriesChartSVG(labels, datasets, {
-        ariaLabel: 'Cost Overview',
-        valueFormatter: formatCurrency,
-        labelFormatter: (label) => formatModelAxisLabel(label),
-        emptyMessage: 'No model cost data available for the selected window.',
-      })}
-    `);
-  }
-
-  function renderUsageModelBreakdownCharts(container, stats) {
-    renderTokenTypeBreakdownChart(findUsageTrendCard(container, 'Token Type Breakdown'), stats);
-    renderCostOverviewChart(findUsageTrendCard(container, 'Cost Overview'), stats);
   }
 
   function readModelPrices() {
@@ -2063,8 +1887,11 @@
       const className = typeof node.className === 'string' ? node.className : '';
       return className.includes('statsGrid') && isUsageMetricsBlock(node);
     });
-    if (preferred) return preferred;
-    return Array.from(container.querySelectorAll('div')).find((node) => isUsageMetricsBlock(node)) || null;
+    const metricsBlock = preferred || Array.from(container.querySelectorAll('div')).find((node) => isUsageMetricsBlock(node)) || null;
+    if (metricsBlock) {
+      metricsBlock.classList.add('cliproxy-enhancer__usage-metrics-grid');
+    }
+    return metricsBlock;
   }
 
   function findUsageMetricCard(metricsBlock, label) {
@@ -2490,7 +2317,6 @@
     patchCachedTokensCard(container, cacheStats.summary || {}, timeRange);
     patchAverageLatencyCard(container, cacheStats.summary || {}, timeRange);
     renderUsageTrendCharts(container, cacheStats || {});
-    renderUsageModelBreakdownCharts(container, cacheStats || {});
     renderCredentialStatistics(container, usageSnapshot, timeRange);
     renderModelStatistics(container, usageSnapshot, timeRange);
     renderRequestEvents(container, cacheStats, timeRange, usageSnapshot);
