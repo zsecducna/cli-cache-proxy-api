@@ -22,6 +22,8 @@
   const MAX_REQUEST_ROWS = 50;
   const RECENT_REQUEST_FETCH_LIMIT = 500;
   const MODEL_LIMIT = 10;
+  const OPENAI_LONG_CONTEXT_PROMPT_MULTIPLIER = 2;
+  const OPENAI_LONG_CONTEXT_COMPLETION_MULTIPLIER = 1.5;
   const PROVIDER_FILTER_OPTIONS = [
     { value: '', label: 'All Providers' },
     { value: 'gemini', label: 'Gemini' },
@@ -1222,20 +1224,54 @@
     renderUsageTrendChartCard(findUsageTrendCard(container, 'Token Usage Trends'), stats, 'tokens');
   }
 
+  function supportsOpenAILongContextPricing(modelName) {
+    const normalized = normalize(modelName).toLowerCase();
+    return normalized === 'gpt-5.4' || normalized === 'gpt-5.4-pro';
+  }
+
+  function calculateModelCostFromBreakdown(modelName, pricing, inputTokens, cachedTokens, outputTokens, longContextInputTokens, longContextCachedTokens, longContextOutputTokens) {
+    const safeInputTokens = Math.max(0, Number(inputTokens || 0));
+    const safeCachedTokens = Math.max(0, Number(cachedTokens || 0));
+    const safeOutputTokens = Math.max(0, Number(outputTokens || 0));
+    let safeLongContextInputTokens = 0;
+    let safeLongContextCachedTokens = 0;
+    let safeLongContextOutputTokens = 0;
+    if (supportsOpenAILongContextPricing(modelName)) {
+      safeLongContextInputTokens = Math.max(0, Number(longContextInputTokens || 0));
+      safeLongContextCachedTokens = Math.max(0, Number(longContextCachedTokens || 0));
+      safeLongContextOutputTokens = Math.max(0, Number(longContextOutputTokens || 0));
+    }
+    const cappedLongContextInputTokens = Math.min(safeLongContextInputTokens, safeInputTokens);
+    const cappedLongContextCachedTokens = Math.min(safeLongContextCachedTokens, safeCachedTokens);
+    const cappedLongContextOutputTokens = Math.min(safeLongContextOutputTokens, safeOutputTokens);
+    const longContextUncachedInputTokens = Math.max(cappedLongContextInputTokens - cappedLongContextCachedTokens, 0);
+    const uncachedInputTokens = Math.max(safeInputTokens - safeCachedTokens, 0);
+    const standardUncachedInputTokens = Math.max(uncachedInputTokens - longContextUncachedInputTokens, 0);
+    const standardOutputTokens = Math.max(safeOutputTokens - cappedLongContextOutputTokens, 0);
+    const cost = (
+      (standardUncachedInputTokens * Math.max(0, Number(pricing && pricing.prompt || 0))) +
+      (longContextUncachedInputTokens * Math.max(0, Number(pricing && pricing.prompt || 0)) * OPENAI_LONG_CONTEXT_PROMPT_MULTIPLIER) +
+      (safeCachedTokens * Math.max(0, Number(pricing && pricing.cache || 0))) +
+      (standardOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0))) +
+      (cappedLongContextOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0)) * OPENAI_LONG_CONTEXT_COMPLETION_MULTIPLIER)
+    ) / 1000000;
+    return Number.isFinite(cost) ? cost : 0;
+  }
+
   function calculateModelCost(summary, modelPrices) {
     const modelName = normalize(summary && summary.model);
     const pricing = modelName ? modelPrices[modelName] : null;
     if (!pricing) return 0;
-    const inputTokens = Math.max(0, Number(summary && summary.input_tokens || 0));
-    const cachedTokens = Math.max(0, Number(summary && summary.cached_tokens || 0));
-    const outputTokens = Math.max(0, Number(summary && summary.output_tokens || 0));
-    const uncachedInputTokens = Math.max(inputTokens - cachedTokens, 0);
-    const cost = (
-      (uncachedInputTokens * Math.max(0, Number(pricing.prompt || 0))) +
-      (cachedTokens * Math.max(0, Number(pricing.cache || 0))) +
-      (outputTokens * Math.max(0, Number(pricing.completion || 0)))
-    ) / 1000000;
-    return Number.isFinite(cost) ? cost : 0;
+    return calculateModelCostFromBreakdown(
+      modelName,
+      pricing,
+      summary && summary.input_tokens,
+      summary && summary.cached_tokens,
+      summary && summary.output_tokens,
+      summary && summary.long_context_input_tokens,
+      summary && summary.long_context_cached_tokens,
+      summary && summary.long_context_output_tokens,
+    );
   }
 
   function hideUsageChartCardChildren(card, hideHeaderControls) {
@@ -1455,15 +1491,16 @@
       const modelName = normalize(item && item.model);
       const pricing = modelName ? modelPrices[modelName] : null;
       if (!pricing) return total;
-      const inputTokens = Math.max(0, Number(item && item.input_tokens || 0));
-      const cachedTokens = Math.max(0, Number(item && item.cached_tokens || 0));
-      const outputTokens = Math.max(0, Number(item && item.output_tokens || 0));
-      const uncachedInputTokens = Math.max(inputTokens - cachedTokens, 0);
-      const cost = (
-        (uncachedInputTokens * Math.max(0, Number(pricing.prompt || 0))) +
-        (cachedTokens * Math.max(0, Number(pricing.cache || 0))) +
-        (outputTokens * Math.max(0, Number(pricing.completion || 0)))
-      ) / 1000000;
+      const cost = calculateModelCostFromBreakdown(
+        modelName,
+        pricing,
+        item && item.input_tokens,
+        item && item.cached_tokens,
+        item && item.output_tokens,
+        item && item.long_context_input_tokens,
+        item && item.long_context_cached_tokens,
+        item && item.long_context_output_tokens,
+      );
       return total + (Number.isFinite(cost) ? cost : 0);
     }, 0);
   }

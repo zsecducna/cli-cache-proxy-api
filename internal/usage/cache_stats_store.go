@@ -20,6 +20,7 @@ const (
 	defaultCacheStatisticsRecentLimit = 50
 	defaultCacheStatisticsModelLimit  = 10
 	defaultCacheStatisticsDays        = 14
+	openAILongContextInputThreshold   = int64(272000)
 )
 
 type CacheStatisticsEvent struct {
@@ -41,31 +42,37 @@ type CacheStatisticsEvent struct {
 }
 
 type CacheStatisticsSummary struct {
-	TotalRequests        int64   `json:"total_requests"`
-	SuccessRequests      int64   `json:"success_requests"`
-	FailedRequests       int64   `json:"failed_requests"`
-	InputTokens          int64   `json:"input_tokens"`
-	EffectiveInputTokens int64   `json:"effective_input_tokens"`
-	OutputTokens         int64   `json:"output_tokens"`
-	ReasoningTokens      int64   `json:"reasoning_tokens"`
-	CachedTokens         int64   `json:"cached_tokens"`
-	TotalTokens          int64   `json:"total_tokens"`
-	CacheRatio           float64 `json:"cache_ratio"`
-	AvgLatencyMs         float64 `json:"avg_latency_ms"`
+	TotalRequests           int64   `json:"total_requests"`
+	SuccessRequests         int64   `json:"success_requests"`
+	FailedRequests          int64   `json:"failed_requests"`
+	InputTokens             int64   `json:"input_tokens"`
+	EffectiveInputTokens    int64   `json:"effective_input_tokens"`
+	LongContextInputTokens  int64   `json:"long_context_input_tokens,omitempty"`
+	LongContextCachedTokens int64   `json:"long_context_cached_tokens,omitempty"`
+	LongContextOutputTokens int64   `json:"long_context_output_tokens,omitempty"`
+	OutputTokens            int64   `json:"output_tokens"`
+	ReasoningTokens         int64   `json:"reasoning_tokens"`
+	CachedTokens            int64   `json:"cached_tokens"`
+	TotalTokens             int64   `json:"total_tokens"`
+	CacheRatio              float64 `json:"cache_ratio"`
+	AvgLatencyMs            float64 `json:"avg_latency_ms"`
 }
 
 type CacheStatisticsModelSummary struct {
-	Model                string  `json:"model"`
-	Requests             int64   `json:"requests"`
-	FailedRequests       int64   `json:"failed_requests"`
-	InputTokens          int64   `json:"input_tokens"`
-	EffectiveInputTokens int64   `json:"effective_input_tokens"`
-	OutputTokens         int64   `json:"output_tokens"`
-	ReasoningTokens      int64   `json:"reasoning_tokens"`
-	CachedTokens         int64   `json:"cached_tokens"`
-	TotalTokens          int64   `json:"total_tokens"`
-	CacheRatio           float64 `json:"cache_ratio"`
-	AvgLatencyMs         float64 `json:"avg_latency_ms"`
+	Model                   string  `json:"model"`
+	Requests                int64   `json:"requests"`
+	FailedRequests          int64   `json:"failed_requests"`
+	InputTokens             int64   `json:"input_tokens"`
+	EffectiveInputTokens    int64   `json:"effective_input_tokens"`
+	LongContextInputTokens  int64   `json:"long_context_input_tokens,omitempty"`
+	LongContextCachedTokens int64   `json:"long_context_cached_tokens,omitempty"`
+	LongContextOutputTokens int64   `json:"long_context_output_tokens,omitempty"`
+	OutputTokens            int64   `json:"output_tokens"`
+	ReasoningTokens         int64   `json:"reasoning_tokens"`
+	CachedTokens            int64   `json:"cached_tokens"`
+	TotalTokens             int64   `json:"total_tokens"`
+	CacheRatio              float64 `json:"cache_ratio"`
+	AvgLatencyMs            float64 `json:"avg_latency_ms"`
 }
 
 type CacheStatisticsDaySummary struct {
@@ -573,6 +580,24 @@ func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recen
 	if err != nil {
 		return result, err
 	}
+	summaryLongContext, modelLongContext, err := s.queryLongContextPricingUsage(ctx, since, providers)
+	if err != nil {
+		return result, err
+	}
+	summary.LongContextInputTokens = summaryLongContext.InputTokens
+	summary.LongContextCachedTokens = summaryLongContext.CachedTokens
+	summary.LongContextOutputTokens = summaryLongContext.OutputTokens
+	for i := range byModel {
+		item := &byModel[i]
+		modelName := strings.TrimSpace(item.Model)
+		if modelName == "" {
+			modelName = "unknown"
+		}
+		usage := modelLongContext[modelName]
+		item.LongContextInputTokens = usage.InputTokens
+		item.LongContextCachedTokens = usage.CachedTokens
+		item.LongContextOutputTokens = usage.OutputTokens
+	}
 	byDay, err := s.queryDaySummaries(ctx, since, providers)
 	if err != nil {
 		return result, err
@@ -833,6 +858,23 @@ WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	return summary, nil
 }
 
+type cacheStatisticsLongContextUsage struct {
+	InputTokens  int64
+	CachedTokens int64
+	OutputTokens int64
+}
+
+type cacheStatisticsLongContextRequest struct {
+	ID                 int64
+	Model              string
+	InputTokens        int64
+	CachedTokens       int64
+	OutputTokens       int64
+	PromptCacheKey     string
+	PreviousResponseID string
+	ResponseID         string
+}
+
 func (s *CacheStatisticsStore) queryModelSummaries(ctx context.Context, limit int, since string, providers []string) ([]CacheStatisticsModelSummary, error) {
 	query := fmt.Sprintf(`
 SELECT
@@ -891,6 +933,121 @@ LIMIT ` + s.bind(len(args)+1)
 		return nil, fmt.Errorf("cache statistics store: iterate model summaries: %w", err)
 	}
 	return result, nil
+}
+
+func (s *CacheStatisticsStore) queryLongContextPricingUsage(ctx context.Context, since string, providers []string) (cacheStatisticsLongContextUsage, map[string]cacheStatisticsLongContextUsage, error) {
+	summary := cacheStatisticsLongContextUsage{}
+	byModel := make(map[string]cacheStatisticsLongContextUsage)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s == nil || s.db == nil {
+		return summary, byModel, nil
+	}
+
+	query := fmt.Sprintf(`
+SELECT
+    id,
+    model,
+    input_tokens,
+    cached_tokens,
+    output_tokens,
+    prompt_cache_key,
+    previous_response_id,
+    response_id
+FROM %s
+WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
+	query += `
+ORDER BY requested_at ASC, id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return summary, nil, fmt.Errorf("cache statistics store: query long-context pricing usage: %w", err)
+	}
+	defer rows.Close()
+
+	responseToSession := make(map[string]string)
+	sessionRequests := make(map[string][]cacheStatisticsLongContextRequest)
+	sessionLongContext := make(map[string]bool)
+
+	for rows.Next() {
+		var item cacheStatisticsLongContextRequest
+		if err := rows.Scan(
+			&item.ID,
+			&item.Model,
+			&item.InputTokens,
+			&item.CachedTokens,
+			&item.OutputTokens,
+			&item.PromptCacheKey,
+			&item.PreviousResponseID,
+			&item.ResponseID,
+		); err != nil {
+			return summary, nil, fmt.Errorf("cache statistics store: scan long-context pricing usage: %w", err)
+		}
+
+		item.Model = strings.TrimSpace(item.Model)
+		if item.Model == "" {
+			item.Model = "unknown"
+		}
+
+		sessionKey := resolveLongContextPricingSessionKey(item, responseToSession)
+		sessionRequests[sessionKey] = append(sessionRequests[sessionKey], item)
+		if supportsOpenAILongContextPricing(item.Model) && item.InputTokens > openAILongContextInputThreshold {
+			sessionLongContext[sessionKey] = true
+		}
+		if responseID := strings.TrimSpace(item.ResponseID); responseID != "" {
+			responseToSession[responseID] = sessionKey
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return summary, nil, fmt.Errorf("cache statistics store: iterate long-context pricing usage: %w", err)
+	}
+
+	for sessionKey, items := range sessionRequests {
+		if !sessionLongContext[sessionKey] {
+			continue
+		}
+		for i := range items {
+			item := items[i]
+			summary.InputTokens += normaliseNonNegative(item.InputTokens)
+			summary.CachedTokens += normaliseNonNegative(item.CachedTokens)
+			summary.OutputTokens += normaliseNonNegative(item.OutputTokens)
+
+			modelUsage := byModel[item.Model]
+			modelUsage.InputTokens += normaliseNonNegative(item.InputTokens)
+			modelUsage.CachedTokens += normaliseNonNegative(item.CachedTokens)
+			modelUsage.OutputTokens += normaliseNonNegative(item.OutputTokens)
+			byModel[item.Model] = modelUsage
+		}
+	}
+
+	return summary, byModel, nil
+}
+
+func resolveLongContextPricingSessionKey(item cacheStatisticsLongContextRequest, responseToSession map[string]string) string {
+	if promptCacheKey := strings.TrimSpace(item.PromptCacheKey); promptCacheKey != "" {
+		return "prompt-cache:" + promptCacheKey
+	}
+	if previousResponseID := strings.TrimSpace(item.PreviousResponseID); previousResponseID != "" {
+		if sessionKey := strings.TrimSpace(responseToSession[previousResponseID]); sessionKey != "" {
+			return sessionKey
+		}
+		return "response-chain:" + previousResponseID
+	}
+	if responseID := strings.TrimSpace(item.ResponseID); responseID != "" {
+		if sessionKey := strings.TrimSpace(responseToSession[responseID]); sessionKey != "" {
+			return sessionKey
+		}
+		return "response-chain:" + responseID
+	}
+	return fmt.Sprintf("request:%d", item.ID)
+}
+
+func supportsOpenAILongContextPricing(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "gpt-5.4" || model == "gpt-5.4-pro"
 }
 
 func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, providers []string) ([]CacheStatisticsDaySummary, error) {

@@ -102,6 +102,111 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestCacheStatisticsStoreSnapshotTracksOpenAILongContextSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-3 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-1",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  300000,
+				OutputTokens: 2000,
+				CachedTokens: 120000,
+				TotalTokens:  302000,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-long", ResponseID: "resp-1"},
+		},
+		{
+			Timestamp: now.Add(-2 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-1",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  80000,
+				OutputTokens: 800,
+				CachedTokens: 79000,
+				TotalTokens:  80800,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-long", PreviousResponseID: "resp-1", ResponseID: "resp-2"},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4-mini",
+			AuthID:    "auth-2",
+			AuthIndex: "1",
+			Tokens: TokenStats{
+				InputTokens:  300500,
+				OutputTokens: 50,
+				CachedTokens: 100,
+				TotalTokens:  300550,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-short", ResponseID: "resp-3"},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+
+	if snapshot.Summary.LongContextInputTokens != 380000 {
+		t.Fatalf("summary long_context_input_tokens = %d, want 380000", snapshot.Summary.LongContextInputTokens)
+	}
+	if snapshot.Summary.LongContextCachedTokens != 199000 {
+		t.Fatalf("summary long_context_cached_tokens = %d, want 199000", snapshot.Summary.LongContextCachedTokens)
+	}
+	if snapshot.Summary.LongContextOutputTokens != 2800 {
+		t.Fatalf("summary long_context_output_tokens = %d, want 2800", snapshot.Summary.LongContextOutputTokens)
+	}
+
+	if len(snapshot.ByModel) != 2 {
+		t.Fatalf("len(ByModel) = %d, want 2", len(snapshot.ByModel))
+	}
+
+	models := make(map[string]CacheStatisticsModelSummary, len(snapshot.ByModel))
+	for _, item := range snapshot.ByModel {
+		models[item.Model] = item
+	}
+	gpt54, ok := models["gpt-5.4"]
+	if !ok {
+		t.Fatalf("missing gpt-5.4 summary in %+v", snapshot.ByModel)
+	}
+	if gpt54.LongContextInputTokens != 380000 {
+		t.Fatalf("gpt-5.4 long_context_input_tokens = %d, want 380000", gpt54.LongContextInputTokens)
+	}
+	if gpt54.LongContextCachedTokens != 199000 {
+		t.Fatalf("gpt-5.4 long_context_cached_tokens = %d, want 199000", gpt54.LongContextCachedTokens)
+	}
+	if gpt54.LongContextOutputTokens != 2800 {
+		t.Fatalf("gpt-5.4 long_context_output_tokens = %d, want 2800", gpt54.LongContextOutputTokens)
+	}
+
+	gpt54Mini, ok := models["gpt-5.4-mini"]
+	if !ok {
+		t.Fatalf("missing gpt-5.4-mini summary in %+v", snapshot.ByModel)
+	}
+	if gpt54Mini.LongContextInputTokens != 0 || gpt54Mini.LongContextCachedTokens != 0 || gpt54Mini.LongContextOutputTokens != 0 {
+		t.Fatalf("gpt-5.4-mini long-context fields = %+v, want zeros", gpt54Mini)
+	}
+}
+
 func TestCacheStatisticsStoreSnapshotIncludesModelTrends(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	store, err := OpenCacheStatisticsStore(path)
