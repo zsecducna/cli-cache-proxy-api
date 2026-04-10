@@ -106,13 +106,13 @@ After configuring `config.yaml`, start the proxy and point your client at the co
 Default local health endpoint:
 
 ```bash
-curl http://127.0.0.1:18317/healthz
+curl http://127.0.0.1:8317/healthz
 ```
 
 ### Example Claude-compatible usage
 
 ```bash
-ANTHROPIC_BASE_URL="http://127.0.0.1:18317" \
+ANTHROPIC_BASE_URL="http://127.0.0.1:8317" \
 ANTHROPIC_AUTH_TOKEN="your-api-key-1" \
 claude --model "claude-sonnet-4-5-20250929" -p 'respond to me exactly "hello"'
 ```
@@ -123,7 +123,7 @@ claude --model "claude-sonnet-4-5-20250929" -p 'respond to me exactly "hello"'
 ANTHROPIC_DEFAULT_OPUS_MODEL='gpt-5.4' \
 ANTHROPIC_DEFAULT_SONNET_MODEL='gpt-5.3-codex' \
 ANTHROPIC_DEFAULT_HAIKU_MODEL='gpt-5.3-codex' \
-ANTHROPIC_BASE_URL="http://127.0.0.1:18317" \
+ANTHROPIC_BASE_URL="http://127.0.0.1:8317" \
 ANTHROPIC_AUTH_TOKEN="your-api-key-1" \
 claude --model 'gpt-5.4' -p 'respond to me exactly "hello"'
 ```

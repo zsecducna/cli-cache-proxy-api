@@ -629,8 +629,62 @@ print_postgres_manual_init() {
   say "  psql \"$target_dsn\" -Atqc \"SELECT 1;\""
 }
 
+print_postgres_privilege_repair() {
+  local role_name="$1"
+  local db_name="$2"
+  local schema_name="$3"
+  local probe_output="$4"
+
+  say "Connected to Postgres with the provided DSN, but the installer could not bootstrap schema $schema_name."
+  if [[ -n "$probe_output" ]]; then
+    say "Postgres reported:"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      say "  $line"
+    done <<< "$probe_output"
+  fi
+  say "The proxy creates its config/auth/statistics tables at startup, so the service would fail to stay up until this is fixed."
+  if [[ -n "$role_name" ]]; then
+    say "Required permissions for role $role_name:"
+    say "  - CREATE on database $db_name when schema $schema_name does not already exist"
+    say "  - USAGE and CREATE on schema $schema_name when it already exists"
+    say "Example SQL to run as a Postgres superuser in database $db_name:"
+    say "  ALTER DATABASE $(quote_pg_identifier "$db_name") OWNER TO $(quote_pg_identifier "$role_name");"
+    say "  ALTER SCHEMA $(quote_pg_identifier "$schema_name") OWNER TO $(quote_pg_identifier "$role_name");"
+    say "  GRANT USAGE, CREATE ON SCHEMA $(quote_pg_identifier "$schema_name") TO $(quote_pg_identifier "$role_name");"
+  fi
+  say "After repairing the privileges, rerun ./install_linux.sh."
+}
+
+validate_postgres_bootstrap_permissions() {
+  local target_dsn="$1"
+  local schema_name="${2:-public}"
+  local role_name="${3:-}"
+  local db_name="${4:-}"
+  local probe_table="__cli_proxy_installer_probe_$$"
+  local probe_sql=""
+  local probe_output=""
+
+  schema_name="${schema_name#"${schema_name%%[![:space:]]*}"}"
+  schema_name="${schema_name%"${schema_name##*[![:space:]]}"}"
+  [[ -n "$schema_name" ]] || schema_name="public"
+
+  probe_sql="BEGIN;
+CREATE SCHEMA IF NOT EXISTS $(quote_pg_identifier "$schema_name");
+CREATE TABLE $(quote_pg_identifier "$schema_name").$(quote_pg_identifier "$probe_table") (id INTEGER);
+ROLLBACK;"
+
+  probe_output="$(psql "$target_dsn" -v ON_ERROR_STOP=1 -Atqc "$probe_sql" 2>&1)" || {
+    print_postgres_privilege_repair "$role_name" "$db_name" "$schema_name" "$probe_output"
+    die "Postgres DSN is reachable but cannot create proxy tables in schema $schema_name"
+  }
+
+  say "Validated Postgres bootstrap permissions for schema $schema_name"
+}
+
 ensure_postgres_database() {
   local target_dsn="$1"
+  local schema_name="${2:-public}"
   local db_name=""
   local maintenance_dsn=""
   local exists=""
@@ -649,6 +703,7 @@ ensure_postgres_database() {
   role_password="$(parse_postgres_password "$target_dsn" || true)"
   if psql "$target_dsn" -Atqc "SELECT 1;" >/dev/null 2>&1; then
     say "Validated Postgres DSN and detected existing Postgres database $db_name"
+    validate_postgres_bootstrap_permissions "$target_dsn" "$schema_name" "$role_name" "$db_name"
     return 0
   fi
 
@@ -694,6 +749,7 @@ ensure_postgres_database() {
     print_postgres_manual_init "$target_dsn" "$maintenance_dsn" "$role_name" "$role_password" "$db_name"
     die "Created Postgres database $db_name but failed to connect using target DSN"
   fi
+  validate_postgres_bootstrap_permissions "$target_dsn" "$schema_name" "$role_name" "$db_name"
   say "Validated Postgres DSN after provisioning $db_name"
 }
 
@@ -1148,9 +1204,7 @@ main() {
   fi
   if confirm_yes_no "Create systemd user service?" "Y"; then
     create_service=1
-    if confirm_yes_no "Start service after install?" "Y"; then
-      start_service=1
-    fi
+    start_service=1
   fi
 
   detect_sources "$install_root"
@@ -1219,7 +1273,7 @@ main() {
     pgstore_schema="$(prompt_required_value "Postgres schema" "$existing_pgstore_schema")"
     pgstore_local_path="$(prompt_required_value "Local migration seed path" "$existing_pgstore_local_path")"
     pgstore_local_path="$(expand_path "$pgstore_local_path")"
-    ensure_postgres_database "$pgstore_dsn"
+    ensure_postgres_database "$pgstore_dsn" "$pgstore_schema"
     write_pgstore_env "$env_path" "$pgstore_dsn" "$pgstore_schema" "$pgstore_local_path"
   else
     clear_pgstore_env "$env_path"

@@ -1406,8 +1406,20 @@ func TestInstallerPlatformScriptsContainExpectedServiceSetup(t *testing.T) {
 	if !strings.Contains(linuxBody, "systemctl --user") {
 		t.Fatalf("expected install_linux.sh to use systemctl --user")
 	}
+	if !strings.Contains(linuxBody, "systemctl --user restart") {
+		t.Fatalf("expected install_linux.sh to restart the user service after creating the unit")
+	}
 	if strings.Contains(linuxBody, "launchctl") {
 		t.Fatalf("install_linux.sh should not reference launchctl")
+	}
+	if strings.Contains(linuxBody, "Start service after install?") {
+		t.Fatalf("install_linux.sh should start the user service automatically once it is created")
+	}
+	if !strings.Contains(linuxBody, "validate_postgres_bootstrap_permissions") {
+		t.Fatalf("expected install_linux.sh to preflight Postgres bootstrap permissions before writing PGSTORE env")
+	}
+	if !strings.Contains(linuxBody, "cannot create proxy tables in schema") {
+		t.Fatalf("expected install_linux.sh to fail fast when Postgres can connect but cannot create proxy tables")
 	}
 
 	windowsBytes, err := os.ReadFile(filepath.Join(repoRoot, "install_windows.ps1"))
