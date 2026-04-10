@@ -35,6 +35,7 @@ func setupCustomerHandlerTest(t *testing.T) *gin.Engine {
 	router.DELETE("/v1/internal/customers/:id/api-keys/:key_id", h.DeleteCustomerAPIKey)
 	router.POST("/v1/internal/customers/resolve", h.ResolveCustomerAPIKey)
 	router.POST("/v0/management/customers/:id/credits/top-up", h.PostCustomerCreditsTopUp)
+	router.POST("/v0/management/customers/:id/credits/deduct", h.PostCustomerCreditsDeduct)
 	return router
 }
 
@@ -120,18 +121,32 @@ func TestCustomerHandlersEndToEnd(t *testing.T) {
 		t.Fatalf("credits balance = %v, want 75", toppedUpCustomer["credits_balance"])
 	}
 
+	deductResp := performJSONRequest(t, router, http.MethodPost, "/v0/management/customers/customer-1/credits/deduct", map[string]any{
+		"amount": 5,
+		"reason": "manual deduction",
+		"actor":  "admin",
+	})
+	if deductResp.Code != http.StatusOK {
+		t.Fatalf("deduct status = %d, want %d body=%s", deductResp.Code, http.StatusOK, deductResp.Body.String())
+	}
+	deductBody := decodeJSONBody(t, deductResp)
+	deductedCustomer := deductBody["customer"].(map[string]any)
+	if deductedCustomer["credits_balance"].(float64) != 70 {
+		t.Fatalf("credits balance = %v, want 70", deductedCustomer["credits_balance"])
+	}
+
 	ledgerResp := performJSONRequest(t, router, http.MethodGet, "/v1/internal/customers/customer-1/ledger?limit=10", nil)
 	if ledgerResp.Code != http.StatusOK {
 		t.Fatalf("ledger status = %d, want %d body=%s", ledgerResp.Code, http.StatusOK, ledgerResp.Body.String())
 	}
 	ledgerBody := decodeJSONBody(t, ledgerResp)
 	ledger := ledgerBody["ledger"].([]any)
-	if len(ledger) != 1 {
-		t.Fatalf("ledger length = %d, want 1", len(ledger))
+	if len(ledger) != 2 {
+		t.Fatalf("ledger length = %d, want 2", len(ledger))
 	}
 	latestEntry := ledger[0].(map[string]any)
-	if latestEntry["type"] != customerstate.LedgerTypeTopUp {
-		t.Fatalf("ledger entry type = %v, want %s", latestEntry["type"], customerstate.LedgerTypeTopUp)
+	if latestEntry["type"] != customerstate.LedgerTypeDeduct {
+		t.Fatalf("ledger entry type = %v, want %s", latestEntry["type"], customerstate.LedgerTypeDeduct)
 	}
 
 	deleteResp := performJSONRequest(t, router, http.MethodDelete, "/v1/internal/customers/customer-1/api-keys/"+apiKeyID, nil)

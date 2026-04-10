@@ -76,7 +76,7 @@ func TestServiceIssueResolveRevokeAndLedger(t *testing.T) {
 		t.Fatalf("duplicate debit id = %q, want %q", duplicateDebit.ID, debitEntry.ID)
 	}
 
-	customer, topUpEntry, err := svc.TopUpCredits("cust-1", 15, "manual top up", "admin")
+	customer, _, err = svc.TopUpCredits("cust-1", 15, "manual top up", "admin")
 	if err != nil {
 		t.Fatalf("TopUpCredits() error = %v", err)
 	}
@@ -84,15 +84,24 @@ func TestServiceIssueResolveRevokeAndLedger(t *testing.T) {
 		t.Fatalf("credits after top-up = %d, want 75", customer.CreditsBalance)
 	}
 
+	var deductionEntry LedgerEntry
+	customer, deductionEntry, err = svc.DeductCredits("cust-1", 5, "manual deduction", "admin")
+	if err != nil {
+		t.Fatalf("DeductCredits() error = %v", err)
+	}
+	if customer.CreditsBalance != 70 {
+		t.Fatalf("credits after deduction = %d, want 70", customer.CreditsBalance)
+	}
+
 	ledger, err := svc.ListLedger("cust-1", 10)
 	if err != nil {
 		t.Fatalf("ListLedger() error = %v", err)
 	}
-	if len(ledger) != 2 {
-		t.Fatalf("ledger length = %d, want 2", len(ledger))
+	if len(ledger) != 3 {
+		t.Fatalf("ledger length = %d, want 3", len(ledger))
 	}
-	if ledger[0].ID != topUpEntry.ID {
-		t.Fatalf("latest ledger entry = %q, want %q", ledger[0].ID, topUpEntry.ID)
+	if ledger[0].ID != deductionEntry.ID {
+		t.Fatalf("latest ledger entry = %q, want %q", ledger[0].ID, deductionEntry.ID)
 	}
 
 	if _, err := svc.RevokeAPIKey("cust-1", apiKey.ID); err != nil {

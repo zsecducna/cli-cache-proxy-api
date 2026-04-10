@@ -526,6 +526,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/customers/:id/api-keys", s.mgmt.PostCustomerAPIKey)
 		mgmt.DELETE("/customers/:id/api-keys/:key_id", s.mgmt.DeleteCustomerAPIKey)
 		mgmt.POST("/customers/:id/credits/top-up", s.mgmt.PostCustomerCreditsTopUp)
+		mgmt.POST("/customers/:id/credits/deduct", s.mgmt.PostCustomerCreditsDeduct)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)

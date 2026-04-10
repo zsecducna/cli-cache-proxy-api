@@ -178,3 +178,35 @@ func TestManagementCustomerTopUpRouteRegistered(t *testing.T) {
 		t.Fatalf("credits balance = %v, want 10", customer["credits_balance"])
 	}
 }
+
+func TestManagementCustomerDeductRouteRegistered(t *testing.T) {
+	server := newManagementTestServer(t)
+	svc := setServerCustomerService(t)
+	credits := int64(25)
+	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "cust-mgmt", InitialCredits: &credits}); err != nil {
+		t.Fatalf("UpsertCustomer() error = %v", err)
+	}
+
+	body, err := json.Marshal(map[string]any{"amount": 10, "reason": "manual", "actor": "admin"})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/customers/cust-mgmt/credits/deduct", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Management-Key", "test-secret")
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	customer := payload["customer"].(map[string]any)
+	if customer["credits_balance"].(float64) != 15 {
+		t.Fatalf("credits balance = %v, want 15", customer["credits_balance"])
+	}
+}

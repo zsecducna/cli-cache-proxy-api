@@ -151,6 +151,27 @@ func (h *Handler) PostCustomerCreditsTopUp(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"customer": customer, "entry": entry})
 }
 
+func (h *Handler) PostCustomerCreditsDeduct(c *gin.Context) {
+	svc, ok := customerStateService(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		Amount int64  `json:"amount"`
+		Reason string `json:"reason"`
+		Actor  string `json:"actor"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	customer, entry, err := svc.DeductCredits(c.Param("id"), body.Amount, body.Reason, body.Actor)
+	if !handleCustomerStateError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"customer": customer, "entry": entry})
+}
+
 func (h *Handler) ResolveCustomerAPIKey(c *gin.Context) {
 	svc, ok := customerStateService(c)
 	if !ok {

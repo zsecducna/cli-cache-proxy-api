@@ -24,6 +24,7 @@ const (
 	defaultStateDir  = ".caching-proxy-admin"
 	defaultStateFile = "customers.json"
 	LedgerTypeTopUp  = "credit_top_up"
+	LedgerTypeDeduct = "credit_deduction"
 	LedgerTypeUsage  = "usage_debit"
 )
 
@@ -414,6 +415,44 @@ func (s *Service) TopUpCredits(customerID string, amount int64, reason, actor st
 		CustomerID:   trimmedID,
 		Type:         LedgerTypeTopUp,
 		Delta:        amount,
+		BalanceAfter: customer.CreditsBalance,
+		Reason:       strings.TrimSpace(reason),
+		Actor:        strings.TrimSpace(actor),
+		CreatedAt:    now,
+	}
+	s.state.Ledger = append(s.state.Ledger, entry)
+	if err := s.persistLocked(); err != nil {
+		return CustomerView{}, LedgerEntry{}, err
+	}
+	return publicCustomer(customer), entry, nil
+}
+
+func (s *Service) DeductCredits(customerID string, amount int64, reason, actor string) (CustomerView, LedgerEntry, error) {
+	if s == nil {
+		return CustomerView{}, LedgerEntry{}, ErrCustomerNotFound
+	}
+	if amount <= 0 {
+		return CustomerView{}, LedgerEntry{}, ErrInvalidAmount
+	}
+	trimmedID := strings.TrimSpace(customerID)
+	if trimmedID == "" {
+		return CustomerView{}, LedgerEntry{}, ErrCustomerNotFound
+	}
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	customer := s.state.Customers[trimmedID]
+	if customer == nil {
+		return CustomerView{}, LedgerEntry{}, ErrCustomerNotFound
+	}
+	customer.CreditsBalance -= amount
+	customer.UpdatedAt = now
+	entry := LedgerEntry{
+		ID:           uuid.NewString(),
+		CustomerID:   trimmedID,
+		Type:         LedgerTypeDeduct,
+		Delta:        -amount,
 		BalanceAfter: customer.CreditsBalance,
 		Reason:       strings.TrimSpace(reason),
 		Actor:        strings.TrimSpace(actor),
