@@ -205,6 +205,214 @@ func TestCacheStatisticsStoreSnapshotTracksOpenAILongContextSessions(t *testing.
 	if gpt54Mini.LongContextInputTokens != 0 || gpt54Mini.LongContextCachedTokens != 0 || gpt54Mini.LongContextOutputTokens != 0 {
 		t.Fatalf("gpt-5.4-mini long-context fields = %+v, want zeros", gpt54Mini)
 	}
+
+	if snapshot.Summary.SuccessPercentage != 100 {
+		t.Fatalf("summary success_percentage = %v, want 100", snapshot.Summary.SuccessPercentage)
+	}
+	if snapshot.Summary.GPT54.Standard.RequestCount != 0 {
+		t.Fatalf("summary gpt_5_4.standard.request_count = %d, want 0", snapshot.Summary.GPT54.Standard.RequestCount)
+	}
+	if snapshot.Summary.GPT54.Standard.InputTokens != 0 {
+		t.Fatalf("summary gpt_5_4.standard.input_tokens = %d, want 0", snapshot.Summary.GPT54.Standard.InputTokens)
+	}
+	if snapshot.Summary.GPT54.Standard.OutputTokens != 0 {
+		t.Fatalf("summary gpt_5_4.standard.output_tokens = %d, want 0", snapshot.Summary.GPT54.Standard.OutputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.RequestCount != 2 {
+		t.Fatalf("summary gpt_5_4.long_context.request_count = %d, want 2", snapshot.Summary.GPT54.LongContext.RequestCount)
+	}
+	if snapshot.Summary.GPT54.LongContext.InputTokens != 380000 {
+		t.Fatalf("summary gpt_5_4.long_context.input_tokens = %d, want 380000", snapshot.Summary.GPT54.LongContext.InputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.OutputTokens != 2800 {
+		t.Fatalf("summary gpt_5_4.long_context.output_tokens = %d, want 2800", snapshot.Summary.GPT54.LongContext.OutputTokens)
+	}
+}
+
+func TestCacheStatisticsStoreSnapshotGPT54ThresholdAndSessionFollowUpCounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-4 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-std",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  272000,
+				OutputTokens: 10,
+				TotalTokens:  272010,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-standard", ResponseID: "resp-standard"},
+		},
+		{
+			Timestamp: now.Add(-3 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-long",
+			AuthIndex: "1",
+			Tokens: TokenStats{
+				InputTokens:  272001,
+				OutputTokens: 20,
+				TotalTokens:  272021,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-chain", ResponseID: "resp-long-1"},
+		},
+		{
+			Timestamp: now.Add(-2 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-long",
+			AuthIndex: "1",
+			Tokens: TokenStats{
+				InputTokens:  500,
+				OutputTokens: 30,
+				TotalTokens:  530,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-chain", PreviousResponseID: "resp-long-1", ResponseID: "resp-long-2"},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4-mini",
+			AuthID:    "auth-mini",
+			AuthIndex: "2",
+			Failed:    true,
+			Tokens: TokenStats{
+				InputTokens:  100,
+				OutputTokens: 5,
+				TotalTokens:  105,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-mini", ResponseID: "resp-mini"},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 20, 20, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+
+	if snapshot.Summary.LongContextInputTokens != 272501 {
+		t.Fatalf("summary long_context_input_tokens = %d, want 272501", snapshot.Summary.LongContextInputTokens)
+	}
+	if snapshot.Summary.LongContextOutputTokens != 50 {
+		t.Fatalf("summary long_context_output_tokens = %d, want 50", snapshot.Summary.LongContextOutputTokens)
+	}
+
+	if snapshot.Summary.SuccessPercentage != 75 {
+		t.Fatalf("summary success_percentage = %v, want 75", snapshot.Summary.SuccessPercentage)
+	}
+	if snapshot.Summary.GPT54.Standard.RequestCount != 1 {
+		t.Fatalf("summary gpt_5_4.standard.request_count = %d, want 1", snapshot.Summary.GPT54.Standard.RequestCount)
+	}
+	if snapshot.Summary.GPT54.Standard.InputTokens != 272000 {
+		t.Fatalf("summary gpt_5_4.standard.input_tokens = %d, want 272000", snapshot.Summary.GPT54.Standard.InputTokens)
+	}
+	if snapshot.Summary.GPT54.Standard.OutputTokens != 10 {
+		t.Fatalf("summary gpt_5_4.standard.output_tokens = %d, want 10", snapshot.Summary.GPT54.Standard.OutputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.RequestCount != 2 {
+		t.Fatalf("summary gpt_5_4.long_context.request_count = %d, want 2", snapshot.Summary.GPT54.LongContext.RequestCount)
+	}
+	if snapshot.Summary.GPT54.LongContext.InputTokens != 272501 {
+		t.Fatalf("summary gpt_5_4.long_context.input_tokens = %d, want 272501", snapshot.Summary.GPT54.LongContext.InputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.OutputTokens != 50 {
+		t.Fatalf("summary gpt_5_4.long_context.output_tokens = %d, want 50", snapshot.Summary.GPT54.LongContext.OutputTokens)
+	}
+}
+
+func TestCacheStatisticsStoreSnapshotGPT54BreakdownIgnoresGPT54ProThresholdCrossing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	events := []CacheStatisticsEvent{
+		{
+			Timestamp: now.Add(-4 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4-pro",
+			AuthID:    "auth-pro",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  300000,
+				OutputTokens: 1000,
+				TotalTokens:  301000,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-mixed", ResponseID: "resp-pro-1"},
+		},
+		{
+			Timestamp: now.Add(-3 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-gpt54",
+			AuthIndex: "1",
+			Tokens: TokenStats{
+				InputTokens:  1000,
+				OutputTokens: 100,
+				TotalTokens:  1100,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-mixed", PreviousResponseID: "resp-pro-1", ResponseID: "resp-gpt54-1"},
+		},
+		{
+			Timestamp: now.Add(-2 * time.Hour),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			AuthID:    "auth-gpt54",
+			AuthIndex: "1",
+			Tokens: TokenStats{
+				InputTokens:  2000,
+				OutputTokens: 200,
+				TotalTokens:  2200,
+			},
+			Cache: &helps.CodexCacheObservability{PromptCacheKey: "session-standard", ResponseID: "resp-gpt54-2"},
+		},
+	}
+	for _, event := range events {
+		if err := store.InsertEvent(context.Background(), event); err != nil {
+			t.Fatalf("InsertEvent() error = %v", err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 20, 20, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+
+	if snapshot.Summary.GPT54.Standard.RequestCount != 2 {
+		t.Fatalf("summary gpt_5_4.standard.request_count = %d, want 2", snapshot.Summary.GPT54.Standard.RequestCount)
+	}
+	if snapshot.Summary.GPT54.Standard.InputTokens != 3000 {
+		t.Fatalf("summary gpt_5_4.standard.input_tokens = %d, want 3000", snapshot.Summary.GPT54.Standard.InputTokens)
+	}
+	if snapshot.Summary.GPT54.Standard.OutputTokens != 300 {
+		t.Fatalf("summary gpt_5_4.standard.output_tokens = %d, want 300", snapshot.Summary.GPT54.Standard.OutputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.RequestCount != 0 {
+		t.Fatalf("summary gpt_5_4.long_context.request_count = %d, want 0", snapshot.Summary.GPT54.LongContext.RequestCount)
+	}
+	if snapshot.Summary.GPT54.LongContext.InputTokens != 0 {
+		t.Fatalf("summary gpt_5_4.long_context.input_tokens = %d, want 0", snapshot.Summary.GPT54.LongContext.InputTokens)
+	}
+	if snapshot.Summary.GPT54.LongContext.OutputTokens != 0 {
+		t.Fatalf("summary gpt_5_4.long_context.output_tokens = %d, want 0", snapshot.Summary.GPT54.LongContext.OutputTokens)
+	}
 }
 
 func TestCacheStatisticsStoreSnapshotIncludesModelTrends(t *testing.T) {

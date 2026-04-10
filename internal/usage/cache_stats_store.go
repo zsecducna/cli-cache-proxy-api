@@ -42,20 +42,33 @@ type CacheStatisticsEvent struct {
 }
 
 type CacheStatisticsSummary struct {
-	TotalRequests           int64   `json:"total_requests"`
-	SuccessRequests         int64   `json:"success_requests"`
-	FailedRequests          int64   `json:"failed_requests"`
-	InputTokens             int64   `json:"input_tokens"`
-	EffectiveInputTokens    int64   `json:"effective_input_tokens"`
-	LongContextInputTokens  int64   `json:"long_context_input_tokens,omitempty"`
-	LongContextCachedTokens int64   `json:"long_context_cached_tokens,omitempty"`
-	LongContextOutputTokens int64   `json:"long_context_output_tokens,omitempty"`
-	OutputTokens            int64   `json:"output_tokens"`
-	ReasoningTokens         int64   `json:"reasoning_tokens"`
-	CachedTokens            int64   `json:"cached_tokens"`
-	TotalTokens             int64   `json:"total_tokens"`
-	CacheRatio              float64 `json:"cache_ratio"`
-	AvgLatencyMs            float64 `json:"avg_latency_ms"`
+	TotalRequests           int64                         `json:"total_requests"`
+	SuccessRequests         int64                         `json:"success_requests"`
+	FailedRequests          int64                         `json:"failed_requests"`
+	SuccessPercentage       float64                       `json:"success_percentage"`
+	InputTokens             int64                         `json:"input_tokens"`
+	EffectiveInputTokens    int64                         `json:"effective_input_tokens"`
+	LongContextInputTokens  int64                         `json:"long_context_input_tokens,omitempty"`
+	LongContextCachedTokens int64                         `json:"long_context_cached_tokens,omitempty"`
+	LongContextOutputTokens int64                         `json:"long_context_output_tokens,omitempty"`
+	OutputTokens            int64                         `json:"output_tokens"`
+	ReasoningTokens         int64                         `json:"reasoning_tokens"`
+	CachedTokens            int64                         `json:"cached_tokens"`
+	TotalTokens             int64                         `json:"total_tokens"`
+	CacheRatio              float64                       `json:"cache_ratio"`
+	AvgLatencyMs            float64                       `json:"avg_latency_ms"`
+	GPT54                   CacheStatisticsModelBreakdown `json:"gpt_5_4"`
+}
+
+type CacheStatisticsBreakdownBucket struct {
+	RequestCount int64 `json:"request_count"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+type CacheStatisticsModelBreakdown struct {
+	Standard    CacheStatisticsBreakdownBucket `json:"standard"`
+	LongContext CacheStatisticsBreakdownBucket `json:"long_context"`
 }
 
 type CacheStatisticsModelSummary struct {
@@ -584,6 +597,11 @@ func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recen
 	if err != nil {
 		return result, err
 	}
+	gpt54LongContext, err := s.queryExactModelLongContextUsage(ctx, since, providers, "gpt-5.4")
+	if err != nil {
+		return result, err
+	}
+	summary.SuccessPercentage = cacheStatisticsPercentage(summary.SuccessRequests, summary.TotalRequests)
 	summary.LongContextInputTokens = summaryLongContext.InputTokens
 	summary.LongContextCachedTokens = summaryLongContext.CachedTokens
 	summary.LongContextOutputTokens = summaryLongContext.OutputTokens
@@ -598,6 +616,7 @@ func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recen
 		item.LongContextCachedTokens = usage.CachedTokens
 		item.LongContextOutputTokens = usage.OutputTokens
 	}
+	summary.GPT54 = cacheStatisticsGPT54Breakdown(byModel, gpt54LongContext)
 	byDay, err := s.queryDaySummaries(ctx, since, providers)
 	if err != nil {
 		return result, err
@@ -859,6 +878,7 @@ WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 }
 
 type cacheStatisticsLongContextUsage struct {
+	RequestCount int64
 	InputTokens  int64
 	CachedTokens int64
 	OutputTokens int64
@@ -936,6 +956,25 @@ LIMIT ` + s.bind(len(args)+1)
 }
 
 func (s *CacheStatisticsStore) queryLongContextPricingUsage(ctx context.Context, since string, providers []string) (cacheStatisticsLongContextUsage, map[string]cacheStatisticsLongContextUsage, error) {
+	return s.queryLongContextUsage(ctx, since, providers, supportsOpenAILongContextPricing, nil)
+}
+
+func (s *CacheStatisticsStore) queryExactModelLongContextUsage(ctx context.Context, since string, providers []string, model string) (cacheStatisticsLongContextUsage, error) {
+	modelMatcher := cacheStatisticsExactModelMatcher(model)
+	if modelMatcher == nil {
+		return cacheStatisticsLongContextUsage{}, nil
+	}
+	summary, _, err := s.queryLongContextUsage(ctx, since, providers, modelMatcher, modelMatcher)
+	return summary, err
+}
+
+func (s *CacheStatisticsStore) queryLongContextUsage(
+	ctx context.Context,
+	since string,
+	providers []string,
+	qualifies func(string) bool,
+	include func(string) bool,
+) (cacheStatisticsLongContextUsage, map[string]cacheStatisticsLongContextUsage, error) {
 	summary := cacheStatisticsLongContextUsage{}
 	byModel := make(map[string]cacheStatisticsLongContextUsage)
 	if ctx == nil {
@@ -994,7 +1033,7 @@ ORDER BY requested_at ASC, id ASC`
 
 		sessionKey := resolveLongContextPricingSessionKey(item, responseToSession)
 		sessionRequests[sessionKey] = append(sessionRequests[sessionKey], item)
-		if supportsOpenAILongContextPricing(item.Model) && item.InputTokens > openAILongContextInputThreshold {
+		if qualifies != nil && qualifies(item.Model) && item.InputTokens > openAILongContextInputThreshold {
 			sessionLongContext[sessionKey] = true
 		}
 		if responseID := strings.TrimSpace(item.ResponseID); responseID != "" {
@@ -1011,14 +1050,23 @@ ORDER BY requested_at ASC, id ASC`
 		}
 		for i := range items {
 			item := items[i]
-			summary.InputTokens += normaliseNonNegative(item.InputTokens)
-			summary.CachedTokens += normaliseNonNegative(item.CachedTokens)
-			summary.OutputTokens += normaliseNonNegative(item.OutputTokens)
+			if include != nil && !include(item.Model) {
+				continue
+			}
+			itemInputTokens := normaliseNonNegative(item.InputTokens)
+			itemCachedTokens := normaliseNonNegative(item.CachedTokens)
+			itemOutputTokens := normaliseNonNegative(item.OutputTokens)
+
+			summary.RequestCount++
+			summary.InputTokens += itemInputTokens
+			summary.CachedTokens += itemCachedTokens
+			summary.OutputTokens += itemOutputTokens
 
 			modelUsage := byModel[item.Model]
-			modelUsage.InputTokens += normaliseNonNegative(item.InputTokens)
-			modelUsage.CachedTokens += normaliseNonNegative(item.CachedTokens)
-			modelUsage.OutputTokens += normaliseNonNegative(item.OutputTokens)
+			modelUsage.RequestCount++
+			modelUsage.InputTokens += itemInputTokens
+			modelUsage.CachedTokens += itemCachedTokens
+			modelUsage.OutputTokens += itemOutputTokens
 			byModel[item.Model] = modelUsage
 		}
 	}
@@ -1048,6 +1096,46 @@ func resolveLongContextPricingSessionKey(item cacheStatisticsLongContextRequest,
 func supportsOpenAILongContextPricing(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	return model == "gpt-5.4" || model == "gpt-5.4-pro"
+}
+
+func cacheStatisticsExactModelMatcher(model string) func(string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return nil
+	}
+	return func(candidate string) bool {
+		return strings.ToLower(strings.TrimSpace(candidate)) == model
+	}
+}
+
+func cacheStatisticsPercentage(numerator, denominator int64) float64 {
+	if numerator <= 0 || denominator <= 0 {
+		return 0
+	}
+	return (float64(numerator) / float64(denominator)) * 100
+}
+
+func cacheStatisticsGPT54Breakdown(models []CacheStatisticsModelSummary, longContext cacheStatisticsLongContextUsage) CacheStatisticsModelBreakdown {
+	var total CacheStatisticsModelSummary
+	for i := range models {
+		if strings.EqualFold(strings.TrimSpace(models[i].Model), "gpt-5.4") {
+			total = models[i]
+			break
+		}
+	}
+
+	return CacheStatisticsModelBreakdown{
+		Standard: CacheStatisticsBreakdownBucket{
+			RequestCount: normaliseNonNegative(total.Requests - longContext.RequestCount),
+			InputTokens:  normaliseNonNegative(total.InputTokens - longContext.InputTokens),
+			OutputTokens: normaliseNonNegative(total.OutputTokens - longContext.OutputTokens),
+		},
+		LongContext: CacheStatisticsBreakdownBucket{
+			RequestCount: normaliseNonNegative(longContext.RequestCount),
+			InputTokens:  normaliseNonNegative(longContext.InputTokens),
+			OutputTokens: normaliseNonNegative(longContext.OutputTokens),
+		},
+	}
 }
 
 func (s *CacheStatisticsStore) queryDaySummaries(ctx context.Context, since string, providers []string) ([]CacheStatisticsDaySummary, error) {

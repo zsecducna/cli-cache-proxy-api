@@ -509,8 +509,21 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 		CacheStatistics struct {
 			DBPath  string `json:"db_path"`
 			Summary struct {
-				TotalRequests int64 `json:"total_requests"`
-				CachedTokens  int64 `json:"cached_tokens"`
+				TotalRequests     int64   `json:"total_requests"`
+				CachedTokens      int64   `json:"cached_tokens"`
+				SuccessPercentage float64 `json:"success_percentage"`
+				GPT54             struct {
+					Standard struct {
+						RequestCount int64 `json:"request_count"`
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					} `json:"standard"`
+					LongContext struct {
+						RequestCount int64 `json:"request_count"`
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					} `json:"long_context"`
+				} `json:"gpt_5_4"`
 			} `json:"summary"`
 			ByModel []struct {
 				Model string `json:"model"`
@@ -539,6 +552,27 @@ func TestManagementCacheStatisticsEndpoint(t *testing.T) {
 	}
 	if payload.CacheStatistics.Summary.CachedTokens != 1150 {
 		t.Fatalf("cached_tokens = %d, want 1150", payload.CacheStatistics.Summary.CachedTokens)
+	}
+	if payload.CacheStatistics.Summary.SuccessPercentage != 100 {
+		t.Fatalf("success_percentage = %v, want 100", payload.CacheStatistics.Summary.SuccessPercentage)
+	}
+	if payload.CacheStatistics.Summary.GPT54.Standard.RequestCount != 1 {
+		t.Fatalf("gpt_5_4.standard.request_count = %d, want 1", payload.CacheStatistics.Summary.GPT54.Standard.RequestCount)
+	}
+	if payload.CacheStatistics.Summary.GPT54.Standard.InputTokens != 1000 {
+		t.Fatalf("gpt_5_4.standard.input_tokens = %d, want 1000", payload.CacheStatistics.Summary.GPT54.Standard.InputTokens)
+	}
+	if payload.CacheStatistics.Summary.GPT54.Standard.OutputTokens != 100 {
+		t.Fatalf("gpt_5_4.standard.output_tokens = %d, want 100", payload.CacheStatistics.Summary.GPT54.Standard.OutputTokens)
+	}
+	if payload.CacheStatistics.Summary.GPT54.LongContext.RequestCount != 0 {
+		t.Fatalf("gpt_5_4.long_context.request_count = %d, want 0", payload.CacheStatistics.Summary.GPT54.LongContext.RequestCount)
+	}
+	if payload.CacheStatistics.Summary.GPT54.LongContext.InputTokens != 0 {
+		t.Fatalf("gpt_5_4.long_context.input_tokens = %d, want 0", payload.CacheStatistics.Summary.GPT54.LongContext.InputTokens)
+	}
+	if payload.CacheStatistics.Summary.GPT54.LongContext.OutputTokens != 0 {
+		t.Fatalf("gpt_5_4.long_context.output_tokens = %d, want 0", payload.CacheStatistics.Summary.GPT54.LongContext.OutputTokens)
 	}
 	if len(payload.CacheStatistics.ByModel) != 1 {
 		t.Fatalf("by_model len = %d, want 1", len(payload.CacheStatistics.ByModel))
@@ -603,6 +637,12 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 	now := time.Now().UTC().Truncate(time.Second)
 	events := []usage.CacheStatisticsEvent{
 		{
+			Timestamp: now.Add(-6 * time.Minute),
+			Provider:  "codex",
+			Model:     "gpt-5.4",
+			Tokens:    usage.TokenStats{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		},
+		{
 			Timestamp: now.Add(-5 * time.Minute),
 			Provider:  "gemini",
 			Model:     "gemini-2.5-pro",
@@ -645,7 +685,7 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 		}
 	}
 
-	assertProviders := func(path string, wantTotal int64, wantProviders ...string) {
+	assertProviders := func(path string, wantTotal int64, wantGPT54StandardRequests int64, wantGPT54LongContextRequests int64, wantProviders ...string) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer test-secret")
@@ -658,6 +698,14 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 			CacheStatistics struct {
 				Summary struct {
 					TotalRequests int64 `json:"total_requests"`
+					GPT54         struct {
+						Standard struct {
+							RequestCount int64 `json:"request_count"`
+						} `json:"standard"`
+						LongContext struct {
+							RequestCount int64 `json:"request_count"`
+						} `json:"long_context"`
+					} `json:"gpt_5_4"`
 				} `json:"summary"`
 				RecentRequests []struct {
 					Provider string `json:"provider"`
@@ -669,6 +717,12 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 		}
 		if payload.CacheStatistics.Summary.TotalRequests != wantTotal {
 			t.Fatalf("total_requests = %d, want %d", payload.CacheStatistics.Summary.TotalRequests, wantTotal)
+		}
+		if payload.CacheStatistics.Summary.GPT54.Standard.RequestCount != wantGPT54StandardRequests {
+			t.Fatalf("gpt_5_4.standard.request_count = %d, want %d", payload.CacheStatistics.Summary.GPT54.Standard.RequestCount, wantGPT54StandardRequests)
+		}
+		if payload.CacheStatistics.Summary.GPT54.LongContext.RequestCount != wantGPT54LongContextRequests {
+			t.Fatalf("gpt_5_4.long_context.request_count = %d, want %d", payload.CacheStatistics.Summary.GPT54.LongContext.RequestCount, wantGPT54LongContextRequests)
 		}
 		if len(payload.CacheStatistics.RecentRequests) != len(wantProviders) {
 			t.Fatalf("recent requests len = %d, want %d", len(payload.CacheStatistics.RecentRequests), len(wantProviders))
@@ -691,9 +745,10 @@ func TestManagementCacheStatisticsEndpointProviderFilterGroupsProviders(t *testi
 		}
 	}
 
-	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=gemini", 2, "gemini", "gemini-cli")
-	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 3, "openai-compatibility", "openrouter", "bohe")
-	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", 1, "claude")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=codex", 1, 1, 0, "codex")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=gemini", 2, 0, 0, "gemini", "gemini-cli")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=openai-compatible", 3, 0, 0, "openai-compatibility", "openrouter", "bohe")
+	assertProviders("/v0/management/cache-statistics?days=7&limit=10&model_limit=10&provider=claude", 1, 0, 0, "claude")
 }
 
 func TestManagementCacheStatisticsEndpointIncludesAnthropicEffectiveInputTokens(t *testing.T) {
