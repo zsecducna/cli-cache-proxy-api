@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -351,6 +352,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		go func() {
 			select {
 			case <-requestCtx.Done():
+				if errors.Is(requestCtx.Err(), context.Canceled) {
+					logging.MarkRequestCanceled(c)
+				}
 				cancel()
 			case <-cancelCtx.Done():
 			}
@@ -359,6 +363,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
+		if len(params) == 1 {
+			if err, ok := params[0].(error); ok && shouldMarkRequestCanceled(err) {
+				logging.MarkRequestCanceled(c)
+			}
+		}
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
 				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
@@ -397,6 +406,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 
 		cancel()
 	}
+}
+
+func shouldMarkRequestCanceled(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler))
 }
 
 // StartNonStreamingKeepAlive emits blank lines every 5 seconds while waiting for a non-streaming response.

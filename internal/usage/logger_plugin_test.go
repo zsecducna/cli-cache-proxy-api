@@ -2,12 +2,14 @@ package usage
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -33,6 +35,90 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	}
 	if details[0].LatencyMs != 1500 {
 		t.Fatalf("latency_ms = %d, want 1500", details[0].LatencyMs)
+	}
+}
+
+func TestRequestStatisticsRecordTreatsClientClosed499AsNonFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	reqCtx, cancel := context.WithCancel(req.Context())
+	cancel()
+	ginCtx.Request = req.WithContext(reqCtx)
+	ginCtx.Status(clientClosedRequestStatusCode)
+
+	stats := NewRequestStatistics()
+	stats.Record(context.WithValue(context.Background(), "gin", ginCtx), coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			TotalTokens: 1,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("total_requests = %d, want 1", snapshot.TotalRequests)
+	}
+	if snapshot.SuccessCount != 1 || snapshot.FailureCount != 0 {
+		t.Fatalf("success/failure = %d/%d, want 1/0", snapshot.SuccessCount, snapshot.FailureCount)
+	}
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].Failed {
+		t.Fatal("expected canceled request detail to remain non-failed")
+	}
+}
+
+func TestRequestStatisticsRecordTreatsMarkedCanceled408AsNonFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	ginCtx.Request = req
+	logging.MarkRequestCanceled(ginCtx)
+	ginCtx.Status(http.StatusRequestTimeout)
+
+	stats := NewRequestStatistics()
+	stats.Record(context.WithValue(context.Background(), "gin", ginCtx), coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC),
+		Detail: coreusage.Detail{
+			TotalTokens: 1,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.SuccessCount != 1 || snapshot.FailureCount != 0 {
+		t.Fatalf("success/failure = %d/%d, want 1/0", snapshot.SuccessCount, snapshot.FailureCount)
+	}
+}
+
+func TestRequestStatisticsRecordKeepsPlain408AsFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	ginCtx.Status(http.StatusRequestTimeout)
+
+	stats := NewRequestStatistics()
+	stats.Record(context.WithValue(context.Background(), "gin", ginCtx), coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 12, 0, 2, 0, time.UTC),
+		Detail: coreusage.Detail{
+			TotalTokens: 1,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.SuccessCount != 0 || snapshot.FailureCount != 1 {
+		t.Fatalf("success/failure = %d/%d, want 0/1", snapshot.SuccessCount, snapshot.FailureCount)
 	}
 }
 

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
@@ -138,6 +140,9 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	releaseQuotaRefreshSlot, errThrottle := acquireQuotaRefreshAPICallSlot(c.Request.Context(), method, parsedURL)
 	if errThrottle != nil {
+		if errors.Is(errThrottle, context.Canceled) || errors.Is(c.Request.Context().Err(), context.Canceled) {
+			logging.MarkRequestCanceled(c)
+		}
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request canceled"})
 		return
 	}

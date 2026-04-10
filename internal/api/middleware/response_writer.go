@@ -5,6 +5,8 @@ package middleware
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
 const responseBodyOverrideContextKey = "RESPONSE_BODY_OVERRIDE"
 const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
+const clientClosedRequestStatusCode = 499
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
@@ -114,7 +117,7 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 			status = http.StatusOK
 		}
 	}
-	return status >= http.StatusBadRequest
+	return status >= http.StatusBadRequest && !isClientClosedRequestStatus(status)
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -278,7 +281,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 	}
 
-	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
+	hasAPIError := hasAPIError(finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && !w.logger.IsEnabled() && shouldForceErrorLog(c, w.requestInfo, hasAPIError)
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
@@ -324,8 +327,37 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIWebsocketTimeline(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
+func hasAPIError(statusCode int, apiResponseErrors []*interfaces.ErrorMessage) bool {
+	if statusCode >= http.StatusBadRequest && !isClientClosedRequestStatus(statusCode) {
+		return true
+	}
+	for i := 0; i < len(apiResponseErrors); i++ {
+		if !isClientClosedRequestError(apiResponseErrors[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isClientClosedRequestError(apiErr *interfaces.ErrorMessage) bool {
+	if apiErr == nil {
+		return true
+	}
+	if isClientClosedRequestStatus(apiErr.StatusCode) {
+		return true
+	}
+	return apiErr.Error != nil && errors.Is(apiErr.Error, context.Canceled)
+}
+
+func isClientClosedRequestStatus(statusCode int) bool {
+	return statusCode == clientClosedRequestStatusCode
+}
+
 func shouldForceErrorLog(c *gin.Context, requestInfo *RequestInfo, hasAPIError bool) bool {
 	if requestInfo == nil || !hasAPIError || c == nil || !hasRecordedUpstreamAttempt(c) {
+		return false
+	}
+	if logging.WasRequestCanceled(c) {
 		return false
 	}
 	routePattern := strings.TrimSpace(c.FullPath())

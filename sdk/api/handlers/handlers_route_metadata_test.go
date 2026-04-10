@@ -103,3 +103,19 @@ func TestExecuteWithAuthManager_ThreadsRouteAndRequestIDMetadata(t *testing.T) {
 		t.Fatalf("requested_model metadata = %v, want %q", got, want)
 	}
 }
+
+func TestGetContextWithCancelMarksCanceledRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"gpt-5.4"}`))
+
+	_, cancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+	cancel(context.Canceled)
+
+	if !logging.WasRequestCanceled(ginCtx) {
+		t.Fatal("expected canceled request marker to be stored on gin context")
+	}
+}

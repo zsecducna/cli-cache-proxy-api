@@ -2,6 +2,8 @@ package helps
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -196,5 +198,38 @@ func TestNewUsageReporterIncludesReasoningEffortFromContext(t *testing.T) {
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
 	if record.ReasoningEffort != "xhigh" {
 		t.Fatalf("reasoning_effort = %q, want %q", record.ReasoningEffort, "xhigh")
+	}
+}
+
+func TestShouldPublishFailureSkipsContextCanceledError(t *testing.T) {
+	if shouldPublishFailure(context.Background(), context.Canceled) {
+		t.Fatal("expected context cancellation error to skip failed usage publication")
+	}
+}
+
+func TestShouldPublishFailureSkipsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if shouldPublishFailure(ctx, nil) {
+		t.Fatal("expected canceled context to skip failed usage publication")
+	}
+}
+
+func TestShouldPublishFailureAllowsNonCanceledFailures(t *testing.T) {
+	if !shouldPublishFailure(context.Background(), context.DeadlineExceeded) {
+		t.Fatal("expected non-canceled failure to be published")
+	}
+}
+
+func TestShouldPublishFailureSkipsAbortHandler(t *testing.T) {
+	if shouldPublishFailure(context.Background(), http.ErrAbortHandler) {
+		t.Fatal("expected http.ErrAbortHandler to skip failed usage publication")
+	}
+}
+
+func TestShouldPublishFailureSkipsWrappedAbortHandler(t *testing.T) {
+	if shouldPublishFailure(context.Background(), fmt.Errorf("wrapped: %w", http.ErrAbortHandler)) {
+		t.Fatal("expected wrapped http.ErrAbortHandler to skip failed usage publication")
 	}
 }

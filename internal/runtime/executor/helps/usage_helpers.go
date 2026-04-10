@@ -3,7 +3,9 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +57,9 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
+	if !shouldPublishFailure(ctx, nil) {
+		return
+	}
 	r.publishWithOutcome(ctx, usage.Detail{}, true)
 }
 
@@ -62,9 +67,16 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 	if r == nil || errPtr == nil {
 		return
 	}
-	if *errPtr != nil {
+	if *errPtr != nil && shouldPublishFailure(ctx, *errPtr) {
 		r.PublishFailure(ctx)
 	}
+}
+
+func shouldPublishFailure(ctx context.Context, err error) bool {
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler)) {
+		return false
+	}
+	return ctx == nil || !errors.Is(ctx.Err(), context.Canceled)
 }
 
 func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {

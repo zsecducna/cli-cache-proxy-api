@@ -27,6 +27,8 @@ var aiAPIPrefixes = []string{
 }
 
 const skipGinLogKey = "__gin_skip_request_logging__"
+const requestCanceledKey = "__gin_request_canceled__"
+const clientClosedRequestStatusCode = 499
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
@@ -84,10 +86,19 @@ func GinLogrusLogger() gin.HandlerFunc {
 
 		entry := log.WithField("request_id", requestID)
 
+		requestCanceled := WasRequestCanceled(c)
 		switch {
 		case statusCode >= http.StatusInternalServerError:
+			if requestCanceled {
+				entry.Info(logLine)
+				return
+			}
 			entry.Error(logLine)
-		case statusCode >= http.StatusBadRequest:
+		case statusCode >= http.StatusBadRequest && statusCode != clientClosedRequestStatusCode:
+			if requestCanceled {
+				entry.Info(logLine)
+				return
+			}
 			entry.Warn(logLine)
 		default:
 			entry.Info(logLine)
@@ -135,6 +146,27 @@ func SkipGinRequestLogging(c *gin.Context) {
 		return
 	}
 	c.Set(skipGinLogKey, true)
+}
+
+// MarkRequestCanceled stores a durable marker that the request was aborted by the client.
+func MarkRequestCanceled(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(requestCanceledKey, true)
+}
+
+// WasRequestCanceled reports whether the request was marked as client-canceled.
+func WasRequestCanceled(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	val, exists := c.Get(requestCanceledKey)
+	if !exists {
+		return false
+	}
+	flag, ok := val.(bool)
+	return ok && flag
 }
 
 func shouldSkipGinRequestLogging(c *gin.Context) bool {

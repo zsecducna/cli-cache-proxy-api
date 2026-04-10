@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -675,14 +676,24 @@ func resolveSuccess(ctx context.Context) bool {
 	if !ok || ginCtx == nil {
 		return true
 	}
+	if logging.WasRequestCanceled(ginCtx) {
+		return true
+	}
+	if ginCtx.Request != nil && ginCtx.Request.Context() != nil && ginCtx.Request.Context().Err() == context.Canceled {
+		return true
+	}
 	status := ginCtx.Writer.Status()
 	if status == 0 {
+		return true
+	}
+	if status == clientClosedRequestStatusCode {
 		return true
 	}
 	return status < httpStatusBadRequest
 }
 
 const httpStatusBadRequest = 400
+const clientClosedRequestStatusCode = 499
 
 func normaliseDetail(detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{

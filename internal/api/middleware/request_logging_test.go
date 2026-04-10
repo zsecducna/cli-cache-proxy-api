@@ -309,6 +309,61 @@ func TestRequestLoggingMiddleware_SkipsNonProxyErrorsInErrorOnlyMode(t *testing.
 	}
 }
 
+func TestRequestLoggingMiddleware_SkipsCancelledProxyRequestInErrorOnlyMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/messages", func(c *gin.Context) {
+		c.Set("API_UPSTREAM_ATTEMPTED", true)
+		c.Status(clientClosedRequestStatusCode)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != clientClosedRequestStatusCode {
+		t.Fatalf("status code = %d, want %d", rec.Code, clientClosedRequestStatusCode)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
+func TestRequestLoggingMiddleware_SkipsMarkedCanceledRequestTimeoutInErrorOnlyMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/messages", func(c *gin.Context) {
+		c.Set("API_UPSTREAM_ATTEMPTED", true)
+		logging.MarkRequestCanceled(c)
+		c.Status(http.StatusRequestTimeout)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusRequestTimeout)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
 type recordingRequestLogger struct {
 	enabled                    bool
 	logRequestCalls            int

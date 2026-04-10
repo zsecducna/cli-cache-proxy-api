@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -306,6 +307,15 @@ func TestFinalizeForceLog_OnlyForProxyFailures(t *testing.T) {
 			wantForced: false,
 		},
 		{
+			name:       "suppress cancelled proxy request 499",
+			url:        "/v1/messages",
+			method:     http.MethodPost,
+			statusCode: clientClosedRequestStatusCode,
+			setAttempt: true,
+			wantCalled: false,
+			wantForced: false,
+		},
+		{
 			name:       "suppress non proxy failure 502",
 			url:        "/",
 			method:     http.MethodPost,
@@ -346,5 +356,70 @@ func TestFinalizeForceLog_OnlyForProxyFailures(t *testing.T) {
 		if logger.forced != tests[i].wantForced {
 			t.Fatalf("%s: force flag = %t, want %t", tests[i].name, logger.forced, tests[i].wantForced)
 		}
+	}
+}
+
+func TestFinalizeSuppressesContextCanceledAPIError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("API_UPSTREAM_ATTEMPTED", true)
+	c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{{
+		StatusCode: clientClosedRequestStatusCode,
+		Error:      context.Canceled,
+	}})
+
+	logger := &captureRequestLogger{enabled: false}
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: c.Writer,
+		logger:         logger,
+		requestInfo: &RequestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}},
+			RequestID: "req-cancel",
+			Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+		},
+		statusCode:     http.StatusOK,
+		logOnErrorOnly: true,
+	}
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	if logger.called {
+		t.Fatal("expected canceled API error to skip forced logging")
+	}
+}
+
+func TestFinalizeSuppressesMarkedCanceledRequestTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("API_UPSTREAM_ATTEMPTED", true)
+	logging.MarkRequestCanceled(c)
+
+	logger := &captureRequestLogger{enabled: false}
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: c.Writer,
+		logger:         logger,
+		requestInfo: &RequestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}},
+			RequestID: "req-timeout-cancel",
+			Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+		},
+		statusCode:     http.StatusRequestTimeout,
+		logOnErrorOnly: true,
+	}
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	if logger.called {
+		t.Fatal("expected marked canceled timeout to skip forced logging")
 	}
 }
