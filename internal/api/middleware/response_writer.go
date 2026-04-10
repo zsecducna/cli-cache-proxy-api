@@ -279,7 +279,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
-	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	forceLog := w.logOnErrorOnly && !w.logger.IsEnabled() && shouldForceErrorLog(c, w.requestInfo, hasAPIError)
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
@@ -322,6 +322,87 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIWebsocketTimeline(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+}
+
+func shouldForceErrorLog(c *gin.Context, requestInfo *RequestInfo, hasAPIError bool) bool {
+	if requestInfo == nil || !hasAPIError || c == nil || !hasRecordedUpstreamAttempt(c) {
+		return false
+	}
+	routePattern := strings.TrimSpace(c.FullPath())
+	if routePattern == "" {
+		routePattern = requestInfoPath(requestInfo)
+	}
+	if routePattern == "" {
+		return false
+	}
+	switch routePattern {
+	case "/v1/chat/completions",
+		"/v1/completions",
+		"/v1/messages",
+		"/v1/messages/count_tokens",
+		"/v1/responses/compact",
+		"/v1internal:method",
+		"/v1beta/models/*action",
+		"/api/provider/:provider/chat/completions",
+		"/api/provider/:provider/completions",
+		"/api/provider/:provider/responses",
+		"/api/provider/:provider/v1/chat/completions",
+		"/api/provider/:provider/v1/completions",
+		"/api/provider/:provider/v1/responses",
+		"/api/provider/:provider/v1/messages",
+		"/api/provider/:provider/v1/messages/count_tokens",
+		"/api/provider/:provider/v1beta/models/*action",
+		"/api/provider/google/v1beta1/*path":
+		return requestInfo.Method == http.MethodPost
+	case "/v1/responses":
+		if requestInfo.Method == http.MethodPost {
+			return true
+		}
+		return requestInfo.Method == http.MethodGet && requestInfoHasHeaderValue(requestInfo, "Upgrade", "websocket")
+	default:
+		return false
+	}
+}
+
+func hasRecordedUpstreamAttempt(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	value, exists := c.Get("API_UPSTREAM_ATTEMPTED")
+	if !exists {
+		return false
+	}
+	if attempted, ok := value.(bool); ok {
+		return attempted
+	}
+	return true
+}
+
+func requestInfoPath(requestInfo *RequestInfo) string {
+	if requestInfo == nil {
+		return ""
+	}
+	path := strings.TrimSpace(requestInfo.URL)
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	return path
+}
+
+func requestInfoHasHeaderValue(requestInfo *RequestInfo, key, want string) bool {
+	if requestInfo == nil || len(requestInfo.Headers) == 0 {
+		return false
+	}
+	values, ok := requestInfo.Headers[key]
+	if !ok {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {

@@ -22,6 +22,7 @@ import (
 
 const (
 	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
+	apiUpstreamAttemptedKey = "API_UPSTREAM_ATTEMPTED"
 	apiRequestKey           = "API_REQUEST"
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
@@ -81,11 +82,12 @@ type AnthropicCacheObservability struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !config.EffectiveRequestLogEnabled(cfg) {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	ginCtx.Set(apiUpstreamAttemptedKey, true)
+	if !config.EffectiveRequestLogEnabled(cfg) {
 		return
 	}
 
@@ -242,11 +244,12 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !config.EffectiveRequestLogEnabled(cfg) {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	ginCtx.Set(apiUpstreamAttemptedKey, true)
+	if !config.EffectiveRequestLogEnabled(cfg) {
 		return
 	}
 

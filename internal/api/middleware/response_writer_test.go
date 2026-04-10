@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -216,4 +217,134 @@ func (w *testStreamingLogWriter) SetFirstChunkTimestamp(time.Time) {}
 func (w *testStreamingLogWriter) Close() error {
 	w.closed = true
 	return nil
+}
+
+type captureRequestLogger struct {
+	enabled  bool
+	called   bool
+	forced   bool
+	lastURL  string
+	lastCode int
+}
+
+func (l *captureRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
+	l.called = true
+	return nil
+}
+
+func (l *captureRequestLogger) LogRequestWithOptions(url, _ string, _ map[string][]string, _ []byte, statusCode int, _ map[string][]string, _ []byte, _ []byte, _ []byte, _ []byte, _ []byte, _ []*interfaces.ErrorMessage, force bool, _ string, _, _ time.Time) error {
+	l.called = true
+	l.forced = force
+	l.lastURL = url
+	l.lastCode = statusCode
+	return nil
+}
+
+func (l *captureRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	return &testStreamingLogWriter{}, nil
+}
+
+func (l *captureRequestLogger) IsEnabled() bool {
+	return l.enabled
+}
+
+func TestFinalizeForceLog_OnlyForProxyFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		url        string
+		method     string
+		statusCode int
+		setAttempt bool
+		wantCalled bool
+		wantForced bool
+	}{
+		{
+			name:       "suppress benign root head 404",
+			url:        "/",
+			method:     http.MethodHead,
+			statusCode: http.StatusNotFound,
+			setAttempt: false,
+			wantCalled: false,
+			wantForced: false,
+		},
+		{
+			name:       "force proxy failure messages 502",
+			url:        "/v1/messages",
+			method:     http.MethodPost,
+			statusCode: http.StatusBadGateway,
+			setAttempt: true,
+			wantCalled: true,
+			wantForced: true,
+		},
+		{
+			name:       "force proxy failure responses 502",
+			url:        "/v1/responses",
+			method:     http.MethodPost,
+			statusCode: http.StatusBadGateway,
+			setAttempt: true,
+			wantCalled: true,
+			wantForced: true,
+		},
+		{
+			name:       "suppress proxy route pre-auth 401 without upstream attempt",
+			url:        "/v1/responses",
+			method:     http.MethodPost,
+			statusCode: http.StatusUnauthorized,
+			setAttempt: false,
+			wantCalled: false,
+			wantForced: false,
+		},
+		{
+			name:       "suppress proxy route pre-validation 400 without upstream attempt",
+			url:        "/v1/messages",
+			method:     http.MethodPost,
+			statusCode: http.StatusBadRequest,
+			setAttempt: false,
+			wantCalled: false,
+			wantForced: false,
+		},
+		{
+			name:       "suppress non proxy failure 502",
+			url:        "/",
+			method:     http.MethodPost,
+			statusCode: http.StatusBadGateway,
+			setAttempt: true,
+			wantCalled: false,
+			wantForced: false,
+		},
+	}
+
+	for i := range tests {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		logger := &captureRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			requestInfo: &RequestInfo{
+				URL:       tests[i].url,
+				Method:    tests[i].method,
+				Headers:   map[string][]string{"Content-Type": {"application/json"}},
+				RequestID: "req-force-log",
+				Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+			},
+			statusCode:     tests[i].statusCode,
+			logOnErrorOnly: true,
+		}
+		if tests[i].setAttempt {
+			c.Set("API_UPSTREAM_ATTEMPTED", true)
+		}
+
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("%s: Finalize() error = %v", tests[i].name, err)
+		}
+		if logger.called != tests[i].wantCalled {
+			t.Fatalf("%s: log called = %t, want %t", tests[i].name, logger.called, tests[i].wantCalled)
+		}
+		if logger.forced != tests[i].wantForced {
+			t.Fatalf("%s: force flag = %t, want %t", tests[i].name, logger.forced, tests[i].wantForced)
+		}
+	}
 }

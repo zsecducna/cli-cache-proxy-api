@@ -3,9 +3,15 @@ package middleware
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -136,3 +142,219 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestLoggingMiddleware_SkipsHeadRootProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.HEAD("/", func(c *gin.Context) {
+		c.Status(http.StatusNotFound)
+	})
+
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
+func TestRequestLoggingMiddleware_ForcesLogOnRealProxyError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/messages", func(c *gin.Context) {
+		c.Set("API_UPSTREAM_ATTEMPTED", true)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream failure"})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if logger.logRequestWithOptionsCalls != 1 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 1", logger.logRequestWithOptionsCalls)
+	}
+	if !logger.lastForce {
+		t.Fatal("expected forced log on real proxy error when logger is disabled")
+	}
+	if logger.lastMethod != http.MethodPost {
+		t.Fatalf("last method = %q, want %q", logger.lastMethod, http.MethodPost)
+	}
+	if logger.lastURL != "/v1/messages" {
+		t.Fatalf("last url = %q, want %q", logger.lastURL, "/v1/messages")
+	}
+}
+
+func TestRequestLoggingMiddleware_ForcesLogOnResponsesProxyError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		c.Set("API_UPSTREAM_ATTEMPTED", true)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream failure"})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if logger.logRequestWithOptionsCalls != 1 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 1", logger.logRequestWithOptionsCalls)
+	}
+	if !logger.lastForce {
+		t.Fatal("expected forced log on /v1/responses proxy error when logger is disabled")
+	}
+	if logger.lastURL != "/v1/responses" {
+		t.Fatalf("last url = %q, want %q", logger.lastURL, "/v1/responses")
+	}
+}
+
+func TestRequestLoggingMiddleware_SkipsResponsesAuthErrorBeforeProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing api key"})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
+func TestRequestLoggingMiddleware_SkipsMessagesValidationErrorBeforeProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/v1/messages", func(c *gin.Context) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
+func TestRequestLoggingMiddleware_SkipsNonProxyErrorsInErrorOnlyMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &recordingRequestLogger{enabled: false}
+
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger))
+	engine.POST("/", func(c *gin.Context) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "non-proxy failure"})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"ok":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if logger.logRequestCalls != 0 {
+		t.Fatalf("LogRequest calls = %d, want 0", logger.logRequestCalls)
+	}
+	if logger.logRequestWithOptionsCalls != 0 {
+		t.Fatalf("LogRequestWithOptions calls = %d, want 0", logger.logRequestWithOptionsCalls)
+	}
+}
+
+type recordingRequestLogger struct {
+	enabled                    bool
+	logRequestCalls            int
+	logRequestWithOptionsCalls int
+	lastForce                  bool
+	lastURL                    string
+	lastMethod                 string
+}
+
+func (l *recordingRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	l.logRequestCalls++
+	l.lastURL = url
+	l.lastMethod = method
+	return nil
+}
+
+func (l *recordingRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	l.logRequestWithOptionsCalls++
+	l.lastURL = url
+	l.lastMethod = method
+	l.lastForce = force
+	return nil
+}
+
+func (l *recordingRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	return &noopStreamingWriter{}, nil
+}
+
+func (l *recordingRequestLogger) IsEnabled() bool {
+	return l.enabled
+}
+
+type noopStreamingWriter struct{}
+
+func (w *noopStreamingWriter) WriteChunkAsync([]byte) {}
+
+func (w *noopStreamingWriter) WriteStatus(int, map[string][]string) error { return nil }
+
+func (w *noopStreamingWriter) WriteAPIRequest([]byte) error { return nil }
+
+func (w *noopStreamingWriter) WriteAPIResponse([]byte) error { return nil }
+
+func (w *noopStreamingWriter) WriteAPIWebsocketTimeline([]byte) error { return nil }
+
+func (w *noopStreamingWriter) WriteAPIResponseErrors([]*interfaces.ErrorMessage) error { return nil }
+
+func (w *noopStreamingWriter) SetFirstChunkTimestamp(time.Time) {}
+
+func (w *noopStreamingWriter) Close() error { return nil }
