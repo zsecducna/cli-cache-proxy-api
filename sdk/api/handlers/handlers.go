@@ -46,8 +46,6 @@ type ErrorDetail struct {
 	Code string `json:"code,omitempty"`
 }
 
-const idempotencyKeyMetadataKey = "idempotency_key"
-
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
@@ -204,7 +202,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = uuid.NewString()
 	}
 
-	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	meta := map[string]any{coreexecutor.IdempotencyKeyMetadataKey: key}
 	if requestID := logging.GetRequestID(ctx); requestID != "" {
 		meta[coreexecutor.RequestIDMetadataKey] = requestID
 	}

@@ -514,6 +514,11 @@ type OpenAICompatibility struct {
 	// AppendReasoningEffortToModel rewrites upstream model IDs as
 	// "<model>-<reasoning_effort>" when a non-empty reasoning effort is present.
 	AppendReasoningEffortToModel bool `yaml:"append-reasoning-effort-to-model,omitempty" json:"append-reasoning-effort-to-model,omitempty"`
+
+	// AppendReasoningEffortToModelPercent limits the rewrite to the configured
+	// percentage of requests. Nil preserves the legacy "all requests" behavior
+	// whenever AppendReasoningEffortToModel is enabled.
+	AppendReasoningEffortToModelPercent *int `yaml:"append-reasoning-effort-to-model-percent,omitempty" json:"append-reasoning-effort-to-model-percent,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -830,6 +835,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.AppendReasoningEffortToModelPercent = normalizeOptionalPercentage(e.AppendReasoningEffortToModelPercent)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -858,6 +864,20 @@ func (cfg *Config) SanitizeCodexKeys() {
 		out = append(out, e)
 	}
 	cfg.CodexKey = out
+}
+
+func normalizeOptionalPercentage(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	normalized := *value
+	switch {
+	case normalized < 0:
+		normalized = 0
+	case normalized > 100:
+		normalized = 100
+	}
+	return &normalized
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

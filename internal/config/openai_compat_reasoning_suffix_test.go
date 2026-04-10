@@ -13,6 +13,7 @@ openai-compatibility:
   - name: openrouter
     base-url: https://openrouter.ai/api/v1
     append-reasoning-effort-to-model: true
+    append-reasoning-effort-to-model-percent: 25
     models:
       - name: gpt-5.4
 `
@@ -30,4 +31,37 @@ openai-compatibility:
 	if !cfg.OpenAICompatibility[0].AppendReasoningEffortToModel {
 		t.Fatal("AppendReasoningEffortToModel = false, want true")
 	}
+	if cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent == nil || *cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent != 25 {
+		t.Fatalf("AppendReasoningEffortToModelPercent = %v, want 25", cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent)
+	}
+}
+
+func TestSanitizeOpenAICompatibilityClampsAppendReasoningEffortPercent(t *testing.T) {
+	cfg := &Config{
+		OpenAICompatibility: []OpenAICompatibility{
+			{
+				Name:                                "openrouter",
+				BaseURL:                             "https://openrouter.ai/api/v1",
+				AppendReasoningEffortToModelPercent: intPtr(150),
+			},
+			{
+				Name:                                "openrouter-low",
+				BaseURL:                             "https://openrouter.ai/api/v1",
+				AppendReasoningEffortToModelPercent: intPtr(-5),
+			},
+		},
+	}
+
+	cfg.SanitizeOpenAICompatibility()
+
+	if got := cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent; got == nil || *got != 100 {
+		t.Fatalf("first percent = %v, want 100", got)
+	}
+	if got := cfg.OpenAICompatibility[1].AppendReasoningEffortToModelPercent; got == nil || *got != 0 {
+		t.Fatalf("second percent = %v, want 0", got)
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
 }

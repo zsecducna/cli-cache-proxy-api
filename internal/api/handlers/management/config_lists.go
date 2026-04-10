@@ -394,13 +394,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name                         *string                             `json:"name"`
-		Prefix                       *string                             `json:"prefix"`
-		BaseURL                      *string                             `json:"base-url"`
-		APIKeyEntries                *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models                       *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers                      *map[string]string                  `json:"headers"`
-		AppendReasoningEffortToModel *bool                               `json:"append-reasoning-effort-to-model"`
+		Name                                *string                             `json:"name"`
+		Prefix                              *string                             `json:"prefix"`
+		BaseURL                             *string                             `json:"base-url"`
+		APIKeyEntries                       *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		Models                              *[]config.OpenAICompatibilityModel  `json:"models"`
+		Headers                             *map[string]string                  `json:"headers"`
+		AppendReasoningEffortToModel        *bool                               `json:"append-reasoning-effort-to-model"`
+		AppendReasoningEffortToModelPercent *int                                `json:"append-reasoning-effort-to-model-percent"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -457,6 +458,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.AppendReasoningEffortToModel != nil {
 		entry.AppendReasoningEffortToModel = *body.Value.AppendReasoningEffortToModel
+	}
+	if body.Value.AppendReasoningEffortToModelPercent != nil {
+		entry.AppendReasoningEffortToModelPercent = body.Value.AppendReasoningEffortToModelPercent
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry
@@ -951,6 +955,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.AppendReasoningEffortToModelPercent = normalizeOptionalPercent(entry.AppendReasoningEffortToModelPercent)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
@@ -959,6 +964,20 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 			existing[trimmed] = struct{}{}
 		}
 	}
+}
+
+func normalizeOptionalPercent(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	normalized := *value
+	switch {
+	case normalized < 0:
+		normalized = 0
+	case normalized > 100:
+		normalized = 100
+	}
+	return &normalized
 }
 
 func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {

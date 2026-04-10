@@ -990,7 +990,7 @@
     return Array.isArray(payload && payload['openai-compatibility']) ? payload['openai-compatibility'] : [];
   }
 
-  async function patchOpenAICompatProviderToggle(name, enabled) {
+  async function patchOpenAICompatProviderConfig(name, value) {
     const ready = await ensureManagementAuth();
     if (!ready || !nativeFetch || !managementAuthorization) {
       throw new Error('Management authorization unavailable');
@@ -1003,9 +1003,7 @@
       },
       body: JSON.stringify({
         name,
-        value: {
-          'append-reasoning-effort-to-model': enabled,
-        },
+        value,
       }),
     });
     if (!response.ok) {
@@ -2105,12 +2103,51 @@
         openAICompatProvidersError = '';
         renderOpenAICompatTogglePanel(getPageContainer());
         try {
-          await patchOpenAICompatProviderToggle(provider.name, input.checked);
+          await patchOpenAICompatProviderConfig(provider.name, {
+            'append-reasoning-effort-to-model': input.checked,
+          });
           openAICompatProviders = openAICompatProviders.map((item, itemIndex) => itemIndex === index
             ? { ...item, 'append-reasoning-effort-to-model': input.checked }
             : item);
         } catch (error) {
           input.checked = previous;
+          openAICompatProvidersError = `Failed to update ${provider.name}: ${error instanceof Error ? error.message : 'request failed'}`;
+        } finally {
+          openAICompatSavingNames.delete(provider.name);
+          renderOpenAICompatTogglePanel(getPageContainer());
+        }
+      });
+    });
+    const percentInputs = Array.from(panel.querySelectorAll('input[data-cliproxy-compat-percent-index]'));
+    percentInputs.forEach((input) => {
+      if (!(input instanceof HTMLInputElement) || input.dataset.cliproxyPercentBound === 'true') return;
+      input.dataset.cliproxyPercentBound = 'true';
+      input.addEventListener('change', async () => {
+        const index = Number(input.dataset.cliproxyCompatPercentIndex);
+        const provider = openAICompatProviders[index];
+        if (!provider || !provider.name) return;
+        const previousValue = Number.isFinite(Number(provider['append-reasoning-effort-to-model-percent']))
+          ? String(provider['append-reasoning-effort-to-model-percent'])
+          : '100';
+        const rawValue = input.value.trim();
+        const normalizedValue = Math.max(0, Math.min(100, Number(rawValue || '100')));
+        if (!Number.isFinite(normalizedValue)) {
+          input.value = previousValue;
+          return;
+        }
+        input.value = String(normalizedValue);
+        openAICompatSavingNames.add(provider.name);
+        openAICompatProvidersError = '';
+        renderOpenAICompatTogglePanel(getPageContainer());
+        try {
+          await patchOpenAICompatProviderConfig(provider.name, {
+            'append-reasoning-effort-to-model-percent': normalizedValue,
+          });
+          openAICompatProviders = openAICompatProviders.map((item, itemIndex) => itemIndex === index
+            ? { ...item, 'append-reasoning-effort-to-model-percent': normalizedValue }
+            : item);
+        } catch (error) {
+          input.value = previousValue;
           openAICompatProvidersError = `Failed to update ${provider.name}: ${error instanceof Error ? error.message : 'request failed'}`;
         } finally {
           openAICompatSavingNames.delete(provider.name);
@@ -2133,6 +2170,7 @@
       providers.map((provider) => [
         normalize(provider && provider.name),
         provider && provider['append-reasoning-effort-to-model'] ? 'enabled' : 'disabled',
+        Number.isFinite(Number(provider && provider['append-reasoning-effort-to-model-percent'])) ? Number(provider['append-reasoning-effort-to-model-percent']) : 'default',
         normalize(provider && provider['base-url']),
       ].join(':')).join('|'),
     ].join(':');
@@ -2141,6 +2179,9 @@
       const baseURL = normalize(provider && provider['base-url']) || 'No base URL configured';
       const checked = !!(provider && provider['append-reasoning-effort-to-model']);
       const saving = openAICompatSavingNames.has(name);
+      const percent = Number.isFinite(Number(provider && provider['append-reasoning-effort-to-model-percent']))
+        ? Math.max(0, Math.min(100, Number(provider['append-reasoning-effort-to-model-percent'])))
+        : 100;
       return `
         <div class="cliproxy-enhancer__config-provider-row">
           <div class="cliproxy-enhancer__config-provider-meta">
@@ -2151,15 +2192,20 @@
             <input type="checkbox" data-cliproxy-compat-index="${index}" ${checked ? 'checked' : ''} ${saving ? 'disabled' : ''}>
             <span>Forward model ID as <code>&lt;model&gt;-&lt;reasoning_effort&gt;</code></span>
           </label>
+          <label class="cliproxy-enhancer__config-toggle">
+            <span>Apply to</span>
+            <input type="number" min="0" max="100" step="1" inputmode="numeric" data-cliproxy-compat-percent-index="${index}" value="${percent}" ${saving ? 'disabled' : ''}>
+            <span>% of matching requests</span>
+          </label>
         </div>
       `;
     }).join('');
     const status = openAICompatProvidersError
       ? `<div class="cliproxy-enhancer__config-status" data-state="error">${escapeHTML(openAICompatProvidersError)}</div>`
-      : `<div class="cliproxy-enhancer__config-status">${openAICompatProvidersLoading ? 'Loading OpenAI-compatible provider settings…' : 'Examples: gpt-5.4-high, gpt-5.3-codex-low. The toggle applies to all requests sent through that provider.'}</div>`;
+      : `<div class="cliproxy-enhancer__config-status">${openAICompatProvidersLoading ? 'Loading OpenAI-compatible provider settings…' : 'Examples: gpt-5.4-high, gpt-5.3-codex-low. Set 100 for all requests, 0 to disable forwarding even when the toggle is on.'}</div>`;
     setEnhancerMarkup(panel, signature, `
       <div class="cliproxy-enhancer__label">OpenAI Compatible Providers</div>
-      <div class="cliproxy-enhancer__hint">Per-provider control for forwarding the selected reasoning effort as part of the upstream model ID.</div>
+      <div class="cliproxy-enhancer__hint">Per-provider control for forwarding the selected reasoning effort as part of the upstream model ID, with deterministic percentage-based sampling.</div>
       ${status}
       <div class="cliproxy-enhancer__config-provider-list">
         ${rows || '<div class="cliproxy-enhancer__muted">No OpenAI-compatible providers are configured.</div>'}

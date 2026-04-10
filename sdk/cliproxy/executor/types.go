@@ -13,6 +13,9 @@ const RequestedModelMetadataKey = "requested_model"
 // RequestRouteMetadataKey stores the classified handler route in Options.Metadata.
 const RequestRouteMetadataKey = "request_route"
 
+// IdempotencyKeyMetadataKey stores the client-supplied or generated idempotency key in Options.Metadata.
+const IdempotencyKeyMetadataKey = "idempotency_key"
+
 // RequestIDMetadataKey stores the request correlation identifier in Options.Metadata.
 const RequestIDMetadataKey = "request_id"
 

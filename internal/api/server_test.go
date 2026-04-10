@@ -317,6 +317,9 @@ func TestManagementControlPanelIncludesCacheStatisticsIntegration(t *testing.T) 
 	if !strings.Contains(body, "cliproxy-usage-provider-filter") || !strings.Contains(body, "OpenAI compatible Providers") || !strings.Contains(body, "ampcode") || !strings.Contains(body, "url.searchParams.set('provider'") || !strings.Contains(body, "function getUsageProviderFilter()") || !strings.Contains(body, "appendUsageProviderFilter") {
 		t.Fatalf("management page missing provider filter controls/options and usage request rewrite: %s", body)
 	}
+	if !strings.Contains(body, "append-reasoning-effort-to-model-percent") || !strings.Contains(body, "% of matching requests") || !strings.Contains(body, "deterministic percentage-based sampling") {
+		t.Fatalf("management page missing openai-compatible percentage control wiring/copy: %s", body)
+	}
 	if !strings.Contains(body, "hideUsageActionButtons(container);") || !strings.Contains(body, "text !== 'Export' && text !== 'Import' && text !== 'Refresh'") {
 		t.Fatalf("management page should hide the native usage Export/Import/Refresh buttons while keeping refresh automation available: %s", body)
 	}

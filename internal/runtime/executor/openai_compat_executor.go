@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
@@ -356,7 +357,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 		if err != nil {
 			return openAICompatExecutionPlan{}, err
 		}
-		translated = e.appendReasoningEffortToModelSuffix(translated, auth, sdktranslator.FormatOpenAIResponse, req.Model)
+		translated = e.appendReasoningEffortToModelSuffix(translated, originalPayload, opts.Metadata, auth, sdktranslator.FormatOpenAIResponse, req.Model)
 		plan.targetFormat = sdktranslator.FormatOpenAIResponse
 		plan.endpoint = "/responses/compact"
 		plan.translated = translated
@@ -364,7 +365,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	}
 
 	if plan.routeClass == openAICompatClaudeViaGPTRouteClass && from == sdktranslator.FormatClaude {
-		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, originalPayload, auth, stream, plan)
+		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, originalPayload, opts.Metadata, auth, stream, plan)
 	}
 
 	// When the inbound request is already in OpenAI Responses format, forward
@@ -378,7 +379,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 		if err != nil {
 			return openAICompatExecutionPlan{}, err
 		}
-		translated = e.appendReasoningEffortToModelSuffix(translated, auth, sdktranslator.FormatOpenAIResponse, req.Model)
+		translated = e.appendReasoningEffortToModelSuffix(translated, originalPayload, opts.Metadata, auth, sdktranslator.FormatOpenAIResponse, req.Model)
 		plan.selectedSurface = openAICompatSurfaceResponses
 		plan.targetFormat = sdktranslator.FormatOpenAIResponse
 		plan.endpoint = "/responses"
@@ -393,15 +394,15 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	if err != nil {
 		return openAICompatExecutionPlan{}, err
 	}
-	translated = e.appendReasoningEffortToModelSuffix(translated, auth, sdktranslator.FormatOpenAI, req.Model)
+	translated = e.appendReasoningEffortToModelSuffix(translated, originalPayload, opts.Metadata, auth, sdktranslator.FormatOpenAI, req.Model)
 	plan.translated = translated
 	return plan, nil
 }
 
-func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, auth *cliproxyauth.Auth, stream bool, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, error) {
+func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, error) {
 	caps := e.claudeViaGPTCapabilities(auth)
 
-	responsePlan, responseCompatErr, responseErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, auth, stream, caps, openaiclaude.BackendSurfaceResponses, plan)
+	responsePlan, responseCompatErr, responseErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceResponses, plan)
 	if responseErr != nil {
 		return openAICompatExecutionPlan{}, responseErr
 	}
@@ -409,7 +410,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, 
 		return responsePlan, nil
 	}
 
-	chatPlan, chatCompatErr, chatErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, auth, stream, caps, openaiclaude.BackendSurfaceChatCompletions, plan)
+	chatPlan, chatCompatErr, chatErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceChatCompletions, plan)
 	if chatErr != nil {
 		return openAICompatExecutionPlan{}, chatErr
 	}
@@ -423,7 +424,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, 
 	return openAICompatExecutionPlan{}, compatibilityStatusErr(responseCompatErr)
 }
 
-func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, auth *cliproxyauth.Auth, stream bool, caps openaiclaude.BackendCapabilities, surface openaiclaude.BackendSurface, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, *openaiclaude.CompatibilityError, error) {
+func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, caps openaiclaude.BackendCapabilities, surface openaiclaude.BackendSurface, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, *openaiclaude.CompatibilityError, error) {
 	validatedOriginal, compatErr := openaiclaude.ValidateClaudeRequestForSurface(originalPayload, caps, surface)
 	if compatErr != nil {
 		if typed, ok := compatErr.(*openaiclaude.CompatibilityError); ok {
@@ -458,7 +459,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, fr
 		if err != nil {
 			return openAICompatExecutionPlan{}, nil, err
 		}
-		translated = e.appendReasoningEffortToModelSuffix(translated, auth, sdktranslator.FormatOpenAIResponse, req.Model)
+		translated = e.appendReasoningEffortToModelSuffix(translated, validatedOriginal, metadata, auth, sdktranslator.FormatOpenAIResponse, req.Model)
 		next.selectedSurface = openAICompatSurfaceResponses
 		next.targetFormat = sdktranslator.FormatOpenAIResponse
 		next.endpoint = "/responses"
@@ -472,7 +473,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, fr
 		if err != nil {
 			return openAICompatExecutionPlan{}, nil, err
 		}
-		translated = e.appendReasoningEffortToModelSuffix(translated, auth, sdktranslator.FormatOpenAI, req.Model)
+		translated = e.appendReasoningEffortToModelSuffix(translated, validatedOriginal, metadata, auth, sdktranslator.FormatOpenAI, req.Model)
 		next.selectedSurface = openAICompatSurfaceChatCompletions
 		next.targetFormat = sdktranslator.FormatOpenAI
 		next.endpoint = "/chat/completions"
@@ -666,9 +667,12 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	return payload
 }
 
-func (e *OpenAICompatExecutor) appendReasoningEffortToModelSuffix(payload []byte, auth *cliproxyauth.Auth, format sdktranslator.Format, requestedModel string) []byte {
+func (e *OpenAICompatExecutor) appendReasoningEffortToModelSuffix(payload []byte, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, format sdktranslator.Format, requestedModel string) []byte {
 	compat := e.resolveCompatConfig(auth)
 	if compat == nil || !compat.AppendReasoningEffortToModel || len(payload) == 0 {
+		return payload
+	}
+	if !shouldAppendReasoningEffortToModel(compat, requestedModel, originalPayload, payload, metadata) {
 		return payload
 	}
 	effort := helps.ExtractReasoningEffortFromRequest(payload, format.String())
@@ -693,6 +697,63 @@ func (e *OpenAICompatExecutor) appendReasoningEffortToModelSuffix(payload []byte
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model+suffix)
 	return payload
+}
+
+func shouldAppendReasoningEffortToModel(compat *config.OpenAICompatibility, requestedModel string, originalPayload []byte, translatedPayload []byte, metadata map[string]any) bool {
+	if compat == nil || !compat.AppendReasoningEffortToModel {
+		return false
+	}
+	percent := 100
+	if compat.AppendReasoningEffortToModelPercent != nil {
+		percent = *compat.AppendReasoningEffortToModelPercent
+	}
+	switch {
+	case percent <= 0:
+		return false
+	case percent >= 100:
+		return true
+	default:
+		return openAICompatSamplingBucket(compat.Name, requestedModel, openAICompatSamplingKey(metadata), originalPayload, translatedPayload) < percent
+	}
+}
+
+// Stable request bucketing keeps retries and equivalent replays on the same side
+// of the sampling threshold for a given provider.
+func openAICompatSamplingBucket(providerName, requestedModel, samplingKey string, originalPayload []byte, translatedPayload []byte) int {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(strings.TrimSpace(providerName)))
+	_, _ = hasher.Write([]byte{0})
+	_, _ = hasher.Write([]byte(strings.TrimSpace(requestedModel)))
+	_, _ = hasher.Write([]byte{0})
+	if trimmedKey := strings.TrimSpace(samplingKey); trimmedKey != "" {
+		_, _ = hasher.Write([]byte(trimmedKey))
+	} else if len(originalPayload) > 0 {
+		_, _ = hasher.Write(originalPayload)
+	} else {
+		_, _ = hasher.Write(translatedPayload)
+	}
+	return int(hasher.Sum32() % 100)
+}
+
+func openAICompatSamplingKey(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{cliproxyexecutor.IdempotencyKeyMetadataKey, cliproxyexecutor.RequestIDMetadataKey} {
+		if value, ok := metadata[key]; ok {
+			switch typed := value.(type) {
+			case string:
+				if trimmed := strings.TrimSpace(typed); trimmed != "" {
+					return trimmed
+				}
+			case fmt.Stringer:
+				if trimmed := strings.TrimSpace(typed.String()); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func ensureReasoningEffortInPayload(payload []byte, format sdktranslator.Format, effort string) []byte {
