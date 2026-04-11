@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -282,7 +283,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	hasAPIError := hasAPIError(finalStatusCode, slicesAPIResponseError)
-	forceLog := w.logOnErrorOnly && !w.logger.IsEnabled() && shouldForceErrorLog(c, w.requestInfo, hasAPIError)
+	forceLog := w.logOnErrorOnly && !w.logger.IsEnabled() && shouldForceErrorLog(c, w.requestInfo, hasAPIError, w.extractAPIResponse(c), slicesAPIResponseError)
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
@@ -353,11 +354,14 @@ func isClientClosedRequestStatus(statusCode int) bool {
 	return statusCode == clientClosedRequestStatusCode
 }
 
-func shouldForceErrorLog(c *gin.Context, requestInfo *RequestInfo, hasAPIError bool) bool {
+func shouldForceErrorLog(c *gin.Context, requestInfo *RequestInfo, hasAPIError bool, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage) bool {
 	if requestInfo == nil || !hasAPIError || c == nil || !hasRecordedUpstreamAttempt(c) {
 		return false
 	}
 	if logging.WasRequestCanceled(c) {
+		return false
+	}
+	if helps.IsCreditsExhaustedPayload(apiResponse) || hasCreditsExhaustedAPIError(apiResponseErrors) {
 		return false
 	}
 	routePattern := strings.TrimSpace(c.FullPath())
@@ -394,6 +398,18 @@ func shouldForceErrorLog(c *gin.Context, requestInfo *RequestInfo, hasAPIError b
 	default:
 		return false
 	}
+}
+
+func hasCreditsExhaustedAPIError(apiResponseErrors []*interfaces.ErrorMessage) bool {
+	for i := 0; i < len(apiResponseErrors); i++ {
+		if apiResponseErrors[i] == nil {
+			continue
+		}
+		if helps.IsCreditsExhaustedError(apiResponseErrors[i].Error) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRecordedUpstreamAttempt(c *gin.Context) bool {

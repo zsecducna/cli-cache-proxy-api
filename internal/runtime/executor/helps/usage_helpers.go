@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -18,6 +19,16 @@ import (
 )
 
 type usageReasoningEffortContextKey struct{}
+
+const defaultUsageReasoningEffort = "medium"
+
+var creditsExhaustedTextIndicators = []string{
+	"credits_exhausted",
+	"customer credits exhausted",
+	"insufficient google_one_ai credits",
+	"minimumcreditamountforusage",
+	"minimum credit amount for usage",
+}
 
 type UsageReporter struct {
 	provider        string
@@ -74,6 +85,9 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 
 func shouldPublishFailure(ctx context.Context, err error) bool {
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler)) {
+		return false
+	}
+	if IsCreditsExhaustedError(err) {
 		return false
 	}
 	return ctx == nil || !errors.Is(ctx.Err(), context.Canceled)
@@ -192,6 +206,60 @@ func ExtractReasoningEffortFromRequest(body []byte, format string) string {
 	return ""
 }
 
+func NormalizeReasoningEffortRequest(body []byte, format, model string) ([]byte, string) {
+	if effort := strings.TrimSpace(ExtractReasoningEffortFromRequest(body, format)); effort != "" {
+		return body, effort
+	}
+	if effort := reasoningEffortFromModel(model); effort != "" {
+		return body, effort
+	}
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, ""
+	}
+	path := reasoningEffortSetPathForFormat(strings.ToLower(strings.TrimSpace(format)))
+	if path == "" {
+		return body, defaultUsageReasoningEffort
+	}
+	normalized, err := sjson.SetBytes(body, path, defaultUsageReasoningEffort)
+	if err != nil {
+		return body, defaultUsageReasoningEffort
+	}
+	return normalized, defaultUsageReasoningEffort
+}
+
+func IsCreditsExhaustedPayload(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if gjson.ValidBytes(trimmed) {
+		if code := strings.TrimSpace(gjson.GetBytes(trimmed, "error.code").String()); strings.EqualFold(code, "credits_exhausted") {
+			return true
+		}
+		if message := strings.TrimSpace(gjson.GetBytes(trimmed, "error.message").String()); isCreditsExhaustedText(message) {
+			return true
+		}
+		if status := strings.TrimSpace(gjson.GetBytes(trimmed, "error.status").String()); strings.EqualFold(status, "RESOURCE_EXHAUSTED") {
+			if message := strings.TrimSpace(gjson.GetBytes(trimmed, "error.message").String()); strings.Contains(strings.ToUpper(message), "QUOTA_EXHAUSTED") {
+				return true
+			}
+			for _, detail := range gjson.GetBytes(trimmed, "error.details").Array() {
+				if strings.EqualFold(strings.TrimSpace(detail.Get("reason").String()), "QUOTA_EXHAUSTED") {
+					return true
+				}
+			}
+		}
+	}
+	return isCreditsExhaustedText(string(trimmed))
+}
+
+func IsCreditsExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return IsCreditsExhaustedPayload([]byte(err.Error()))
+}
+
 func reasoningEffortPathsForFormat(format string) []string {
 	switch format {
 	case "claude":
@@ -201,6 +269,44 @@ func reasoningEffortPathsForFormat(format string) []string {
 	default:
 		return []string{"reasoning.effort", "reasoning_effort", "output_config.effort"}
 	}
+}
+
+func reasoningEffortSetPathForFormat(format string) string {
+	switch format {
+	case "claude":
+		return "output_config.effort"
+	case "codex", "openai-response":
+		return "reasoning.effort"
+	case "openai":
+		return "reasoning_effort"
+	default:
+		return ""
+	}
+}
+
+func reasoningEffortFromModel(model string) string {
+	suffix := thinking.ParseSuffix(strings.TrimSpace(model))
+	if !suffix.HasSuffix {
+		return ""
+	}
+	level, ok := thinking.ParseLevelSuffix(suffix.RawSuffix)
+	if !ok {
+		return ""
+	}
+	return string(level)
+}
+
+func isCreditsExhaustedText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, indicator := range creditsExhaustedTextIndicators {
+		if strings.Contains(lower, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

@@ -119,6 +119,31 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_ClaudeModelUsesFillFirstUnderRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	model := "claude-sonnet-4-6"
+	registerSchedulerModels(t, "claude", model, "claude-scheduler-b", "claude-scheduler-a")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "claude-scheduler-b", Provider: "claude"},
+		&Auth{ID: "claude-scheduler-a", Provider: "claude"},
+	)
+
+	for index := 0; index < 2; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "claude", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != "claude-scheduler-a" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "claude-scheduler-a")
+		}
+	}
+}
+
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 
@@ -357,6 +382,53 @@ func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	}
 	if got.ID != selector.lastAuthID[len(selector.lastAuthID)-1] {
 		t.Fatalf("pickNext() auth.ID = %q, want selector-picked %q", got.ID, selector.lastAuthID[len(selector.lastAuthID)-1])
+	}
+}
+
+func TestManager_PickNextLegacy_ClaudeModelUsesFillFirstUnderRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	registerSchedulerModels(t, "claude", "claude-sonnet-4-6", "claude-legacy-b", "claude-legacy-a")
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["claude"] = schedulerTestExecutor{}
+	manager.auths["claude-legacy-b"] = &Auth{ID: "claude-legacy-b", Provider: "claude"}
+	manager.auths["claude-legacy-a"] = &Auth{ID: "claude-legacy-a", Provider: "claude"}
+
+	for index := 0; index < 2; index++ {
+		got, _, errPick := manager.pickNextLegacy(context.Background(), "claude", "claude-sonnet-4-6", cliproxyexecutor.Options{}, map[string]struct{}{})
+		if errPick != nil {
+			t.Fatalf("pickNextLegacy() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextLegacy() #%d auth = nil", index)
+		}
+		if got.ID != "claude-legacy-a" {
+			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, "claude-legacy-a")
+		}
+	}
+}
+
+func TestManager_PickNextLegacy_NonClaudeKeepsRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	registerSchedulerModels(t, "gemini", "gemini-2.5-pro", "gemini-legacy-b", "gemini-legacy-a")
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.auths["gemini-legacy-b"] = &Auth{ID: "gemini-legacy-b", Provider: "gemini"}
+	manager.auths["gemini-legacy-a"] = &Auth{ID: "gemini-legacy-a", Provider: "gemini"}
+
+	want := []string{"gemini-legacy-a", "gemini-legacy-b"}
+	for index, wantID := range want {
+		got, _, errPick := manager.pickNextLegacy(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, map[string]struct{}{})
+		if errPick != nil {
+			t.Fatalf("pickNextLegacy() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextLegacy() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
 	}
 }
 

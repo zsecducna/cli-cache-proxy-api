@@ -587,6 +587,16 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 	return routeModel
 }
 
+func effectiveBuiltInSelector(selector Selector, routeModel string) Selector {
+	switch selector.(type) {
+	case nil, *RoundRobinSelector:
+		if isClaudeSelectionModel(routeModel) {
+			return &FillFirstSelector{}
+		}
+	}
+	return selector
+}
+
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
 	if registryRef == nil || auth == nil {
 		return true
@@ -2669,7 +2679,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	selector := effectiveBuiltInSelector(m.selector, model)
+	selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -2798,7 +2809,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	selector := effectiveBuiltInSelector(m.selector, model)
+	selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick

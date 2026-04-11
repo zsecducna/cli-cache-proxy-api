@@ -39,6 +39,17 @@ type authScheduler struct {
 	mixedCursors  map[string]int
 }
 
+func isClaudeSelectionModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(canonicalModelKey(model)), "claude")
+}
+
+func effectiveBuiltInStrategy(base schedulerStrategy, model string) schedulerStrategy {
+	if base == schedulerStrategyRoundRobin && isClaudeSelectionModel(model) {
+		return schedulerStrategyFillFirst
+	}
+	return base
+}
+
 // providerScheduler stores auth metadata and model shards for a single provider.
 type providerScheduler struct {
 	providerKey string
@@ -177,6 +188,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
+	strategy := effectiveBuiltInStrategy(s.strategy, model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
@@ -204,7 +216,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -234,6 +246,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
+	strategy := effectiveBuiltInStrategy(s.strategy, model)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -257,7 +270,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -291,13 +304,13 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -351,7 +364,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
 		if picked == nil {
 			continue
 		}

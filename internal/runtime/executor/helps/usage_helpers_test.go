@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/tidwall/gjson"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -191,6 +193,89 @@ func TestExtractReasoningEffortFromRequest(t *testing.T) {
 	}
 }
 
+func TestNormalizeReasoningEffortRequest(t *testing.T) {
+	tests := []struct {
+		name        string
+		format      string
+		model       string
+		body        []byte
+		wantEffort  string
+		wantPath    string
+		wantPresent bool
+	}{
+		{
+			name:        "inject openai medium by default",
+			format:      "openai",
+			model:       "gpt-5.4",
+			body:        []byte(`{"messages":[]}`),
+			wantEffort:  "medium",
+			wantPath:    "reasoning_effort",
+			wantPresent: true,
+		},
+		{
+			name:        "inject codex medium by default",
+			format:      "codex",
+			model:       "gpt-5.4-codex",
+			body:        []byte(`{"input":[]}`),
+			wantEffort:  "medium",
+			wantPath:    "reasoning.effort",
+			wantPresent: true,
+		},
+		{
+			name:        "inject claude medium by default",
+			format:      "claude",
+			model:       "claude-sonnet-4-6",
+			body:        []byte(`{"messages":[]}`),
+			wantEffort:  "medium",
+			wantPath:    "output_config.effort",
+			wantPresent: true,
+		},
+		{
+			name:        "preserve configured effort from model suffix",
+			format:      "openai",
+			model:       "gpt-5.4(high)",
+			body:        []byte(`{"messages":[]}`),
+			wantEffort:  "high",
+			wantPresent: false,
+		},
+		{
+			name:        "preserve existing request effort",
+			format:      "openai",
+			model:       "gpt-5.4",
+			body:        []byte(`{"reasoning_effort":"low"}`),
+			wantEffort:  "low",
+			wantPath:    "reasoning_effort",
+			wantPresent: true,
+		},
+		{
+			name:        "leave unknown formats unchanged while defaulting context effort",
+			format:      "gemini",
+			model:       "gemini-2.5-pro",
+			body:        []byte(`{"contents":[]}`),
+			wantEffort:  "medium",
+			wantPresent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBody, gotEffort := NormalizeReasoningEffortRequest(tt.body, tt.format, tt.model)
+			if gotEffort != tt.wantEffort {
+				t.Fatalf("NormalizeReasoningEffortRequest() effort = %q, want %q", gotEffort, tt.wantEffort)
+			}
+			if tt.wantPresent {
+				if got := gjson.GetBytes(gotBody, tt.wantPath).String(); got != tt.wantEffort {
+					t.Fatalf("NormalizeReasoningEffortRequest() %s = %q, want %q, body=%s", tt.wantPath, got, tt.wantEffort, string(gotBody))
+				}
+				return
+			}
+			if !bytes.Equal(gotBody, tt.body) {
+				t.Fatalf("NormalizeReasoningEffortRequest() unexpectedly changed body: got=%s want=%s", string(gotBody), string(tt.body))
+			}
+		})
+	}
+}
+
 func TestNewUsageReporterIncludesReasoningEffortFromContext(t *testing.T) {
 	ctx := WithUsageReasoningEffort(context.Background(), "xhigh")
 	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
@@ -219,6 +304,21 @@ func TestShouldPublishFailureSkipsCanceledContext(t *testing.T) {
 func TestShouldPublishFailureAllowsNonCanceledFailures(t *testing.T) {
 	if !shouldPublishFailure(context.Background(), context.DeadlineExceeded) {
 		t.Fatal("expected non-canceled failure to be published")
+	}
+}
+
+func TestShouldPublishFailureSkipsCreditsExhaustedFailures(t *testing.T) {
+	if shouldPublishFailure(context.Background(), fmt.Errorf(`{"error":{"code":"credits_exhausted","message":"customer credits exhausted"}}`)) {
+		t.Fatal("expected credits_exhausted failure to skip failed usage publication")
+	}
+	if shouldPublishFailure(context.Background(), fmt.Errorf(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`)) {
+		t.Fatal("expected quota_exhausted failure to skip failed usage publication")
+	}
+}
+
+func TestShouldPublishFailureDoesNotSkipGenericRateLimits(t *testing.T) {
+	if !shouldPublishFailure(context.Background(), fmt.Errorf(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`)) {
+		t.Fatal("expected generic rate limit failure to be published")
 	}
 }
 

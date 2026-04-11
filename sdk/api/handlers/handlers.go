@@ -91,9 +91,9 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
-func withUsageReasoningEffort(ctx context.Context, rawJSON []byte, sourceFormat sdktranslator.Format) context.Context {
-	effort := helps.ExtractReasoningEffortFromRequest(rawJSON, sourceFormat.String())
-	return helps.WithUsageReasoningEffort(ctx, effort)
+func withUsageReasoningEffort(ctx context.Context, rawJSON []byte, sourceFormat sdktranslator.Format, model string) (context.Context, []byte) {
+	normalized, effort := helps.NormalizeReasoningEffortRequest(rawJSON, sourceFormat.String(), model)
+	return helps.WithUsageReasoningEffort(ctx, effort), normalized
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -497,21 +497,18 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
 	if len(payload) == 0 {
 		payload = nil
 	}
-	req := coreexecutor.Request{
-		Model:   details.NormalizedModel,
-		Payload: payload,
-	}
+	req := coreexecutor.Request{Model: details.NormalizedModel, Payload: payload}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: payload,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
 	resp, err := h.AuthManager.Execute(ctx, details.Providers, req, opts)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -545,21 +542,18 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
 	if len(payload) == 0 {
 		payload = nil
 	}
-	req := coreexecutor.Request{
-		Model:   details.NormalizedModel,
-		Payload: payload,
-	}
+	req := coreexecutor.Request{Model: details.NormalizedModel, Payload: payload}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: payload,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
 	resp, err := h.AuthManager.ExecuteCount(ctx, details.Providers, req, opts)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -597,21 +591,18 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
 	if len(payload) == 0 {
 		payload = nil
 	}
-	req := coreexecutor.Request{
-		Model:   details.NormalizedModel,
-		Payload: payload,
-	}
+	req := coreexecutor.Request{Model: details.NormalizedModel, Payload: payload}
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: payload,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	ctx = withUsageReasoningEffort(ctx, rawJSON, opts.SourceFormat)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, details.Providers, req, opts)
 	if err != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)

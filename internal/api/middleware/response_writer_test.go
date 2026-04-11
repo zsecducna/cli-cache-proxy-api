@@ -423,3 +423,90 @@ func TestFinalizeSuppressesMarkedCanceledRequestTimeout(t *testing.T) {
 		t.Fatal("expected marked canceled timeout to skip forced logging")
 	}
 }
+
+func TestFinalizeSuppressesCreditsExhaustedProxyErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name    string
+		body    []byte
+		apiErrs []*interfaces.ErrorMessage
+	}{
+		{
+			name: "customer credits exhausted body",
+			body: []byte(`{"error":{"code":"credits_exhausted","message":"customer credits exhausted"}}`),
+		},
+		{
+			name: "quota exhausted api error",
+			apiErrs: []*interfaces.ErrorMessage{{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`),
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("API_UPSTREAM_ATTEMPTED", true)
+		if len(tt.body) > 0 {
+			c.Set("API_RESPONSE", tt.body)
+		}
+		if len(tt.apiErrs) > 0 {
+			c.Set("API_RESPONSE_ERROR", tt.apiErrs)
+		}
+
+		logger := &captureRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			requestInfo: &RequestInfo{
+				URL:       "/v1/messages",
+				Method:    http.MethodPost,
+				Headers:   map[string][]string{"Content-Type": {"application/json"}},
+				RequestID: "req-credits-exhausted",
+				Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+			},
+			statusCode:     http.StatusTooManyRequests,
+			logOnErrorOnly: true,
+		}
+
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("%s: Finalize() error = %v", tt.name, err)
+		}
+		if logger.called {
+			t.Fatalf("%s: expected credits/quota exhaustion to skip forced logging", tt.name)
+		}
+	}
+}
+
+func TestFinalizeStillForceLogsGenericRateLimits(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("API_UPSTREAM_ATTEMPTED", true)
+	c.Set("API_RESPONSE", []byte(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}`))
+
+	logger := &captureRequestLogger{enabled: false}
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: c.Writer,
+		logger:         logger,
+		requestInfo: &RequestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Headers:   map[string][]string{"Content-Type": {"application/json"}},
+			RequestID: "req-rate-limit",
+			Timestamp: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
+		},
+		statusCode:     http.StatusTooManyRequests,
+		logOnErrorOnly: true,
+	}
+
+	if err := wrapper.Finalize(c); err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	if !logger.called || !logger.forced {
+		t.Fatal("expected generic rate limit to remain force-logged")
+	}
+}
