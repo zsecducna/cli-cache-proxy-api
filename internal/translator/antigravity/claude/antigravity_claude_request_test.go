@@ -8,6 +8,45 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertClaudeRequestToAntigravity_StripsCacheControl(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"system": [
+			{"type":"text","text":"system-prefix"},
+			{"type":"text","text":"system-cache","cache_control":{"type":"ephemeral","ttl":"1h"}}
+		],
+		"tools": [
+			{
+				"name": "tool_a",
+				"description": "tool a",
+				"input_schema": {"type":"object","properties":{"path":{"type":"string"}}}
+			},
+			{
+				"name": "tool_b",
+				"description": "tool b",
+				"cache_control": {"type":"ephemeral","ttl":"1h"},
+				"input_schema": {"type":"object","properties":{"path":{"type":"string"}}}
+			}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"turn-1","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
+			{"role":"assistant","content":[{"type":"text","text":"turn-2"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+
+	if gjson.GetBytes(output, "request.systemInstruction.parts.1.cache_control").Exists() {
+		t.Fatalf("system cache_control should be stripped, body=%s", string(output))
+	}
+	if gjson.GetBytes(output, "request.contents.0.parts.0.cache_control").Exists() {
+		t.Fatalf("message cache_control should be stripped, body=%s", string(output))
+	}
+	if gjson.GetBytes(output, "request.tools.0.functionDeclarations.1.cache_control").Exists() {
+		t.Fatalf("tool cache_control should be stripped, body=%s", string(output))
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_BasicStructure(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",

@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -631,19 +632,20 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
-
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	originalTranslated, _, _, err := buildAntigravityClaudePayload(originalPayload, req.Model, from, true)
 	if err != nil {
 		return resp, err
 	}
+	translated, _, decision, err := buildAntigravityClaudePayload(req.Payload, req.Model, from, true)
+	if err != nil {
+		return resp, err
+	}
+	recordAnthropicCacheDecision(ctx, decision)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
@@ -1032,6 +1034,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	isClaudeModel := strings.Contains(strings.ToLower(baseModel), "claude")
 
 	ctx = context.WithValue(ctx, "alt", "")
 
@@ -1054,12 +1057,26 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
+	var originalTranslated []byte
+	var translated []byte
+	if isClaudeModel {
+		var decision anthropicCachePolicyDecision
+		originalTranslated, _, _, err = buildAntigravityClaudePayload(originalPayload, req.Model, from, true)
+		if err != nil {
+			return nil, err
+		}
+		translated, _, decision, err = buildAntigravityClaudePayload(req.Payload, req.Model, from, true)
+		if err != nil {
+			return nil, err
+		}
+		recordAnthropicCacheDecision(ctx, decision)
+	} else {
+		originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+		translated = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+		translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
@@ -1253,6 +1270,7 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 // CountTokens counts tokens for the given request using the Antigravity API.
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	isClaudeModel := strings.Contains(strings.ToLower(baseModel), "claude")
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -1270,11 +1288,21 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return cliproxyexecutor.Response{}, err
+	var err error
+	var payload []byte
+	if isClaudeModel {
+		var decision anthropicCachePolicyDecision
+		payload, _, decision, err = buildAntigravityClaudePayload(req.Payload, req.Model, from, false)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		recordAnthropicCacheDecision(ctx, decision)
+	} else {
+		payload = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
 	}
 
 	payload = deleteJSONField(payload, "project")
@@ -1423,6 +1451,41 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return "", nil, errRefresh
 	}
 	return metaStringValue(updated.Metadata, "access_token"), updated, nil
+}
+
+func recordAnthropicCacheDecision(ctx context.Context, decision anthropicCachePolicyDecision) {
+	helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+		RewriteApplied:           decision.RewriteApplied,
+		OverwroteClientLayout:    decision.OverwroteClientLayout,
+		MatchedAgenticCodingLoop: decision.MatchedAgenticCodingLoop,
+		TTL:                      decision.Breakpoints.TTL,
+		ToolsBreakpoint:          decision.Breakpoints.Tools,
+		SystemBreakpoint:         decision.Breakpoints.System,
+		MessagesBreakpoint:       decision.Breakpoints.Messages,
+	})
+}
+
+func buildAntigravityClaudePayload(payload []byte, requestModel string, from sdktranslator.Format, stream bool) ([]byte, []byte, anthropicCachePolicyDecision, error) {
+	baseModel := thinking.ParseSuffix(requestModel).ModelName
+	claudePayload, decision, err := buildClaudePayloadWithCachePolicy(payload, requestModel, from, stream)
+	if err != nil {
+		return nil, nil, anthropicCachePolicyDecision{}, err
+	}
+	return antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, claudePayload, stream), claudePayload, decision, nil
+}
+
+func buildClaudePayloadWithCachePolicy(payload []byte, requestModel string, from sdktranslator.Format, stream bool) ([]byte, anthropicCachePolicyDecision, error) {
+	baseModel := thinking.ParseSuffix(requestModel).ModelName
+	claudeFormat := sdktranslator.FormatClaude
+	claudePayload := sdktranslator.TranslateRequest(from, claudeFormat, baseModel, payload, stream)
+	var err error
+	claudePayload, err = thinking.ApplyThinking(claudePayload, requestModel, from.String(), claudeFormat.String(), "claude")
+	if err != nil {
+		return nil, anthropicCachePolicyDecision{}, err
+	}
+	decision := decideAnthropicCachePolicy(claudePayload)
+	claudePayload = rewriteAnthropicCacheControl(claudePayload, decision)
+	return claudePayload, decision, nil
 }
 
 func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
