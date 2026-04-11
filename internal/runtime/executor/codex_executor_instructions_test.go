@@ -194,7 +194,7 @@ func TestCodexExecutorExecute_NonStreamResponsesPreservesCompletedResponseFromSS
 		_, _ = w.Write([]byte(
 			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"created_at\":1775894312,\"model\":\"gpt-5.4\"}}\n\n" +
 				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from cheapRouter.\"}\n\n" +
-				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"created_at\":1775894312,\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from cheapRouter.\"}]}],\"usage\":{\"input_tokens\":15,\"output_tokens\":9,\"total_tokens\":24}}}\n\n",
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"created_at\":1775894312,\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":15,\"output_tokens\":9,\"total_tokens\":24}}}\n\n",
 		))
 	}))
 	defer server.Close()

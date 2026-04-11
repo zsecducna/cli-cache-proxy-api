@@ -42,7 +42,7 @@ func TestConvertCodexResponseToOpenAIResponsesNonStream_UnwrapsBufferedSSETransc
 	request := []byte(`{"model":"gpt-5.4","previous_response_id":"resp-prev","prompt_cache_key":"session-cache"}`)
 	raw := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"model\":\"gpt-5.4\"}}\n\n" +
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from cheapRouter.\"}\n\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from cheapRouter.\"}]}]}}\n\n")
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n")
 
 	out := ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.4", request, request, raw, nil)
 	payload := gjson.ParseBytes(out)
@@ -57,5 +57,22 @@ func TestConvertCodexResponseToOpenAIResponsesNonStream_UnwrapsBufferedSSETransc
 	}
 	if got := payload.Get("prompt_cache_key").String(); got != "session-cache" {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
+	}
+}
+
+func TestConvertCodexResponseToOpenAIResponsesNonStream_ReconstructsToolCallsFromBufferedSSETranscript(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4"}`)
+	raw := []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-2\",\"model\":\"gpt-5.4\"}}\n\n" +
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"lookup\"}}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"topic\\\":\\\"cheaprouter\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n")
+
+	out := ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.4", request, request, raw, nil)
+	payload := gjson.ParseBytes(out)
+	if got := payload.Get("output.0.type").String(); got != "function_call" {
+		t.Fatalf("output.0.type = %q, want function_call", got)
+	}
+	if got := payload.Get("output.0.arguments").String(); got != "{\"topic\":\"cheaprouter\"}" {
+		t.Fatalf("output.0.arguments = %q, want %q", got, "{\"topic\":\"cheaprouter\"}")
 	}
 }
