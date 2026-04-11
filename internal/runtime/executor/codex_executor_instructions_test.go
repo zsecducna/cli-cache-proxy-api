@@ -182,3 +182,52 @@ func TestCodexExecutorExecute_NonStreamChatCompletionsPreservesContentFromSSETex
 		t.Fatalf("total tokens = %d, want 24", got)
 	}
 }
+
+func TestCodexExecutorExecute_NonStreamResponsesPreservesCompletedResponseFromSSETranscript(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"created_at\":1775894312,\"model\":\"gpt-5.4\"}}\n\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from cheapRouter.\"}\n\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"created_at\":1775894312,\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from cheapRouter.\"}]}],\"usage\":{\"input_tokens\":15,\"output_tokens\":9,\"total_tokens\":24}}}\n\n",
+		))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"Write a one-line hello from cheapRouter."}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/responses")
+	}
+	if got := gjson.GetBytes(gotBody, "stream").Bool(); !got {
+		t.Fatalf("upstream stream = %v, want true", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "resp_2" {
+		t.Fatalf("id = %q, want %q", got, "resp_2")
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "Hello from cheapRouter." {
+		t.Fatalf("output text = %q, want %q", got, "Hello from cheapRouter.")
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 24 {
+		t.Fatalf("total tokens = %d, want 24", got)
+	}
+}

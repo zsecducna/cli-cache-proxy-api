@@ -25,13 +25,43 @@ func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, original
 // ConvertCodexResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
 func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	rootResult := gjson.ParseBytes(rawJSON)
-	if rootResult.Get("type").String() != "response.completed" {
+	responseResult, ok := collectCodexResponsesNonStreamResponse(rawJSON)
+	if !ok {
 		return []byte{}
 	}
-	responseResult := rootResult.Get("response")
 	resp := []byte(responseResult.Raw)
 	return injectCodexResponseTopLevelEcho(resp, originalRequestRawJSON, requestRawJSON)
+}
+
+func collectCodexResponsesNonStreamResponse(rawJSON []byte) (gjson.Result, bool) {
+	rootResult := gjson.ParseBytes(rawJSON)
+	if rootResult.Get("type").String() == "response.completed" {
+		responseResult := rootResult.Get("response")
+		return responseResult, responseResult.Exists()
+	}
+
+	lines := bytes.Split(rawJSON, []byte{'\n'})
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+
+		event := gjson.ParseBytes(payload)
+		if event.Get("type").String() != "response.completed" {
+			continue
+		}
+
+		responseResult := event.Get("response")
+		return responseResult, responseResult.Exists()
+	}
+
+	return gjson.Result{}, false
 }
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
