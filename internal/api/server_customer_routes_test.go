@@ -25,7 +25,7 @@ func setServerCustomerService(t *testing.T) *customerstate.Service {
 	return svc
 }
 
-func TestServerCustomerCreditsMiddlewareBlocksExhaustedCustomer(t *testing.T) {
+func TestServerCustomerCreditsMiddlewareAllowsExhaustedCustomer(t *testing.T) {
 	server := newTestServer(t)
 	svc := setServerCustomerService(t)
 	zeroCredits := int64(0)
@@ -40,15 +40,8 @@ func TestServerCustomerCreditsMiddlewareBlocksExhaustedCustomer(t *testing.T) {
 	resp := httptest.NewRecorder()
 	server.engine.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusPaymentRequired {
-		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusPaymentRequired, resp.Body.String())
-	}
-	var body map[string]map[string]string
-	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if body["error"]["code"] != "credits_exhausted" {
-		t.Fatalf("error code = %q, want credits_exhausted", body["error"]["code"])
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
 }
 

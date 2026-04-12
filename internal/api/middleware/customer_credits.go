@@ -41,15 +41,6 @@ func CustomerCreditsMiddleware() gin.HandlerFunc {
 			})
 			return
 		}
-		if customer.CreditsBalance <= 0 {
-			c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{
-				"error": gin.H{
-					"code":    "credits_exhausted",
-					"message": "customer credits exhausted",
-				},
-			})
-			return
-		}
 		c.Set("customer", customer)
 		c.Next()
 	}

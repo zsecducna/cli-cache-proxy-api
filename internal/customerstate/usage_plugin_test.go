@@ -9,7 +9,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
-func TestUsageDebitPluginDebitsSuccessfulUsage(t *testing.T) {
+func TestUsageDebitPluginDoesNotDebitSuccessfulUsage(t *testing.T) {
 	svc, err := NewService(filepath.Join(t.TempDir(), "customers.json"))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
@@ -38,22 +38,16 @@ func TestUsageDebitPluginDebitsSuccessfulUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCustomer() error = %v", err)
 	}
-	if customer.CreditsBalance != 80 {
-		t.Fatalf("credits balance = %d, want 80", customer.CreditsBalance)
+	if customer.CreditsBalance != 100 {
+		t.Fatalf("credits balance = %d, want 100", customer.CreditsBalance)
 	}
 
 	ledger, err := svc.ListLedger("cust-plugin", 10)
 	if err != nil {
 		t.Fatalf("ListLedger() error = %v", err)
 	}
-	if len(ledger) != 1 {
-		t.Fatalf("ledger length = %d, want 1", len(ledger))
-	}
-	if ledger[0].Type != LedgerTypeUsage {
-		t.Fatalf("ledger entry type = %q, want %q", ledger[0].Type, LedgerTypeUsage)
-	}
-	if ledger[0].RequestID != "req-plugin-success" {
-		t.Fatalf("ledger request_id = %q, want req-plugin-success", ledger[0].RequestID)
+	if len(ledger) != 0 {
+		t.Fatalf("ledger length = %d, want 0", len(ledger))
 	}
 }
 

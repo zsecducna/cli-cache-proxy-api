@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -58,7 +57,7 @@ func TestCustomerCreditsMiddlewareAllowsActiveCustomerWithBalance(t *testing.T) 
 	}
 }
 
-func TestCustomerCreditsMiddlewareRejectsExhaustedCustomer(t *testing.T) {
+func TestCustomerCreditsMiddlewareAllowsExhaustedCustomer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := setTestCustomerService(t)
 	mustCreateCustomer(t, svc, "cust-zero", 0)
@@ -69,21 +68,20 @@ func TestCustomerCreditsMiddlewareRejectsExhaustedCustomer(t *testing.T) {
 		c.Next()
 	})
 	engine.Use(CustomerCreditsMiddleware())
-	engine.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	engine.GET("/v1/models", func(c *gin.Context) {
+		if _, exists := c.Get("customer"); !exists {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	resp := httptest.NewRecorder()
 	engine.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusPaymentRequired {
-		t.Fatalf("status = %d, want %d", resp.Code, http.StatusPaymentRequired)
-	}
-	var body map[string]map[string]string
-	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if body["error"]["code"] != "credits_exhausted" {
-		t.Fatalf("error code = %q, want credits_exhausted", body["error"]["code"])
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusNoContent, resp.Body.String())
 	}
 }
 
