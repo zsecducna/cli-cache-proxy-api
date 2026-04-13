@@ -124,6 +124,7 @@ func TestAdaptOpenAIChatFallbackToClaude_PreservesMaxTokensStopReason(t *testing
 
 	feed([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`))
 	feed([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`))
+	feed([]byte(`data: [DONE]`))
 
 	if got := findAnthropicMessageDeltaStopReason(t, translatedEvents); got != "max_tokens" {
 		t.Fatalf("message_delta stop_reason = %q, want %q", got, "max_tokens")

@@ -144,6 +144,31 @@ func TestSchedulerPick_ClaudeModelUsesFillFirstUnderRoundRobin(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	model := "gemini-2.5-flash"
+	registerSchedulerModels(t, "antigravity", model, "antigravity-scheduler-b", "antigravity-scheduler-a")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "antigravity-scheduler-b", Provider: "antigravity"},
+		&Auth{ID: "antigravity-scheduler-a", Provider: "antigravity"},
+	)
+
+	for index := 0; index < 2; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "antigravity", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != "antigravity-scheduler-a" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-scheduler-a")
+		}
+	}
+}
+
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 
@@ -404,6 +429,29 @@ func TestManager_PickNextLegacy_ClaudeModelUsesFillFirstUnderRoundRobin(t *testi
 		}
 		if got.ID != "claude-legacy-a" {
 			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, "claude-legacy-a")
+		}
+	}
+}
+
+func TestManager_PickNextLegacy_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	registerSchedulerModels(t, "antigravity", "gemini-2.5-flash", "antigravity-legacy-b", "antigravity-legacy-a")
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["antigravity"] = schedulerTestExecutor{}
+	manager.auths["antigravity-legacy-b"] = &Auth{ID: "antigravity-legacy-b", Provider: "antigravity"}
+	manager.auths["antigravity-legacy-a"] = &Auth{ID: "antigravity-legacy-a", Provider: "antigravity"}
+
+	for index := 0; index < 2; index++ {
+		got, _, errPick := manager.pickNextLegacy(context.Background(), "antigravity", "gemini-2.5-flash", cliproxyexecutor.Options{}, map[string]struct{}{})
+		if errPick != nil {
+			t.Fatalf("pickNextLegacy() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextLegacy() #%d auth = nil", index)
+		}
+		if got.ID != "antigravity-legacy-a" {
+			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-legacy-a")
 		}
 	}
 }
