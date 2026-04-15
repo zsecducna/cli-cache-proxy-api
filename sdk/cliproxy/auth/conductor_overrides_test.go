@@ -482,6 +482,133 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
+func TestManager_ThirdPartyInvalidRequest_FallsBackToCodex(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetSelector(&FillFirstSelector{})
+
+	llmgateAuth := &Auth{
+		ID:       "aa-third-party-auth",
+		Provider: "llmgate",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "llmgate",
+			"provider_key": "llmgate",
+		},
+	}
+	codexAuth := &Auth{ID: "zz-codex-auth", Provider: "codex", Status: StatusActive}
+
+	llmgateExecutor := &authFallbackExecutor{
+		id: "llmgate",
+		executeErrors: map[string]error{
+			llmgateAuth.ID: &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    `{"error":{"type":"invalid_request_error","message":"provider-specific request rejection"}}`,
+			},
+		},
+	}
+	codexExecutor := &authFallbackExecutor{id: "codex"}
+	m.RegisterExecutor(llmgateExecutor)
+	m.RegisterExecutor(codexExecutor)
+
+	reg := registry.GetGlobalRegistry()
+	model := "gpt-5.4"
+	reg.RegisterClient(llmgateAuth.ID, "llmgate", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(codexAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(llmgateAuth.ID)
+		reg.UnregisterClient(codexAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), llmgateAuth); errRegister != nil {
+		t.Fatalf("register llmgate auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), codexAuth); errRegister != nil {
+		t.Fatalf("register codex auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"llmgate", "codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want fallback success", errExecute)
+	}
+	if string(resp.Payload) != codexAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), codexAuth.ID)
+	}
+
+	if got := llmgateExecutor.ExecuteCalls(); len(got) != 1 || got[0] != llmgateAuth.ID {
+		t.Fatalf("llmgate execute calls = %v, want [%s]", got, llmgateAuth.ID)
+	}
+	if got := codexExecutor.ExecuteCalls(); len(got) != 1 || got[0] != codexAuth.ID {
+		t.Fatalf("codex execute calls = %v, want [%s]", got, codexAuth.ID)
+	}
+}
+
+func TestManager_ThirdPartyInvalidRequestStream_FallsBackToCodex(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetSelector(&FillFirstSelector{})
+
+	llmgateAuth := &Auth{
+		ID:       "aa-third-party-auth",
+		Provider: "llmgate",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "llmgate",
+			"provider_key": "llmgate",
+		},
+	}
+	codexAuth := &Auth{ID: "zz-codex-auth", Provider: "codex", Status: StatusActive}
+
+	llmgateExecutor := &authFallbackExecutor{
+		id: "llmgate",
+		streamFirstErrors: map[string]error{
+			llmgateAuth.ID: &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    `{"error":{"type":"invalid_request_error","message":"provider-specific request rejection"}}`,
+			},
+		},
+	}
+	codexExecutor := &authFallbackExecutor{id: "codex"}
+	m.RegisterExecutor(llmgateExecutor)
+	m.RegisterExecutor(codexExecutor)
+
+	reg := registry.GetGlobalRegistry()
+	model := "gpt-5.4"
+	reg.RegisterClient(llmgateAuth.ID, "llmgate", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(codexAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(llmgateAuth.ID)
+		reg.UnregisterClient(codexAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), llmgateAuth); errRegister != nil {
+		t.Fatalf("register llmgate auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), codexAuth); errRegister != nil {
+		t.Fatalf("register codex auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"llmgate", "codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want fallback success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != codexAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(payload), codexAuth.ID)
+	}
+
+	if got := llmgateExecutor.StreamCalls(); len(got) != 1 || got[0] != llmgateAuth.ID {
+		t.Fatalf("llmgate stream calls = %v, want [%s]", got, llmgateAuth.ID)
+	}
+	if got := codexExecutor.StreamCalls(); len(got) != 1 || got[0] != codexAuth.ID {
+		t.Fatalf("codex stream calls = %v, want [%s]", got, codexAuth.ID)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

@@ -1356,7 +1356,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
+					authErr = errExec
+					break
 				}
 				authErr = errExec
 				continue
@@ -1365,7 +1366,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if shouldStopMixedRoutingOnError(auth, provider, authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1437,7 +1438,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
+					authErr = errExec
+					break
 				}
 				authErr = errExec
 				continue
@@ -1446,7 +1448,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if shouldStopMixedRoutingOnError(auth, provider, authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1507,7 +1509,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if isRequestInvalidError(errStream) {
+			if shouldStopMixedRoutingOnError(auth, provider, errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -2656,6 +2658,58 @@ func isRequestInvalidError(err error) bool {
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldStopMixedRoutingOnError(auth *Auth, provider string, err error) bool {
+	if !isRequestInvalidError(err) {
+		return false
+	}
+	return !shouldFallbackAfterThirdPartyInvalidRequest(auth, provider, err)
+}
+
+func shouldFallbackAfterThirdPartyInvalidRequest(auth *Auth, provider string, err error) bool {
+	if auth == nil || err == nil {
+		return false
+	}
+	if statusCodeFromError(err) != http.StatusBadRequest {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "invalid_request_error") {
+		return false
+	}
+	return isThirdPartyAIProvider(auth, provider)
+}
+
+func isThirdPartyAIProvider(auth *Auth, provider string) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes != nil {
+		if strings.TrimSpace(auth.Attributes["compat_name"]) != "" || strings.TrimSpace(auth.Attributes["provider_key"]) != "" {
+			return true
+		}
+	}
+	providerKey := strings.TrimSpace(strings.ToLower(provider))
+	authProvider := strings.TrimSpace(strings.ToLower(auth.Provider))
+	switch {
+	case providerKey == "openai-compatibility", authProvider == "openai-compatibility":
+		return true
+	case providerKey != "" && !isBuiltInProvider(providerKey):
+		return true
+	case authProvider != "" && !isBuiltInProvider(authProvider):
+		return true
+	default:
+		return false
+	}
+}
+
+func isBuiltInProvider(provider string) bool {
+	switch strings.TrimSpace(strings.ToLower(provider)) {
+	case "antigravity", "aistudio", "claude", "codex", "gemini", "gemini-cli", "iflow", "kimi", "openai", "qwen", "vertex":
 		return true
 	default:
 		return false
