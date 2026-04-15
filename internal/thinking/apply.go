@@ -11,14 +11,15 @@ import (
 
 // providerAppliers maps provider names to their ProviderApplier implementations.
 var providerAppliers = map[string]ProviderApplier{
-	"gemini":      nil,
-	"gemini-cli":  nil,
-	"claude":      nil,
-	"openai":      nil,
-	"codex":       nil,
-	"iflow":       nil,
-	"antigravity": nil,
-	"kimi":        nil,
+	"gemini":          nil,
+	"gemini-cli":      nil,
+	"claude":          nil,
+	"openai":          nil,
+	"openai-response": nil,
+	"codex":           nil,
+	"iflow":           nil,
+	"antigravity":     nil,
+	"kimi":            nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -324,8 +325,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
-	case "codex":
-		return extractCodexConfig(body)
+	case "openai-response", "codex":
+		return extractOpenAIResponsesConfig(body)
 	case "iflow":
 		config := extractIFlowConfig(body)
 		if hasThinkingConfig(config) {
@@ -505,15 +506,23 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 	return ThinkingConfig{}
 }
 
-// extractCodexConfig extracts thinking configuration from Codex format request body.
+// extractOpenAIResponsesConfig extracts thinking configuration from OpenAI Responses-compatible request bodies.
 //
-// Codex API format (OpenAI Responses API):
+// OpenAI Responses-compatible formats:
 //   - reasoning.effort: "none", "low", "medium", "high"
+//   - reasoning_effort: "none", "low", "medium", "high" (compatibility alias)
 //
-// This is similar to OpenAI but uses nested field "reasoning.effort" instead of "reasoning_effort".
-func extractCodexConfig(body []byte) ThinkingConfig {
-	// Check reasoning.effort (Codex / OpenAI Responses API format)
+// The nested field is canonical for /responses, but we also accept the chat-completions
+// top-level alias so compatibility providers can normalize older clients before forwarding upstream.
+func extractOpenAIResponsesConfig(body []byte) ThinkingConfig {
 	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
+		value := effort.String()
+		if value == "none" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	}
+	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
 		value := effort.String()
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}

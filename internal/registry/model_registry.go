@@ -862,8 +862,16 @@ func cloneModelMapValue(value any) any {
 			copySlice[i] = cloneModelMapValue(entry)
 		}
 		return copySlice
+	case []map[string]any:
+		copySlice := make([]map[string]any, len(typed))
+		for i, entry := range typed {
+			copySlice[i] = cloneModelMapValue(entry).(map[string]any)
+		}
+		return copySlice
 	case []string:
-		return append([]string(nil), typed...)
+		copySlice := make([]string, len(typed))
+		copy(copySlice, typed)
+		return copySlice
 	default:
 		return value
 	}
@@ -1142,6 +1150,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
 		return result
+
+	case "codex":
+		return convertCodexModelToMap(model)
 
 	case "claude":
 		result := map[string]any{

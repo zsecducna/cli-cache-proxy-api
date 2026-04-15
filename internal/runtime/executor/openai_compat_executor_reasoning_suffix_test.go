@@ -264,6 +264,39 @@ func TestOpenAICompatExecutorBuildExecutionPlan_AppendsResponsesReasoningSuffixO
 	}
 }
 
+func TestOpenAICompatExecutorBuildExecutionPlan_NormalizesResponsesReasoningEffortAlias(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                         "openrouter",
+			BaseURL:                      "https://openrouter.ai/api/v1",
+			AppendReasoningEffortToModel: true,
+		}},
+	})
+
+	plan, err := executor.buildExecutionPlan(cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"Return ok exactly.","reasoning_effort":"high"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}, testOpenAICompatAuth(), false)
+	if err != nil {
+		t.Fatalf("buildExecutionPlan() error = %v", err)
+	}
+
+	if got := plan.endpoint; got != "/responses" {
+		t.Fatalf("endpoint = %q, want %q", got, "/responses")
+	}
+	if got := gjson.GetBytes(plan.translated, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want %q, body=%s", got, "high", string(plan.translated))
+	}
+	if gjson.GetBytes(plan.translated, "reasoning_effort").Exists() {
+		t.Fatalf("reasoning_effort should be removed after normalization, body=%s", string(plan.translated))
+	}
+	if got := gjson.GetBytes(plan.translated, "model").String(); got != "gpt-5.4-high" {
+		t.Fatalf("model = %q, want %q, body=%s", got, "gpt-5.4-high", string(plan.translated))
+	}
+}
+
 func findOpenAICompatPayloadForBucket(t *testing.T, percent int, sampled bool) []byte {
 	t.Helper()
 

@@ -33,6 +33,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
+	codexhandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -334,6 +335,7 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	s.engine.GET("/cache-statistics.html", s.serveCacheStatisticsPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+	codexHandlers := codexhandlers.NewAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -343,11 +345,21 @@ func (s *Server) setupRoutes() {
 	customerCreditsMiddleware := middleware.CustomerCreditsMiddleware()
 	internalCustomerMiddleware := middleware.InternalCustomerMiddleware()
 
+	// Codex-compatible root aliases.
+	rootCodex := s.engine.Group("")
+	rootCodex.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
+	{
+		rootCodex.GET("/models", codexHandlers.Models)
+		rootCodex.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+		rootCodex.POST("/responses", openaiResponsesHandlers.Responses)
+		rootCodex.POST("/responses/compact", openaiResponsesHandlers.Compact)
+	}
+
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
 	{
-		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers, codexHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
@@ -811,23 +823,25 @@ func (s *Server) watchKeepAlive() {
 	}
 }
 
-// unifiedModelsHandler creates a unified handler for the /v1/models endpoint
-// that routes to different handlers based on the User-Agent header.
-// If User-Agent starts with "claude-cli", it routes to Claude handler,
-// otherwise it routes to OpenAI handler.
-func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
+// unifiedModelsHandler creates a unified handler for model-list endpoints that
+// routes to provider-specific handlers based on the User-Agent header.
+func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler, codexHandler *codexhandlers.APIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
 
-		// Route to Claude handler if User-Agent starts with "claude-cli"
+		// Route to Claude handler if User-Agent starts with "claude-cli".
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
 			claudeHandler.ClaudeModels(c)
+		} else if isCodexModelsUserAgent(userAgent) {
+			codexHandler.Models(c)
 		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func isCodexModelsUserAgent(userAgent string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(userAgent)), "codex")
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.

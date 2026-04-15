@@ -1395,7 +1395,41 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "openai")
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(entry.Models))
+	seen := make(map[string]struct{}, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.GetName())
+		alias := strings.TrimSpace(model.GetAlias())
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		info := registry.LookupStaticModelInfo(name)
+		if info == nil {
+			info = &ModelInfo{}
+		}
+		info.ID = alias
+		info.Object = "model"
+		info.Created = now
+		if strings.TrimSpace(info.OwnedBy) == "" {
+			info.OwnedBy = "openai"
+		}
+		info.Type = "codex"
+		info.DisplayName = alias
+		info.UserDefined = true
+		out = append(out, info)
+	}
+	return out
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

@@ -942,7 +942,7 @@ func TestManagementUsageEndpointUsesPersistedCacheStatistics(t *testing.T) {
 		t.Fatal("expected cache statistics store to be configured")
 	}
 
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
 	events := []usage.CacheStatisticsEvent{
 		{
 			Timestamp:       now.Add(-2 * time.Hour),

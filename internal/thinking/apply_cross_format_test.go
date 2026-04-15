@@ -5,6 +5,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/codex"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
 	"github.com/tidwall/gjson"
@@ -110,5 +111,40 @@ func TestApplyThinking_ClaudeSourceConfigCrossFormat(t *testing.T) {
 				t.Fatalf("output_config.effort should be stripped after apply, body=%s", string(out))
 			}
 		})
+	}
+}
+
+func TestApplyThinking_OpenAIResponsesAliasNormalizesToCanonicalReasoningField(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	codexClientID := "test-cross-format-codex-" + t.Name()
+
+	reg.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{{
+		ID:       "codex-cross-model",
+		Type:     "codex",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(codexClientID)
+	})
+
+	out, err := thinking.ApplyThinking(
+		[]byte(`{"model":"codex-cross-model","input":"hi","reasoning_effort":"high"}`),
+		"codex-cross-model",
+		"openai-response",
+		"openai-response",
+		"codex",
+	)
+	if err != nil {
+		t.Fatalf("ApplyThinking() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want %q, body=%s", got, "high", string(out))
+	}
+	if gjson.GetBytes(out, "reasoning_effort").Exists() {
+		t.Fatalf("reasoning_effort should be stripped after normalization, body=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input").String(); got != "hi" {
+		t.Fatalf("input = %q, want %q, body=%s", got, "hi", string(out))
 	}
 }
