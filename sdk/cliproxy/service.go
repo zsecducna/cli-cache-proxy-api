@@ -955,30 +955,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				compat := &s.cfg.OpenAICompatibility[i]
 				if strings.EqualFold(compat.Name, compatName) {
 					isCompatAuth = true
-					// Convert compatibility models to registry models
-					ms := make([]*ModelInfo, 0, len(compat.Models))
-					for j := range compat.Models {
-						m := compat.Models[j]
-						// Use alias as model ID, fallback to name if alias is empty
-						modelID := m.Alias
-						if modelID == "" {
-							modelID = m.Name
-						}
-						thinking := m.Thinking
-						if thinking == nil {
-							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
-						}
-						ms = append(ms, &ModelInfo{
-							ID:          modelID,
-							Object:      "model",
-							Created:     time.Now().Unix(),
-							OwnedBy:     compat.Name,
-							Type:        "openai-compatibility",
-							DisplayName: modelID,
-							UserDefined: false,
-							Thinking:    thinking,
-						})
-					}
+					// OpenAI-compatible config models should behave like other config-defined
+					// models: keep upstream/static metadata when available and skip local
+					// reasoning validation so the upstream decides what it accepts.
+					ms := buildOpenAICompatConfigModels(compat.Name, compat.Models)
 					// Register and return
 					if len(ms) > 0 {
 						if providerKey == "" {
@@ -1389,6 +1369,52 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildOpenAICompatConfigModels(ownedBy string, models []config.OpenAICompatibilityModel) []*ModelInfo {
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for i := range models {
+		model := models[i]
+		name := strings.TrimSpace(model.GetName())
+		alias := strings.TrimSpace(model.GetAlias())
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		info := registry.LookupStaticModelInfo(name)
+		if info == nil {
+			info = &ModelInfo{}
+		}
+		info.ID = alias
+		info.Object = "model"
+		info.Created = now
+		info.OwnedBy = ownedBy
+		info.Type = "openai-compatibility"
+		info.DisplayName = alias
+		info.UserDefined = true
+		if model.Thinking != nil {
+			thinking := *model.Thinking
+			if len(model.Thinking.Levels) > 0 {
+				thinking.Levels = append([]string(nil), model.Thinking.Levels...)
+			}
+			info.Thinking = &thinking
+		} else if info.Thinking == nil {
+			// Preserve the existing default metadata for unknown compat models.
+			info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
