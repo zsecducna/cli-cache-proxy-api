@@ -185,6 +185,102 @@ func TestOpenAICompatExecutorClaudeViaGPTResponsesPersistsNestedUsage(t *testing
 	}
 }
 
+func TestOpenAICompatExecutorResponsesNonStreamPersistsNestedUsage(t *testing.T) {
+	t.Cleanup(func() {
+		_ = internalusage.ClosePersistentStore()
+	})
+	cfg := &config.Config{UsageStatisticsEnabled: true}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := internalusage.ConfigurePersistentStore(cfg, configPath); err != nil {
+		t.Fatalf("ConfigurePersistentStore() error = %v", err)
+	}
+
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"response":{"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12,"output_tokens_details":{"reasoning_tokens":3}}}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openrouter", cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                  server.URL + "/v1",
+		"api_key":                   "test",
+		"provider_key":              "openrouter",
+		"supports_openai_responses": "true",
+		"supports_chat_completions": "true",
+		"supports_tools":            "true",
+		"supports_streaming":        "true",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "apiKey", "test-admin-key")
+	ctx = helps.WithUsageReasoningEffort(ctx, "xhigh")
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		Stream:          false,
+		OriginalRequest: payload,
+		Metadata:        nil,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+	if !gjson.GetBytes(gotBody, "input").Exists() {
+		t.Fatalf("expected responses input payload, got %s", string(gotBody))
+	}
+
+	store := internalusage.GetCacheStatisticsStore()
+	if store == nil {
+		t.Fatal("expected cache statistics store")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, err := store.Snapshot(context.Background(), 10, 10, 1)
+		if err != nil {
+			t.Fatalf("Snapshot() error = %v", err)
+		}
+		if snapshot.Summary.TotalRequests == 1 {
+			if snapshot.Summary.TotalTokens != 12 {
+				t.Fatalf("total_tokens = %d, want 12", snapshot.Summary.TotalTokens)
+			}
+			if len(snapshot.RecentRequests) != 1 {
+				t.Fatalf("recent requests len = %d, want 1", len(snapshot.RecentRequests))
+			}
+			item := snapshot.RecentRequests[0]
+			if item.Provider != "openrouter" {
+				t.Fatalf("provider = %q, want %q", item.Provider, "openrouter")
+			}
+			if item.ReasoningEffort != "xhigh" {
+				t.Fatalf("reasoning_effort = %q, want %q", item.ReasoningEffort, "xhigh")
+			}
+			if item.InputTokens != 5 || item.OutputTokens != 7 || item.TotalTokens != 12 {
+				t.Fatalf("usage = %+v, want input/output/total 5/7/12", item)
+			}
+			if item.ReasoningTokens != 3 {
+				t.Fatalf("reasoning_tokens = %d, want 3", item.ReasoningTokens)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for persisted usage snapshot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestOpenAICompatExecutorClaudeViaGPTRejectsToolTurnsWithoutResponsesSurface(t *testing.T) {
 	var upstreamCalls int
 

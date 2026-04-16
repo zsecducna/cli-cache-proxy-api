@@ -526,6 +526,69 @@ EOF
   fi
 }
 
+test_existing_target_config_is_preserved_by_default() {
+  local repo_root tmp_root home_root install_root source_auth_dir source_config empty_stats_dir
+  local answers_path output_path target_config existing_binary
+
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tmp_root="$(mktemp -d)"
+  trap "cleanup_tmp_root '$tmp_root'" RETURN
+
+  home_root="$tmp_root/home"
+  install_root="$home_root/.cli-cache-proxy-test"
+  source_auth_dir="$tmp_root/source-auth"
+  source_config="$tmp_root/source-config.yaml"
+  empty_stats_dir="$tmp_root/empty-stats"
+  answers_path="$tmp_root/answers.txt"
+  output_path="$tmp_root/install.log"
+  target_config="$install_root/config.yaml"
+  existing_binary="$install_root/cli-proxy-api"
+
+  mkdir -p "$home_root" "$install_root" "$install_root/auth" "$empty_stats_dir" "$source_auth_dir"
+  printf 'source-token\n' > "$source_auth_dir/source-token.txt"
+  write_source_config "$source_config" "$source_auth_dir" "18317"
+  make_fake_binary "$existing_binary"
+  cat > "$target_config" <<EOF
+port: 9000
+auth-dir: "$home_root/existing-auth"
+usage-statistics-enabled: true
+openai-compatibility:
+  - name: llmgate
+    append-reasoning-effort-to-model: true
+    append-reasoning-effort-to-model-percent: 35
+EOF
+
+  write_answers \
+    "$answers_path" \
+    "$install_root" \
+    "$install_root/auth" \
+    "y" \
+    "n" \
+    "" \
+    "n" \
+    "n"
+
+  run_installer_capture \
+    "$repo_root" \
+    "$answers_path" \
+    "$output_path" \
+    HOME="$home_root" \
+    CLI_PROXY_INSTALLER_SKIP_LAUNCHD=1 \
+    CLI_PROXY_INSTALLER_SOURCE_CONFIG="$source_config" \
+    CLI_PROXY_INSTALLER_SOURCE_STATS="$empty_stats_dir" \
+    CLI_PROXY_FAKE_CONFIG_HINT="$target_config"
+
+  grep -F "port: 9000" "$target_config" >/dev/null
+  grep -F "auth-dir: \"$install_root/auth\"" "$target_config" >/dev/null
+  grep -F "usage-statistics-enabled: true" "$target_config" >/dev/null
+  grep -F "append-reasoning-effort-to-model: true" "$target_config" >/dev/null
+  grep -F "append-reasoning-effort-to-model-percent: 35" "$target_config" >/dev/null
+  if grep -F "usage-statistics-enabled: false" "$target_config" >/dev/null; then
+    printf 'source config unexpectedly reset the existing target config defaults\n' >&2
+    return 1
+  fi
+}
+
 test_auth_merge_preserves_existing_target_files() {
   local repo_root tmp_root home_root install_root source_auth_dir source_config empty_stats_dir
   local answers_path output_path target_auth existing_binary
@@ -879,6 +942,7 @@ main() {
   test_postgres_install_writes_env_and_provisions_db
   test_postgres_install_failure_prints_manual_init_commands
   test_existing_target_config_requires_replace_confirmation
+  test_existing_target_config_is_preserved_by_default
   test_auth_merge_preserves_existing_target_files
   test_db_merge_restores_backup_on_prompt_cache_failure
   test_plist_escapes_xml_significant_paths

@@ -352,12 +352,25 @@ EOF
 }
 
 choose_config_source() {
+  local target_config="${1:-}"
+  local normalized_target=""
   local choice=""
   local idx=""
   if [[ "${#CONFIG_SOURCES[@]}" -eq 0 ]]; then
     return 1
   fi
-  if ! confirm_yes_no "Copy a detected config into the install location?" "Y"; then
+
+  normalized_target="$(expand_path "$target_config")"
+  if [[ -n "$normalized_target" && -f "$normalized_target" ]]; then
+    if [[ "${#CONFIG_SOURCES[@]}" -eq 1 && "${CONFIG_SOURCES[0]}" == "$normalized_target" ]]; then
+      printf '%s' "$normalized_target"
+      return 0
+    fi
+    if ! confirm_yes_no "Import a different detected config into the install location? Current target config at $normalized_target will be kept by default." "N"; then
+      printf '%s' "$normalized_target"
+      return 0
+    fi
+  elif ! confirm_yes_no "Copy a detected config into the install location?" "Y"; then
     return 1
   fi
   if [[ "${#CONFIG_SOURCES[@]}" -eq 1 ]]; then
@@ -1179,7 +1192,7 @@ main() {
 
   detect_sources "$install_root"
   print_detection_summary
-  selected_config="$(choose_config_source || true)"
+  selected_config="$(choose_config_source "$install_root/config.yaml" || true)"
 
   ensure_dir "$install_root"
   ensure_dir "$auth_dir"

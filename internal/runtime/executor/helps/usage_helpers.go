@@ -370,7 +370,11 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 }
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
-	usageNode := gjson.ParseBytes(data).Get("usage")
+	root := gjson.ParseBytes(data)
+	usageNode := root.Get("usage")
+	if !usageNode.Exists() {
+		usageNode = root.Get("response.usage")
+	}
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}

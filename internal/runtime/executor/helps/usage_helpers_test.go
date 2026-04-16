@@ -52,6 +52,26 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageResponsesNestedUsage(t *testing.T) {
+	data := []byte(`{"response":{"id":"resp_1","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	}
+	if detail.OutputTokens != 20 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 20)
+	}
+	if detail.TotalTokens != 30 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 30)
+	}
+	if detail.CachedTokens != 7 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.ReasoningTokens != 9 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
 func TestParseOpenAIStreamUsageResponses(t *testing.T) {
 	line := []byte(`data: {"type":"response.completed","response":{"id":"resp_1"},"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail, ok := ParseOpenAIStreamUsage(line)
