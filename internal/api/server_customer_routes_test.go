@@ -25,18 +25,13 @@ func setServerCustomerService(t *testing.T) *customerstate.Service {
 	return svc
 }
 
-func TestServerCustomerCreditsMiddlewareAllowsExhaustedCustomer(t *testing.T) {
+func TestServerTrustedCustomerIdentityAllowsUnknownCustomer(t *testing.T) {
 	server := newTestServer(t)
-	svc := setServerCustomerService(t)
-	zeroCredits := int64(0)
-	if _, err := svc.UpsertCustomer(customerstate.UpsertCustomerInput{ID: "cust-zero", InitialCredits: &zeroCredits}); err != nil {
-		t.Fatalf("UpsertCustomer() error = %v", err)
-	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Authorization", "Bearer test-key")
-	req.Header.Set(customerstate.CustomerIDHeader, "cust-zero")
+	req.Header.Set(customerstate.CustomerIDHeader, "cust-unknown")
 	resp := httptest.NewRecorder()
 	server.engine.ServeHTTP(resp, req)
 

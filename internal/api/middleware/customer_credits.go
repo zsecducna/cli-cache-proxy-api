@@ -6,45 +6,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 )
-
-func CustomerCreditsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		customerID := strings.TrimSpace(c.GetString("customerID"))
-		if customerID == "" {
-			c.Next()
-			return
-		}
-		svc, err := customerstate.DefaultService()
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "customer state unavailable"})
-			return
-		}
-		customer, err := svc.GetCustomer(customerID)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{
-					"code":    "invalid_customer",
-					"message": "customer account not found",
-				},
-			})
-			return
-		}
-		if !customer.Active {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": gin.H{
-					"code":    "customer_inactive",
-					"message": "customer account is inactive",
-				},
-			})
-			return
-		}
-		c.Set("customer", customer)
-		c.Next()
-	}
-}
 
 func InternalCustomerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {

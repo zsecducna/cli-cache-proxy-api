@@ -342,12 +342,11 @@ func (s *Server) setupRoutes() {
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 	authMiddleware := AuthMiddleware(s.accessManager)
 	customerIdentityMiddleware := middleware.CustomerIdentityMiddleware()
-	customerCreditsMiddleware := middleware.CustomerCreditsMiddleware()
 	internalCustomerMiddleware := middleware.InternalCustomerMiddleware()
 
 	// Codex-compatible root aliases.
 	rootCodex := s.engine.Group("")
-	rootCodex.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
+	rootCodex.Use(authMiddleware, customerIdentityMiddleware)
 	{
 		rootCodex.GET("/models", codexHandlers.Models)
 		rootCodex.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
@@ -357,7 +356,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
+	v1.Use(authMiddleware, customerIdentityMiddleware)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers, codexHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -371,7 +370,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(authMiddleware, customerIdentityMiddleware, customerCreditsMiddleware)
+	v1beta.Use(authMiddleware, customerIdentityMiddleware)
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
