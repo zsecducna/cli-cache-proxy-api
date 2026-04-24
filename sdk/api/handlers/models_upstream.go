@@ -29,6 +29,10 @@ type upstreamChatGPTModelsPayload struct {
 	} `json:"models"`
 }
 
+var upstreamChatGPTModelAliases = map[string]string{
+	"gpt-5-5-thinking": "gpt-5.5",
+}
+
 func (h *BaseAPIHandler) FetchCodexModelsUpstream(ctx context.Context, userAgent string) ([]byte, error) {
 	clientVersion := codexClientVersion(userAgent)
 	reqURL, err := url.Parse(codexModelsURL)
@@ -186,7 +190,7 @@ func MapUpstreamChatGPTModelsToOpenAIList(body []byte) ([]map[string]any, error)
 	models := make([]map[string]any, 0, len(payload.Models))
 	seen := make(map[string]struct{}, len(payload.Models))
 	for _, model := range payload.Models {
-		slug := strings.TrimSpace(model.Slug)
+		slug := normalizeUpstreamChatGPTModelSlug(model.Slug)
 		if slug == "" {
 			continue
 		}
@@ -201,4 +205,15 @@ func MapUpstreamChatGPTModelsToOpenAIList(body []byte) ([]map[string]any, error)
 		})
 	}
 	return models, nil
+}
+
+func normalizeUpstreamChatGPTModelSlug(slug string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return ""
+	}
+	if alias, ok := upstreamChatGPTModelAliases[strings.ToLower(slug)]; ok {
+		return alias
+	}
+	return slug
 }

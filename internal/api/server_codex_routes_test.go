@@ -188,7 +188,7 @@ func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"title":"Latest","models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}`))
+		_, _ = w.Write([]byte(`{"title":"Latest","models":[{"slug":"gpt-5-5-thinking"},{"slug":"gpt-5.4"}]}`))
 	}))
 	defer upstream.Close()
 
