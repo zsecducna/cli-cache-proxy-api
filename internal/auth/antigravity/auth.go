@@ -284,8 +284,9 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("User-Agent", o.loadCodeAssistUserAgent())
 		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
+		req.Header.Set("Client-Metadata", `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`)
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {
