@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -57,8 +58,8 @@ func TestV1ModelsKeepsMinimalOpenAISchemaForNormalClients(t *testing.T) {
 }
 
 func TestCodexModelsAliasReturnsRichCatalog(t *testing.T) {
+	setCodexModelsEndpointTestEnv(t, `{"models":[{"slug":"route-fresh","display_name":"Route Fresh","context_window":123,"supported_in_api":true}]}`)
 	server := newTestServer(t)
-	registerCodexCatalogTestModel(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -70,52 +71,12 @@ func TestCodexModelsAliasReturnsRichCatalog(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-
-	var payload codexCatalogPayload
-	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v body=%s", err, resp.Body.String())
-	}
-	if len(payload.Models) == 0 {
-		t.Fatalf("models payload is empty: %s", resp.Body.String())
-	}
-
-	model := findCodexModelBySlug(t, payload.Models, codexCatalogTestModelID)
-	if got := model.DisplayName; got != "Test Codex Model" {
-		t.Fatalf("display_name = %q, want %q", got, "Test Codex Model")
-	}
-	if got := model.Description; got != "codex route coverage" {
-		t.Fatalf("description = %q, want %q", got, "codex route coverage")
-	}
-	if got := model.ContextWindow; got != 200000 {
-		t.Fatalf("context_window = %d, want %d", got, 200000)
-	}
-	if got := model.MaxCompletionTokens; got != 32000 {
-		t.Fatalf("max_completion_tokens = %d, want %d", got, 32000)
-	}
-	if got := model.DefaultReasoningLevel; got != "medium" {
-		t.Fatalf("default_reasoning_level = %q, want %q", got, "medium")
-	}
-	if got := model.SupportedReasoningLevels; len(got) != 4 || got[0].Effort != "low" || got[3].Effort != "xhigh" {
-		t.Fatalf("supported_reasoning_levels = %#v, want low..xhigh presets", got)
-	}
-	if got := model.Visibility; got != "list" {
-		t.Fatalf("visibility = %q, want %q", got, "list")
-	}
-	if !model.SupportedInAPI {
-		t.Fatal("supported_in_api = false, want true")
-	}
-	if model.TruncationPolicy.Mode == "" || model.TruncationPolicy.Limit == 0 {
-		t.Fatalf("truncation_policy = %#v, want populated policy", model.TruncationPolicy)
-	}
-	if len(model.InputModalities) == 0 {
-		t.Fatalf("input_modalities empty in %#v", model)
-	}
+	assertOfficialCodexModelsResponse(t, resp.Body.Bytes())
 }
 
 func TestV1ModelsReturnsCodexCatalogForCodexClients(t *testing.T) {
+	setCodexModelsEndpointTestEnv(t, `{"models":[{"slug":"route-v1","display_name":"Route V1","context_window":456,"supported_in_api":true}]}`)
 	server := newTestServer(t)
-	registerCodexCatalogTestModel(t)
-	registerCodexCatalogOtherProviderModel(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -127,34 +88,14 @@ func TestV1ModelsReturnsCodexCatalogForCodexClients(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-
-	var payload codexCatalogPayload
-	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v body=%s", err, resp.Body.String())
-	}
-	if len(payload.Models) == 0 {
-		t.Fatalf("models payload is empty: %s", resp.Body.String())
-	}
-	findCodexModelBySlug(t, payload.Models, codexCatalogTestModelID)
-	findCodexModelBySlug(t, payload.Models, "test-gemini-catalog-model")
+	assertOfficialCodexModelsResponse(t, resp.Body.Bytes())
 }
 
-func TestCodexModelsAliasFetchesUpstreamCatalogWhenCodexAuthAvailable(t *testing.T) {
-	var gotPath string
-	var gotQuery string
-	var gotAuth string
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotQuery = r.URL.RawQuery
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5","context_window":272000,"base_instructions":"official"}]}`))
-	}))
-	defer upstream.Close()
+func TestCodexModelsAliasUsesOfficialCatalogEvenWhenCodexAuthAvailable(t *testing.T) {
+	setCodexModelsEndpointTestEnv(t, `{"models":[{"slug":"route-auth","display_name":"Route Auth","context_window":789,"supported_in_api":true}]}`)
 
 	server := newTestServer(t)
-	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+	registerCodexModelsFetchTestAuth(t, server, "http://unused.invalid")
 
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -166,29 +107,42 @@ func TestCodexModelsAliasFetchesUpstreamCatalogWhenCodexAuthAvailable(t *testing
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if gotPath != "/backend-api/codex/models" {
-		t.Fatalf("upstream path = %q, want %q", gotPath, "/backend-api/codex/models")
+	assertOfficialCodexModelsResponse(t, resp.Body.Bytes())
+}
+
+func assertOfficialCodexModelsResponse(t *testing.T, body []byte) {
+	t.Helper()
+
+	var payload codexCatalogPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if gotQuery != "client_version=0.0.0" {
-		t.Fatalf("upstream query = %q, want %q", gotQuery, "client_version=0.0.0")
+	if len(payload.Models) == 0 {
+		t.Fatalf("models payload is empty")
 	}
-	if gotAuth != "Bearer test-token" {
-		t.Fatalf("upstream authorization = %q, want %q", gotAuth, "Bearer test-token")
-	}
-	if got := resp.Body.String(); got != `{"models":[{"slug":"gpt-5.5","context_window":272000,"base_instructions":"official"}]}` {
-		t.Fatalf("body = %s", got)
+	model := payload.Models[0]
+	if model.Slug == "" || model.DisplayName == "" || model.ContextWindow == 0 || !model.SupportedInAPI {
+		t.Fatalf("model = %#v, want fetched official-schema metadata", model)
 	}
 }
 
-func TestCodexModelsAliasInjectsTemporaryGPT55MetadataFromUpstreamGPT54(t *testing.T) {
+func setCodexModelsEndpointTestEnv(t *testing.T, body string) {
+	t.Helper()
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4","display_name":"gpt-5.4","description":"Strong model for everyday coding.","default_reasoning_level":"medium","context_window":272000,"max_context_window":1000000,"base_instructions":"official"}]}`))
+		_, _ = w.Write([]byte(body))
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
+	t.Setenv("CLIPROXY_CODEX_MODELS_URL", upstream.URL)
+	t.Setenv("CLIPROXY_CODEX_MODELS_CACHE", filepath.Join(t.TempDir(), "models.json"))
+}
+
+func TestCodexModelsAliasUsesOfficialCatalogForOldCodexUserAgent(t *testing.T) {
+	setCodexModelsEndpointTestEnv(t, `{"models":[{"slug":"route-old","display_name":"Route Old","context_window":321,"supported_in_api":true}]}`)
 
 	server := newTestServer(t)
-	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+	registerCodexModelsFetchTestAuth(t, server, "http://unused.invalid")
 
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -200,24 +154,7 @@ func TestCodexModelsAliasInjectsTemporaryGPT55MetadataFromUpstreamGPT54(t *testi
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	var payload codexCatalogPayload
-	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v body=%s", err, resp.Body.String())
-	}
-	gpt54 := findCodexModelBySlug(t, payload.Models, "gpt-5.4")
-	gpt55 := findCodexModelBySlug(t, payload.Models, "gpt-5.5")
-	if gpt55.DisplayName != "gpt-5.5" {
-		t.Fatalf("gpt-5.5 display_name = %q, want gpt-5.5", gpt55.DisplayName)
-	}
-	if gpt55.ContextWindow != 400000 {
-		t.Fatalf("gpt-5.5 context_window = %d, want 400000", gpt55.ContextWindow)
-	}
-	if gpt55.MaxContextWindow != 400000 {
-		t.Fatalf("gpt-5.5 max_context_window = %d, want 400000", gpt55.MaxContextWindow)
-	}
-	if gpt55.Description != gpt54.Description || gpt55.DefaultReasoningLevel != gpt54.DefaultReasoningLevel {
-		t.Fatalf("gpt-5.5 metadata = %#v, want clone of gpt-5.4 %#v with patched identity/context", gpt55, gpt54)
-	}
+	assertOfficialCodexModelsResponse(t, resp.Body.Bytes())
 }
 
 func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.T) {

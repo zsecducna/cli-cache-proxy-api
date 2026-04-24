@@ -884,7 +884,7 @@ func TestCacheStatisticsStoreSeparatesSharedAPIKeyCustomers(t *testing.T) {
 	}
 	defer func() { _ = store.Close() }()
 
-	baseTimestamp := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
+	baseTimestamp := time.Now().UTC().Add(-time.Hour)
 	baseEvent := CacheStatisticsEvent{
 		Timestamp: baseTimestamp,
 		Provider:  "codex",
@@ -983,7 +983,7 @@ func TestCacheStatisticsStoreProviderSetFiltersAreCaseInsensitive(t *testing.T) 
 	}
 	defer func() { _ = store.Close() }()
 
-	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	for _, event := range []CacheStatisticsEvent{
 		{
 			Timestamp: now.Add(-2 * time.Minute),

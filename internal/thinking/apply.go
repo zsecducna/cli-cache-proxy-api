@@ -19,6 +19,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":           nil,
 	"antigravity":     nil,
 	"kimi":            nil,
+	"iflow":           nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.

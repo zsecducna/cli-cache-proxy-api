@@ -2,14 +2,24 @@
 package codex
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
+	"io"
 	"net/http"
-	"sort"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+)
+
+const (
+	officialCodexModelsURL    = "https://raw.githubusercontent.com/openai/codex/0db6811b7cb443499c27393494abb035bb7be62d/codex-rs/models-manager/models.json"
+	codexModelsURLOverrideEnv = "CLIPROXY_CODEX_MODELS_URL"
+	codexModelsCachePathEnv   = "CLIPROXY_CODEX_MODELS_CACHE"
 )
 
 // APIHandler contains handlers for Codex-specific API endpoints.
@@ -26,101 +36,128 @@ func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 
 // Models returns a Codex-compatible model catalog.
 func (h *APIHandler) Models(c *gin.Context) {
-	if body, err := h.FetchCodexModelsUpstream(c.Request.Context(), c.GetHeader("User-Agent")); err == nil {
-		body = injectTemporaryGPT55ModelIntoBody(body)
-		c.Data(http.StatusOK, "application/json", body)
+	body, err := fetchOfficialCodexModels(c.Request.Context(), codexModelsURL())
+	if err == nil {
+		if errCache := saveCodexModelsCache(body); errCache != nil {
+			log.WithError(errCache).Debug("codex models: failed to save official schema cache")
+		}
+		c.Data(http.StatusOK, gin.MIMEJSON, body)
 		return
-	} else {
-		log.WithError(err).Debug("codex models: falling back to local registry catalog")
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"models": mustInjectTemporaryGPT55Model(buildCodexModelCatalog()),
+
+	cached, errCache := readCodexModelsCache()
+	if errCache == nil {
+		log.WithError(err).Debug("codex models: official schema unavailable, using cache")
+		c.Data(http.StatusOK, gin.MIMEJSON, cached)
+		return
+	}
+
+	log.WithError(err).Warn("codex models: official schema unavailable and cache missing")
+	c.JSON(http.StatusBadGateway, gin.H{
+		"error": "codex models schema unavailable and no cache is present",
 	})
 }
 
-func mustInjectTemporaryGPT55Model(models []map[string]any) []map[string]any {
-	models, _ = injectTemporaryGPT55Model(models)
-	return models
+func codexModelsURL() string {
+	if value := strings.TrimSpace(os.Getenv(codexModelsURLOverrideEnv)); value != "" {
+		return value
+	}
+	return officialCodexModelsURL
 }
 
-func injectTemporaryGPT55ModelIntoBody(body []byte) []byte {
-	var payload struct {
-		Models []map[string]any `json:"models"`
+func codexModelsCachePath() (string, error) {
+	if value := strings.TrimSpace(os.Getenv(codexModelsCachePathEnv)); value != "" {
+		return value, nil
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
-	}
-	models, changed := injectTemporaryGPT55Model(payload.Models)
-	if !changed {
-		return body
-	}
-	payload.Models = models
-	patched, err := json.Marshal(payload)
+	root, err := os.UserCacheDir()
 	if err != nil {
-		return body
+		root = os.TempDir()
 	}
-	return patched
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("cache directory unavailable")
+	}
+	return filepath.Join(root, "cli-proxy-api", "codex-models.json"), nil
 }
 
-func injectTemporaryGPT55Model(models []map[string]any) ([]map[string]any, bool) {
-	if hasCodexModelSlug(models, "gpt-5.5") {
-		return models, false
+func fetchOfficialCodexModels(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
 	}
-	for index, model := range models {
-		if modelSlugFromMap(model) != "gpt-5.4" {
-			continue
-		}
-		clone := cloneCodexModelMap(model)
-		clone["slug"] = "gpt-5.5"
-		clone["display_name"] = "gpt-5.5"
-		if _, ok := clone["id"]; ok {
-			clone["id"] = "gpt-5.5"
-		}
-		clone["context_window"] = 400000
-		if _, ok := clone["context_length"]; ok {
-			clone["context_length"] = 400000
-		}
-		if _, ok := clone["max_context_window"]; ok {
-			clone["max_context_window"] = 400000
-		}
-		models = append(models, nil)
-		copy(models[index+2:], models[index+1:])
-		models[index+1] = clone
-		return models, true
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
 	}
-	return models, false
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("codex models: failed to close official schema response body")
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("official codex models request failed with status %d", resp.StatusCode)
+	}
+	if !validCodexModelsPayload(body) {
+		return nil, fmt.Errorf("official codex models response is not a valid models schema")
+	}
+	return body, nil
 }
 
-func hasCodexModelSlug(models []map[string]any, slug string) bool {
-	for _, model := range models {
-		if modelSlugFromMap(model) == slug {
-			return true
-		}
+func readCodexModelsCache() ([]byte, error) {
+	path, err := codexModelsCachePath()
+	if err != nil {
+		return nil, err
 	}
-	return false
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !validCodexModelsPayload(body) {
+		return nil, fmt.Errorf("cached codex models schema is invalid")
+	}
+	return body, nil
 }
 
-func cloneCodexModelMap(model map[string]any) map[string]any {
-	clone := make(map[string]any, len(model))
-	for key, value := range model {
-		clone[key] = value
+func saveCodexModelsCache(body []byte) error {
+	if !validCodexModelsPayload(body) {
+		return fmt.Errorf("codex models schema is invalid")
 	}
-	return clone
+	path, err := codexModelsCachePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "codex-models-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
-func buildCodexModelCatalog() []map[string]any {
-	modelRegistry := registry.GetGlobalRegistry()
-	models := modelRegistry.GetAvailableModels("codex")
-	sort.Slice(models, func(i, j int) bool {
-		return modelSlugFromMap(models[i]) < modelSlugFromMap(models[j])
-	})
-	return models
-}
-
-func modelSlugFromMap(model map[string]any) string {
-	if model == nil {
-		return ""
+func validCodexModelsPayload(body []byte) bool {
+	if !gjson.ValidBytes(body) {
+		return false
 	}
-	value, _ := model["slug"].(string)
-	return value
+	models := gjson.GetBytes(body, "models")
+	return models.Exists() && models.IsArray()
 }
