@@ -2,12 +2,17 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 func TestV1ModelsKeepsMinimalOpenAISchemaForNormalClients(t *testing.T) {
@@ -132,6 +137,106 @@ func TestV1ModelsReturnsCodexCatalogForCodexClients(t *testing.T) {
 	}
 	findCodexModelBySlug(t, payload.Models, codexCatalogTestModelID)
 	findCodexModelBySlug(t, payload.Models, "test-gemini-catalog-model")
+}
+
+func TestCodexModelsAliasFetchesUpstreamCatalogWhenCodexAuthAvailable(t *testing.T) {
+	var gotPath string
+	var gotQuery string
+	var gotAuth string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5","context_window":272000,"base_instructions":"official"}]}`))
+	}))
+	defer upstream.Close()
+
+	server := newTestServer(t)
+	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0")
+
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if gotPath != "/backend-api/codex/models" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/backend-api/codex/models")
+	}
+	if gotQuery != "client_version=0.0.0" {
+		t.Fatalf("upstream query = %q, want %q", gotQuery, "client_version=0.0.0")
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("upstream authorization = %q, want %q", gotAuth, "Bearer test-token")
+	}
+	if got := resp.Body.String(); got != `{"models":[{"slug":"gpt-5.5","context_window":272000,"base_instructions":"official"}]}` {
+		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"title":"Latest","models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}`))
+	}))
+	defer upstream.Close()
+
+	server := newTestServer(t)
+	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "curl/8.7.1")
+
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if gotPath != "/backend-api/models" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/backend-api/models")
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Fatalf("upstream authorization = %q, want %q", gotAuth, "Bearer test-token")
+	}
+
+	var payload struct {
+		Object string                   `json:"object"`
+		Data   []map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v body=%s", err, resp.Body.String())
+	}
+	if payload.Object != "list" {
+		t.Fatalf("object = %q, want %q", payload.Object, "list")
+	}
+	if len(payload.Data) != 2 {
+		t.Fatalf("data len = %d, want 2 body=%s", len(payload.Data), resp.Body.String())
+	}
+	if got := payload.Data[0]["id"]; got != "gpt-5.5" {
+		t.Fatalf("data[0].id = %v, want %q", got, "gpt-5.5")
+	}
+	if got := payload.Data[0]["object"]; got != "model" {
+		t.Fatalf("data[0].object = %v, want %q", got, "model")
+	}
+	if got := payload.Data[0]["owned_by"]; got != "openai" {
+		t.Fatalf("data[0].owned_by = %v, want %q", got, "openai")
+	}
+	if _, ok := payload.Data[0]["display_name"]; ok {
+		t.Fatalf("normal OpenAI model list unexpectedly exposed display_name: %+v", payload.Data[0])
+	}
 }
 
 func TestResponsesAliasMatchesV1ResponsesBehavior(t *testing.T) {
@@ -280,4 +385,65 @@ func findCodexModelBySlug(t *testing.T, models []codexCatalogModel, slug string)
 	}
 	t.Fatalf("model %q not found in %#v", slug, models)
 	return codexCatalogModel{}
+}
+
+func registerCodexModelsFetchTestAuth(t *testing.T, server *Server, upstreamURL string) {
+	t.Helper()
+
+	fake := &codexModelsFetchTestExecutor{upstreamURL: upstreamURL}
+	server.handlers.AuthManager.RegisterExecutor(fake)
+	_, err := server.handlers.AuthManager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-models-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"access_token": "test-token",
+		},
+		UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+}
+
+type codexModelsFetchTestExecutor struct {
+	upstreamURL string
+}
+
+func (e *codexModelsFetchTestExecutor) Identifier() string { return "codex" }
+
+func (e *codexModelsFetchTestExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *codexModelsFetchTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *codexModelsFetchTestExecutor) Refresh(context.Context, *coreauth.Auth) (*coreauth.Auth, error) {
+	return nil, nil
+}
+
+func (e *codexModelsFetchTestExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *codexModelsFetchTestExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	target, err := url.Parse(e.upstreamURL)
+	if err != nil {
+		return nil, err
+	}
+	cloned := req.Clone(ctx)
+	cloned.URL.Scheme = target.Scheme
+	cloned.URL.Host = target.Host
+	cloned.Host = target.Host
+	if cloned.Header == nil {
+		cloned.Header = make(http.Header)
+	}
+	if cloned.Header.Get("Authorization") == "" && auth != nil {
+		if token, ok := auth.Metadata["access_token"].(string); ok && token != "" {
+			cloned.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	return http.DefaultClient.Do(cloned)
 }

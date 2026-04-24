@@ -229,19 +229,27 @@ func codexDefaultReasoningLevel(levels []string) string {
 }
 
 func codexSupportsReasoningSummaries(model *ModelInfo) bool {
-	return codexHasSupportedParameter(model, codexReasoningSummaryParam)
+	return codexHasGuaranteedGPT5CapabilitySet(model) || codexHasSupportedParameter(model, codexReasoningSummaryParam)
 }
 
 func codexSupportsVerbosity(model *ModelInfo) bool {
-	return codexHasSupportedParameter(model, codexVerbosityParam) || codexHasSupportedParameter(model, codexTextVerbosityParam)
+	return codexHasGuaranteedGPT5CapabilitySet(model) || codexHasSupportedParameter(model, codexVerbosityParam) || codexHasSupportedParameter(model, codexTextVerbosityParam)
 }
 
 func codexSupportsParallelToolCalls(model *ModelInfo) bool {
-	return codexHasSupportedParameter(model, codexSupportsParallelToolCallsParam) || codexHasSupportedParameter(model, codexSupportsParallelToolCallsAltParam)
+	return codexHasGuaranteedGPT5CapabilitySet(model) || codexHasSupportedParameter(model, codexSupportsParallelToolCallsParam) || codexHasSupportedParameter(model, codexSupportsParallelToolCallsAltParam)
 }
 
 func codexSupportsSearchTool(model *ModelInfo) bool {
-	return codexHasSupportedParameter(model, codexSupportsSearchToolParam) || codexHasSupportedParameter(model, codexSupportsSearchToolAltParam)
+	return codexHasGuaranteedGPT5CapabilitySet(model) || codexHasSupportedParameter(model, codexSupportsSearchToolParam) || codexHasSupportedParameter(model, codexSupportsSearchToolAltParam)
+}
+
+func codexHasGuaranteedGPT5CapabilitySet(model *ModelInfo) bool {
+	if model == nil {
+		return false
+	}
+	id := strings.ToLower(strings.TrimSpace(model.ID))
+	return strings.HasPrefix(id, "gpt-5.3-codex") || strings.HasPrefix(id, "gpt-5.4") || id == "gpt-5.5"
 }
 
 func codexHasSupportedParameter(model *ModelInfo, want string) bool {

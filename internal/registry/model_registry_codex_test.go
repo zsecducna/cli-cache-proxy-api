@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGetAvailableModelsCodexReturnsRichMetadata(t *testing.T) {
 	r := newTestModelRegistry()
@@ -55,8 +58,11 @@ func TestGetAvailableModelsCodexReturnsRichMetadata(t *testing.T) {
 	if got := model["default_reasoning_summary"]; got != codexDefaultReasoningSummary {
 		t.Fatalf("default_reasoning_summary = %v, want %q", got, codexDefaultReasoningSummary)
 	}
-	if got := model["support_verbosity"]; got != false {
-		t.Fatalf("support_verbosity = %v, want false", got)
+	if got := model["support_verbosity"]; got != true {
+		t.Fatalf("support_verbosity = %v, want true", got)
+	}
+	if got := model["supports_search_tool"]; got != true {
+		t.Fatalf("supports_search_tool = %v, want true", got)
 	}
 	if got := model["context_window"]; got != 256000 {
 		t.Fatalf("context_window = %v, want %d", got, 256000)
@@ -158,6 +164,53 @@ func TestGetAvailableModelsCodexReturnsClonedNestedSnapshots(t *testing.T) {
 	if got := second[0]["truncation_policy"].(map[string]any)["mode"]; got != codexDefaultTruncationMode {
 		t.Fatalf("truncation_policy clone mutated to %v", got)
 	}
+}
+
+func TestStaticCodexGPT5ModelsExposeRequestedCapabilities(t *testing.T) {
+	tierModels := map[string][]*ModelInfo{
+		"free": GetCodexFreeModels(),
+		"team": GetCodexTeamModels(),
+		"plus": GetCodexPlusModels(),
+		"pro":  GetCodexProModels(),
+	}
+
+	checked := 0
+	for tier, models := range tierModels {
+		for _, model := range models {
+			if !isRequestedGPT5CodexCapabilityModel(model) {
+				continue
+			}
+			checked++
+			payload := convertCodexModelToMap(model)
+			if got := payload["supports_parallel_tool_calls"]; got != true {
+				t.Fatalf("%s %s supports_parallel_tool_calls = %v, want true", tier, model.ID, got)
+			}
+			if got := payload["supports_reasoning_summaries"]; got != true {
+				t.Fatalf("%s %s supports_reasoning_summaries = %v, want true", tier, model.ID, got)
+			}
+			if got := payload["supports_search_tool"]; got != true {
+				t.Fatalf("%s %s supports_search_tool = %v, want true", tier, model.ID, got)
+			}
+			if got := payload["support_verbosity"]; got != true {
+				t.Fatalf("%s %s support_verbosity = %v, want true", tier, model.ID, got)
+			}
+			if got := payload["input_modalities"]; !stringSliceEqual(got, []string{"text", "image"}) {
+				t.Fatalf("%s %s input_modalities = %#v, want [text image]", tier, model.ID, got)
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("expected to validate at least one target GPT-5 Codex model")
+	}
+}
+
+func isRequestedGPT5CodexCapabilityModel(model *ModelInfo) bool {
+	if model == nil {
+		return false
+	}
+	id := strings.ToLower(strings.TrimSpace(model.ID))
+	return strings.HasPrefix(id, "gpt-5.3-codex") || strings.HasPrefix(id, "gpt-5.4") || id == "gpt-5.5"
 }
 
 func codexPresetSlice(t *testing.T, value any) []map[string]any {

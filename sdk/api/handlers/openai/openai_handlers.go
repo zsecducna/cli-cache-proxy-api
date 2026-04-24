@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -59,6 +60,20 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+	if body, err := h.FetchChatGPTModelsUpstream(c.Request.Context(), c.GetHeader("User-Agent")); err == nil {
+		data, errMap := handlers.MapUpstreamChatGPTModelsToOpenAIList(body)
+		if errMap == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"object": "list",
+				"data":   data,
+			})
+			return
+		}
+		log.WithError(errMap).Debug("openai models: upstream payload parse failed, falling back to local registry")
+	} else {
+		log.WithError(err).Debug("openai models: falling back to local registry catalog")
+	}
+
 	// Get all available models
 	allModels := h.Models()
 
