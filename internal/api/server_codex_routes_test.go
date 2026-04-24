@@ -180,6 +180,46 @@ func TestCodexModelsAliasFetchesUpstreamCatalogWhenCodexAuthAvailable(t *testing
 	}
 }
 
+func TestCodexModelsAliasInjectsTemporaryGPT55MetadataFromUpstreamGPT54(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4","display_name":"gpt-5.4","description":"Strong model for everyday coding.","default_reasoning_level":"medium","context_window":272000,"max_context_window":1000000,"base_instructions":"official"}]}`))
+	}))
+	defer upstream.Close()
+
+	server := newTestServer(t)
+	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.118.0")
+
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	var payload codexCatalogPayload
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v body=%s", err, resp.Body.String())
+	}
+	gpt54 := findCodexModelBySlug(t, payload.Models, "gpt-5.4")
+	gpt55 := findCodexModelBySlug(t, payload.Models, "gpt-5.5")
+	if gpt55.DisplayName != "gpt-5.5" {
+		t.Fatalf("gpt-5.5 display_name = %q, want gpt-5.5", gpt55.DisplayName)
+	}
+	if gpt55.ContextWindow != 400000 {
+		t.Fatalf("gpt-5.5 context_window = %d, want 400000", gpt55.ContextWindow)
+	}
+	if gpt55.MaxContextWindow != 400000 {
+		t.Fatalf("gpt-5.5 max_context_window = %d, want 400000", gpt55.MaxContextWindow)
+	}
+	if gpt55.Description != gpt54.Description || gpt55.DefaultReasoningLevel != gpt54.DefaultReasoningLevel {
+		t.Fatalf("gpt-5.5 metadata = %#v, want clone of gpt-5.4 %#v with patched identity/context", gpt55, gpt54)
+	}
+}
+
 func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.T) {
 	var gotPath string
 	var gotAuth string
@@ -301,6 +341,7 @@ type codexCatalogModel struct {
 	DefaultReasoningLevel    string                 `json:"default_reasoning_level"`
 	SupportedReasoningLevels []codexReasoningPreset `json:"supported_reasoning_levels"`
 	ContextWindow            int64                  `json:"context_window"`
+	MaxContextWindow         int64                  `json:"max_context_window"`
 	MaxCompletionTokens      int64                  `json:"max_completion_tokens"`
 	Visibility               string                 `json:"visibility"`
 	SupportedInAPI           bool                   `json:"supported_in_api"`
