@@ -2054,7 +2054,27 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	}
 }
 
-// Test case 1: String system prompt is preserved and converted to a content block
+func expectedClaudeCodeStaticPrompt() string {
+	return strings.Join([]string{
+		helps.ClaudeCodeIntro,
+		helps.ClaudeCodeSystem,
+		helps.ClaudeCodeDoingTasks,
+		helps.ClaudeCodeToneAndStyle,
+		helps.ClaudeCodeOutputEfficiency,
+	}, "\n\n")
+}
+
+func expectedForwardedSystemReminder(text string) string {
+	return fmt.Sprintf(`<system-reminder>
+As you answer the user's questions, you can use the following context from the system:
+%s
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+`, text)
+}
+
+// Test case 1: String system prompt is preserved by forwarding it to the first user message
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2076,15 +2096,19 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
-	if !strings.HasPrefix(blocks[2].Get("text").String(), "You are an interactive agent that helps users with software engineering tasks.") {
-		t.Fatalf("blocks[2] should be shared Claude Code system prompt, got %q", blocks[2].Get("text").String())
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
 	}
-	if got := gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(got, "You are a helpful assistant.") || !strings.Contains(got, "hi") {
-		t.Fatalf("first user message should contain preserved system reminder and original content, got %q", got)
+	if blocks[2].Get("cache_control").Exists() {
+		t.Fatalf("blocks[2] should not have cache_control, got %s", blocks[2].Get("cache_control").Raw)
+	}
+
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("You are a helpful assistant.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded system prompt, got %q", got)
 	}
 }
 
-// Test case 2: Strict mode drops the string system prompt
+// Test case 2: Strict mode keeps only the injected Claude Code system blocks
 func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2092,11 +2116,14 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("strict mode should produce 3 blocks, got %d", len(blocks))
+		t.Fatalf("strict mode should produce 3 injected blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("strict mode should not forward system prompt into messages, got %q", got)
 	}
 }
 
-// Test case 3: Empty string system prompt does not produce a spurious block
+// Test case 3: Empty string system prompt does not alter the first user message
 func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
 	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2104,11 +2131,14 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("empty string system should produce 3 blocks, got %d", len(blocks))
+		t.Fatalf("empty string system should still produce 3 injected blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != "hi" {
+		t.Fatalf("empty string system should not alter messages, got %q", got)
 	}
 }
 
-// Test case 4: Array system prompt is unaffected by the string handling
+// Test case 4: Array system prompt is forwarded to the first user message
 func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2118,12 +2148,15 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(got, "Be concise.") || !strings.Contains(got, "hi") {
-		t.Fatalf("first user message should contain preserved array system prompt and original content, got %q", got)
+	if blocks[2].Get("text").String() != expectedClaudeCodeStaticPrompt() {
+		t.Fatalf("blocks[2] should be static Claude Code prompt, got %q", blocks[2].Get("text").String())
+	}
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder("Be concise.")+"hi" {
+		t.Fatalf("messages[0].content should include forwarded array system prompt, got %q", got)
 	}
 }
 
-// Test case 5: Special characters in string system prompt survive conversion
+// Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
 
@@ -2133,8 +2166,8 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	if len(blocks) != 3 {
 		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(got, `Use <xml> tags & "quotes" in output.`) {
-		t.Fatalf("prepended user system prompt text mangled, got %q", got)
+	if got := gjson.GetBytes(out, "messages.0.content").String(); got != expectedForwardedSystemReminder(`Use <xml> tags & "quotes" in output.`)+"hi" {
+		t.Fatalf("forwarded system prompt text mangled, got %q", got)
 	}
 }
 
@@ -2243,7 +2276,10 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
-		t.Fatalf("expected strict mode to keep only injected system blocks, got %d", len(blocks))
+		t.Fatalf("expected strict mode to keep the 3 injected Claude Code system blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("strict mode should not prepend a forwarded system reminder block, got %d content blocks", got)
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
 		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)

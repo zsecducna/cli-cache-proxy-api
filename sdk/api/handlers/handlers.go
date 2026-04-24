@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -91,8 +90,11 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
-func withUsageReasoningEffort(ctx context.Context, rawJSON []byte, sourceFormat sdktranslator.Format, model string) (context.Context, []byte) {
+func withUsageReasoningEffort(ctx context.Context, rawJSON []byte, sourceFormat sdktranslator.Format, model string, route RequestRoute) (context.Context, []byte) {
 	normalized, effort := helps.NormalizeReasoningEffortRequest(rawJSON, sourceFormat.String(), model)
+	if route == RequestRouteClaudeViaOpenAICompat && sourceFormat == sdktranslator.FormatClaude {
+		return helps.WithUsageReasoningEffort(ctx, effort), rawJSON
+	}
 	return helps.WithUsageReasoningEffort(ctx, effort), normalized
 }
 
@@ -192,18 +194,18 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
-	// It is forwarded as execution metadata; when absent we generate a UUID.
+	// Only include it if the client explicitly provides it.
 	key := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 		}
 	}
-	if key == "" {
-		key = uuid.NewString()
-	}
 
-	meta := map[string]any{coreexecutor.IdempotencyKeyMetadataKey: key}
+	meta := make(map[string]any)
+	if key != "" {
+		meta[coreexecutor.IdempotencyKeyMetadataKey] = key
+	}
 	if requestID := logging.GetRequestID(ctx); requestID != "" {
 		meta[coreexecutor.RequestIDMetadataKey] = requestID
 	}
@@ -497,7 +499,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -543,7 +545,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -593,7 +595,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
 	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -825,6 +827,13 @@ func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (reque
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
+
+	if strings.EqualFold(baseModel, "gpt-image-2") {
+		return requestDetails{}, &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+		}
+	}
 
 	providers := util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,

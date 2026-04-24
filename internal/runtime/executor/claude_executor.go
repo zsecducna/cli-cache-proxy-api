@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/textproto"
 	"strings"
 	"time"
 
@@ -824,7 +823,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuth(e.cfg)
+	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err
@@ -1094,15 +1093,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
 
-	hasClaude1MHeader := false
-	if ginHeaders != nil {
-		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
-			hasClaude1MHeader = true
-		}
-	}
-
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || hasClaude1MHeader {
+	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -1116,18 +1108,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
-		}
-		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
-			baseBetas += ",context-1m-2025-08-07"
-		}
-		fallbackDisabled := strings.EqualFold(strings.TrimSpace(r.Header.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED")), "true")
-		if !fallbackDisabled && ginHeaders != nil {
-			fallbackDisabled = strings.EqualFold(strings.TrimSpace(ginHeaders.Get("X-CPA-CLAUDE-1M-FALLBACK-DISABLED")), "true")
-		}
-		if fallbackDisabled {
-			baseBetas = strings.ReplaceAll(baseBetas, ",context-1m-2025-08-07", "")
-			baseBetas = strings.ReplaceAll(baseBetas, "context-1m-2025-08-07,", "")
-			baseBetas = strings.Trim(strings.ReplaceAll(baseBetas, ",,", ","), ",")
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)

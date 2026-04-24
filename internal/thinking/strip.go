@@ -44,13 +44,6 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 		}
 	case "openai-response", "codex":
 		paths = []string{"reasoning.effort", "reasoning_effort"}
-	case "iflow":
-		paths = []string{
-			"chat_template_kwargs.enable_thinking",
-			"chat_template_kwargs.clear_thinking",
-			"reasoning_split",
-			"reasoning_effort",
-		}
 	default:
 		return body
 	}

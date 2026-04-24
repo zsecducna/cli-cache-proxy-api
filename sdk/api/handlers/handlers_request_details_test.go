@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +151,24 @@ func TestGetRequestDetails_ClassifiesClaudeViaOpenAICompat(t *testing.T) {
 	}
 	if got, want := details.Providers, []string{CodexProvider, "llmgate"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("getRequestDetails() providers = %v, want %v", got, want)
+	}
+}
+
+func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	_, errMsg := handler.getRequestDetails("", "gpt-image-2")
+	if errMsg == nil {
+		t.Fatalf("expected error for gpt-image-2, got nil")
+	}
+	if errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+	}
+	if errMsg.Error == nil {
+		t.Fatalf("expected error message, got nil")
+	}
+	msg := errMsg.Error.Error()
+	if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
+		t.Fatalf("unexpected error message: %q", msg)
 	}
 }

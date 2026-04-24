@@ -11,7 +11,7 @@ import (
 
 func TestWithUsageReasoningEffort(t *testing.T) {
 	baseCtx := context.Background()
-	ctx, normalized := withUsageReasoningEffort(baseCtx, []byte(`{"reasoning":{"effort":"medium"}}`), sdktranslator.FromString("openai-response"), "gpt-5.4")
+	ctx, normalized := withUsageReasoningEffort(baseCtx, []byte(`{"reasoning":{"effort":"medium"}}`), sdktranslator.FromString("openai-response"), "gpt-5.4", RequestRouteDefault)
 
 	if got := helps.UsageReasoningEffortFromContext(ctx); got != "medium" {
 		t.Fatalf("UsageReasoningEffortFromContext() = %q, want %q", got, "medium")
@@ -22,7 +22,7 @@ func TestWithUsageReasoningEffort(t *testing.T) {
 }
 
 func TestWithUsageReasoningEffortInjectsDefaultMedium(t *testing.T) {
-	ctx, normalized := withUsageReasoningEffort(context.Background(), []byte(`{"stream":true}`), sdktranslator.FromString("openai"), "gpt-5.4")
+	ctx, normalized := withUsageReasoningEffort(context.Background(), []byte(`{"stream":true}`), sdktranslator.FromString("openai"), "gpt-5.4", RequestRouteDefault)
 
 	if got := helps.UsageReasoningEffortFromContext(ctx); got != "medium" {
 		t.Fatalf("UsageReasoningEffortFromContext() = %q, want %q", got, "medium")
@@ -33,7 +33,7 @@ func TestWithUsageReasoningEffortInjectsDefaultMedium(t *testing.T) {
 }
 
 func TestWithUsageReasoningEffortUsesModelSuffixWhenRequestOmitsEffort(t *testing.T) {
-	ctx, normalized := withUsageReasoningEffort(context.Background(), []byte(`{"messages":[]}`), sdktranslator.FromString("openai"), "gpt-5.4(high)")
+	ctx, normalized := withUsageReasoningEffort(context.Background(), []byte(`{"messages":[]}`), sdktranslator.FromString("openai"), "gpt-5.4(high)", RequestRouteDefault)
 
 	if got := helps.UsageReasoningEffortFromContext(ctx); got != "high" {
 		t.Fatalf("UsageReasoningEffortFromContext() = %q, want %q", got, "high")
