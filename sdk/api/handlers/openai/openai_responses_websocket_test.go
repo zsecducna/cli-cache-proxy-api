@@ -252,6 +252,9 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDIncremental(t *
 	if gjson.GetBytes(normalized, "previous_response_id").String() != "resp-1" {
 		t.Fatalf("previous_response_id must be preserved in incremental mode")
 	}
+	if gjson.GetBytes(normalized, "store").Raw != "true" {
+		t.Fatalf("store must default to true with previous_response_id: %s", normalized)
+	}
 	input := gjson.GetBytes(normalized, "input").Array()
 	if len(input) != 1 {
 		t.Fatalf("incremental input len = %d, want 1", len(input))
@@ -267,6 +270,19 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDIncremental(t *
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDPreservesExplicitStoreFalse(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","store":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, []byte(`[]`), true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "store").Raw != "false" {
+		t.Fatalf("store must preserve explicit false: %s", normalized)
 	}
 }
 
@@ -294,6 +310,35 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDMergedWhenIncre
 		input[2].Get("id").String() != "assistant-1" ||
 		input[3].Get("id").String() != "tool-out-1" {
 		t.Fatalf("unexpected merged input order")
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestWithStringInputMergesWhenIncrementalDisabled(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":"first turn"}`)
+	lastResponseOutput := []byte(`[
+		{"type":"message","id":"assistant-1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}
+	]`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":"next"}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must be removed when incremental mode is disabled")
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("merged input len = %d, want 3: %s", len(input), normalized)
+	}
+	if input[0].Get("role").String() != "user" || input[0].Get("content.0.text").String() != "first turn" {
+		t.Fatalf("string input was not converted to user input_text message: %s", input[0].Raw)
+	}
+	if input[1].Get("id").String() != "assistant-1" || input[2].Get("content.0.text").String() != "next" {
+		t.Fatalf("unexpected merged order: %s", normalized)
 	}
 	if !bytes.Equal(next, normalized) {
 		t.Fatalf("next request snapshot should match normalized request")

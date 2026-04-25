@@ -254,6 +254,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 	if !gjson.GetBytes(normalized, "input").Exists() {
 		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
 	}
+	normalized = defaultStoreForWebsocketPreviousResponseID(normalized)
 
 	modelName := strings.TrimSpace(gjson.GetBytes(normalized, "model").String())
 	if modelName == "" {
@@ -274,12 +275,19 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	}
 
 	nextInput := gjson.GetBytes(rawJSON, "input")
-	if !nextInput.Exists() || !nextInput.IsArray() {
+	if !nextInput.Exists() {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("websocket request requires array field: input"),
+			Error:      fmt.Errorf("websocket request requires field: input"),
 		}
 	}
+	if nextInput.Type != gjson.String && !(nextInput.Type == gjson.JSON && nextInput.IsArray()) {
+		return nil, lastRequest, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("websocket request requires string or array field: input"),
+		}
+	}
+	nextInputArrayRaw := normalizeResponsesInputArrayRaw(nextInput)
 
 	// Compaction can cause clients to replace local websocket history with a new
 	// compact transcript on the next `response.create`. When the input already
@@ -311,12 +319,13 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
+			normalized = defaultStoreForWebsocketPreviousResponseID(normalized)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
 
 	existingInput := gjson.GetBytes(lastRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+	mergedInput, errMerge := mergeJSONArrayRaw(normalizeResponsesInputArrayRaw(existingInput), normalizeJSONArrayRaw(lastResponseOutput))
 	if errMerge != nil {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -324,7 +333,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
+	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInputArrayRaw)
 	if errMerge != nil {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -689,6 +698,32 @@ func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+func normalizeResponsesInputArrayRaw(input gjson.Result) string {
+	if !input.Exists() {
+		return "[]"
+	}
+	if input.Type == gjson.JSON && input.IsArray() {
+		return input.Raw
+	}
+	if input.Type == gjson.String {
+		item := map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []map[string]string{
+				{
+					"type": "input_text",
+					"text": input.String(),
+				},
+			},
+		}
+		raw, err := json.Marshal([]map[string]any{item})
+		if err == nil {
+			return string(raw)
+		}
+	}
+	return "[]"
 }
 
 func normalizeJSONArrayRaw(raw []byte) string {
