@@ -36,6 +36,42 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 }
 
+func TestAuthWebsocketsEnabledAcceptsSingularAuthMetadata(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		auth *Auth
+	}{
+		{
+			name: "singular metadata bool",
+			auth: &Auth{Metadata: map[string]any{"websocket": true}},
+		},
+		{
+			name: "singular metadata string",
+			auth: &Auth{Metadata: map[string]any{"websocket": "true"}},
+		},
+		{
+			name: "singular attribute",
+			auth: &Auth{Attributes: map[string]string{"websocket": "true"}},
+		},
+		{
+			name: "plural attribute",
+			auth: &Auth{Attributes: map[string]string{"websockets": "true"}},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !authWebsocketsEnabled(tc.auth) {
+				t.Fatalf("authWebsocketsEnabled() = false, want true")
+			}
+		})
+	}
+}
+
 func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	t.Parallel()
 

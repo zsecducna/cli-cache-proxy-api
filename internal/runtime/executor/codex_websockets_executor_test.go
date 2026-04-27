@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -91,6 +93,111 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	}
 	if got := headers.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	}
+}
+
+func TestCodexWebsocketsEnabledAcceptsSingularAuthMetadata(t *testing.T) {
+	cases := []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{
+			name: "singular metadata bool",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket": true}},
+		},
+		{
+			name: "singular metadata string",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket": "true"}},
+		},
+		{
+			name: "singular attribute",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websocket": "true"}},
+		},
+		{
+			name: "plural attribute",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "true"}},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if !codexWebsocketsEnabled(tc.auth) {
+				t.Fatalf("codexWebsocketsEnabled() = false, want true")
+			}
+		})
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("Upgrade() error = %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		}()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("ReadMessage() error = %v", errRead)
+			return
+		}
+		received <- payload
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-test","model":"gpt-5.4-mini","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("WriteMessage() error = %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":[{"role":"user","content":[{"type":"input_text","text":"ok"}]}],"stream":true,"store":true,"max_output_tokens":32}`),
+	}
+
+	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-received:
+		if !gjson.GetBytes(payload, "instructions").Exists() {
+			t.Fatalf("websocket request missing instructions: %s", payload)
+		}
+		if got := gjson.GetBytes(payload, "instructions").String(); got != "" {
+			t.Fatalf("instructions = %q, want empty", got)
+		}
+		if got := gjson.GetBytes(payload, "store").Raw; got != "false" {
+			t.Fatalf("store = %s, want false in %s", got, payload)
+		}
+		if gjson.GetBytes(payload, "max_output_tokens").Exists() {
+			t.Fatalf("websocket request still has unsupported max_output_tokens: %s", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket request")
 	}
 }
 

@@ -912,6 +912,15 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	}
 }
 
+func TestWebsocketUpstreamSupportsIncrementalInputAcceptsSingularAuthMetadata(t *testing.T) {
+	if !websocketUpstreamSupportsIncrementalInput(nil, map[string]any{"websocket": true}) {
+		t.Fatalf("expected singular websocket metadata to enable incremental websocket input")
+	}
+	if !websocketUpstreamSupportsIncrementalInput(map[string]string{"websocket": "true"}, nil) {
+		t.Fatalf("expected singular websocket attribute to enable incremental websocket input")
+	}
+}
+
 func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
