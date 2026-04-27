@@ -19,6 +19,9 @@ const IdempotencyKeyMetadataKey = "idempotency_key"
 // RequestIDMetadataKey stores the request correlation identifier in Options.Metadata.
 const RequestIDMetadataKey = "request_id"
 
+// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
+const DisallowFreeAuthMetadataKey = "disallow_free_auth"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
