@@ -205,6 +205,35 @@ func TestStaticCodexGPT5ModelsExposeRequestedCapabilities(t *testing.T) {
 	}
 }
 
+func TestSupportsCodexExtendedPromptCacheRetentionCoversCodexCatalogModels(t *testing.T) {
+	for _, modelID := range []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.3-codex", "gpt-5.3-codex-spark"} {
+		if !SupportsCodexExtendedPromptCacheRetention(modelID) {
+			t.Fatalf("SupportsCodexExtendedPromptCacheRetention(%q) = false, want true", modelID)
+		}
+	}
+	if SupportsCodexExtendedPromptCacheRetention("gpt-4o-mini") {
+		t.Fatalf("SupportsCodexExtendedPromptCacheRetention(%q) = true, want false", "gpt-4o-mini")
+	}
+}
+
+func TestSupportsCodexExtendedPromptCacheRetentionUsesDynamicMetadata(t *testing.T) {
+	r := GetGlobalRegistry()
+	const clientID = "test-codex-cache-retention-client"
+	const modelID = "custom-cache-retention-model"
+	r.RegisterClient(clientID, "codex", []*ModelInfo{{
+		ID:                  modelID,
+		Type:                "codex",
+		SupportedParameters: []string{codexPromptCacheRetentionParam},
+	}})
+	t.Cleanup(func() {
+		r.UnregisterClient(clientID)
+	})
+
+	if !SupportsCodexExtendedPromptCacheRetention(modelID) {
+		t.Fatalf("SupportsCodexExtendedPromptCacheRetention(%q) = false, want true", modelID)
+	}
+}
+
 func isRequestedGPT5CodexCapabilityModel(model *ModelInfo) bool {
 	if model == nil {
 		return false

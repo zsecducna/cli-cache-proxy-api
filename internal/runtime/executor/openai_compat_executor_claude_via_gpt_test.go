@@ -96,6 +96,131 @@ func TestOpenAICompatExecutorClaudeViaGPTPrefersResponsesSurface(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorClaudeViaGPTNonStreamUsesResponsesSurface(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openrouter", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                  server.URL + "/v1",
+		"api_key":                   "test",
+		"provider_key":              "openrouter",
+		"supports_openai_responses": "true",
+		"supports_chat_completions": "true",
+		"supports_tools":            "true",
+		"supports_streaming":        "true",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          false,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input[0].type = %q, want %q; body=%s", got, "message", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("unexpected chat-completions messages payload: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "message" {
+		t.Fatalf("response type = %q, want %q; body=%s", got, "message", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "hello" {
+		t.Fatalf("response content = %q, want %q; body=%s", got, "hello", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q; body=%s", got, "end_turn", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorClaudeViaGPTNonStreamFallsBackToChatCompletions(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1773896263,"model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openrouter", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":                  server.URL + "/v1",
+		"api_key":                   "test",
+		"provider_key":              "openrouter",
+		"supports_openai_responses": "false",
+		"supports_chat_completions": "true",
+		"supports_tools":            "true",
+		"supports_streaming":        "false",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          false,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if got := gjson.GetBytes(gotBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want %q; body=%s", got, "user", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "input").Exists() {
+		t.Fatalf("unexpected responses input payload: %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "message" {
+		t.Fatalf("response type = %q, want %q; body=%s", got, "message", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "hello" {
+		t.Fatalf("response content = %q, want %q; body=%s", got, "hello", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q; body=%s", got, "end_turn", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.input_tokens").Int(); got != 5 {
+		t.Fatalf("usage.input_tokens = %d, want 5; body=%s", got, string(resp.Payload))
+	}
+}
+
 func TestOpenAICompatExecutorClaudeViaGPTResponsesPersistsNestedUsage(t *testing.T) {
 	t.Cleanup(func() {
 		_ = internalusage.ClosePersistentStore()

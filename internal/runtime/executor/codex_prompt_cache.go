@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -29,7 +30,7 @@ type codexPromptCacheSelection struct {
 	Hdrs http.Header
 }
 
-func prepareCodexPromptCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, sessionHeaderName string, allowPromptCacheRetention bool) codexPromptCacheSelection {
+func prepareCodexPromptCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, sessionHeaderName string, allowPromptCacheRetention bool, stripPreviousResponseID bool) codexPromptCacheSelection {
 	body := bytesClone(rawJSON)
 	model := codexPromptCacheModel(body, req.Model)
 	body = normalizeCodexPromptCacheRetention(body, model, allowPromptCacheRetention)
@@ -47,6 +48,10 @@ func prepareCodexPromptCache(ctx context.Context, from sdktranslator.Format, req
 		} else if key, ok := helps.GetCodexResponsePromptCacheKey(previousResponseID); ok {
 			selection.Key = key
 		}
+	}
+
+	if stripPreviousResponseID {
+		selection.Body = stripCodexPreviousResponseID(selection.Body)
 	}
 
 	if selection.Key == "" && from == "claude" {
@@ -151,12 +156,18 @@ func normalizeCodexPromptCacheRetention(rawJSON []byte, model string, allowPromp
 }
 
 func supportsCodexExtendedPromptCacheRetention(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.1-codex-max", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest", "gpt-5", "gpt-5-codex", "gpt-4.1":
-		return true
-	default:
-		return false
+	return registry.SupportsCodexExtendedPromptCacheRetention(model)
+}
+
+func stripCodexPreviousResponseID(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 || !gjson.GetBytes(rawJSON, "previous_response_id").Exists() {
+		return rawJSON
 	}
+	updated, err := sjson.DeleteBytes(rawJSON, "previous_response_id")
+	if err != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 func codexUpstreamSupportsPromptCacheRetention(upstreamURL string) bool {

@@ -20,6 +20,8 @@ const (
 	codexSupportsParallelToolCallsAltParam = "parallel-tool-calls"
 	codexSupportsSearchToolParam           = "web_search"
 	codexSupportsSearchToolAltParam        = "search"
+	codexPromptCacheRetentionParam         = "prompt_cache_retention"
+	codexPromptCacheRetentionAltParam      = "prompt-cache-retention"
 )
 
 var codexDefaultReasoningLevels = []string{"low", "medium", "high", "xhigh"}
@@ -250,6 +252,34 @@ func codexHasGuaranteedGPT5CapabilitySet(model *ModelInfo) bool {
 	}
 	id := strings.ToLower(strings.TrimSpace(model.ID))
 	return strings.HasPrefix(id, "gpt-5.3-codex") || strings.HasPrefix(id, "gpt-5.4") || id == "gpt-5.5"
+}
+
+func codexSupportsExtendedPromptCacheRetention(model *ModelInfo) bool {
+	return codexHasGuaranteedGPT5CapabilitySet(model) ||
+		codexHasSupportedParameter(model, codexPromptCacheRetentionParam) ||
+		codexHasSupportedParameter(model, codexPromptCacheRetentionAltParam)
+}
+
+// SupportsCodexExtendedPromptCacheRetention reports whether Codex/OpenAI
+// requests for modelID should normalize prompt_cache_retention to 24h.
+func SupportsCodexExtendedPromptCacheRetention(modelID string) bool {
+	rawID := strings.TrimSpace(modelID)
+	if rawID == "" {
+		return false
+	}
+	if model := LookupModelInfo(rawID, "codex"); codexSupportsExtendedPromptCacheRetention(model) {
+		return true
+	}
+	id := strings.ToLower(rawID)
+	if strings.HasPrefix(id, "gpt-5.3-codex") || strings.HasPrefix(id, "gpt-5.4") || id == "gpt-5.5" {
+		return true
+	}
+	switch id {
+	case "gpt-5.2", "gpt-5.1-codex-max", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest", "gpt-5", "gpt-5-codex", "gpt-4.1":
+		return true
+	default:
+		return false
+	}
 }
 
 func codexHasSupportedParameter(model *ModelInfo, want string) bool {

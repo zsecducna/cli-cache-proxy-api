@@ -83,7 +83,7 @@ func TestWriteClaudeErrorResponse_UsesAnthropicJSONShape(t *testing.T) {
 	}
 }
 
-func TestClaudeMessages_NonStreamingErrorsUseAnthropicJSONShape(t *testing.T) {
+func TestClaudeMessages_NonStreamingOpenAICompatErrorsUseAnthropicJSONShape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &claudeLocalRejectExecutor{}
@@ -109,8 +109,8 @@ func TestClaudeMessages_NonStreamingErrorsUseAnthropicJSONShape(t *testing.T) {
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if executor.calls != 0 {
-		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
 	}
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
@@ -125,7 +125,7 @@ func TestClaudeMessages_NonStreamingErrorsUseAnthropicJSONShape(t *testing.T) {
 	if body.Error.Type != "invalid_request_error" {
 		t.Fatalf("error.type = %q, want %q", body.Error.Type, "invalid_request_error")
 	}
-	const wantMessage = "non-stream Claude-via-GPT requests are not supported in Phase 1"
+	const wantMessage = "unsupported feature"
 	if body.Error.Message != wantMessage {
 		t.Fatalf("error.message = %q, want %q", body.Error.Message, wantMessage)
 	}

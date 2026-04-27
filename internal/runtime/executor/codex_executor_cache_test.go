@@ -98,11 +98,47 @@ func TestCodexExecutorCacheHelper_ReusesPromptCacheKeyFromPreviousResponseID(t *
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "session-cache" {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
 	}
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "" {
+		t.Fatalf("previous_response_id = %q, want empty", got)
+	}
 	if secondSelection.Key != "session-cache" {
 		t.Fatalf("selection.Key = %q, want %q", secondSelection.Key, "session-cache")
 	}
 	if got := httpReq.Header.Get("Session_id"); got != "session-cache" {
 		t.Fatalf("Session_id = %q, want %q", got, "session-cache")
+	}
+}
+
+func TestCodexExecutorCacheHelper_StripsUnmappedPreviousResponseIDAndDerivesPromptCacheKey(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "test-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-not-known"}`),
+	}
+
+	httpReq, selection, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), "https://example.com/responses", req, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "" {
+		t.Fatalf("previous_response_id = %q, want empty", got)
+	}
+	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:api-key:test-api-key")).String()
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if selection.Key != expectedKey {
+		t.Fatalf("selection.Key = %q, want %q", selection.Key, expectedKey)
 	}
 }
 
@@ -137,6 +173,8 @@ func TestCodexExecutorCacheHelper_AddsPromptCacheRetentionWhenMissingForSupporte
 		model string
 	}{
 		{name: "gpt-5.4", model: "gpt-5.4"},
+		{name: "gpt-5.4-mini", model: "gpt-5.4-mini"},
+		{name: "gpt-5.5", model: "gpt-5.5"},
 		{name: "gpt-5.3-codex", model: "gpt-5.3-codex"},
 		{name: "gpt-5.3-codex-spark", model: "gpt-5.3-codex-spark"},
 	}
@@ -266,6 +304,8 @@ func TestCodexExecutorExecuteAddsPromptCacheRetentionForSupportedModels(t *testi
 		model string
 	}{
 		{name: "gpt-5.4", model: "gpt-5.4"},
+		{name: "gpt-5.4-mini", model: "gpt-5.4-mini"},
+		{name: "gpt-5.5", model: "gpt-5.5"},
 		{name: "gpt-5.3-codex", model: "gpt-5.3-codex"},
 		{name: "gpt-5.3-codex-spark", model: "gpt-5.3-codex-spark"},
 	}
@@ -301,7 +341,7 @@ func TestCodexExecutorExecuteAddsPromptCacheRetentionForSupportedModels(t *testi
 	}
 }
 
-func TestCodexExecutorExecutePreservesResponseCacheFields(t *testing.T) {
+func TestCodexExecutorExecuteTranslatesPreviousResponseIDToPromptCacheKey(t *testing.T) {
 	var capturedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
@@ -316,16 +356,20 @@ func TestCodexExecutorExecutePreservesResponseCacheFields(t *testing.T) {
 
 	executor := &CodexExecutor{}
 	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	recordCodexPromptCacheResponse(context.Background(), []byte(`{"type":"response.completed","response":{"id":"resp-exec-prev"}}`), "session-cache", codexPromptCache24hTTL)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
-		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-prev","prompt_cache_retention":"24h","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-exec-prev","prompt_cache_retention":"24h","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
 	}
 	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(capturedBody, "previous_response_id").String(); got != "resp-prev" {
-		t.Fatalf("previous_response_id = %q, want %q", got, "resp-prev")
+	if got := gjson.GetBytes(capturedBody, "previous_response_id").String(); got != "" {
+		t.Fatalf("previous_response_id = %q, want empty", got)
+	}
+	if got := gjson.GetBytes(capturedBody, "prompt_cache_key").String(); got != "session-cache" {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
 	}
 	if got := gjson.GetBytes(capturedBody, "prompt_cache_retention").String(); got != "24h" {
 		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")

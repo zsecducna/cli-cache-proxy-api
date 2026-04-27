@@ -130,3 +130,23 @@ func TestAdaptOpenAIChatFallbackToClaude_PreservesMaxTokensStopReason(t *testing
 		t.Fatalf("message_delta stop_reason = %q, want %q", got, "max_tokens")
 	}
 }
+
+func TestAdaptOpenAIResponsesNonStreamToClaude_WrapsResponsesObject(t *testing.T) {
+	ctx := context.Background()
+	request := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	raw := []byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}`)
+
+	out := adaptOpenAIResponsesNonStreamToClaude(ctx, "gpt-5.4", request, request, raw, nil)
+	if got := gjson.GetBytes(out, "type").String(); got != "message" {
+		t.Fatalf("type = %q, want %q; body=%s", got, "message", string(out))
+	}
+	if got := gjson.GetBytes(out, "content.0.text").String(); got != "hello" {
+		t.Fatalf("content.0.text = %q, want %q; body=%s", got, "hello", string(out))
+	}
+	if got := gjson.GetBytes(out, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want %q; body=%s", got, "end_turn", string(out))
+	}
+	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 5 {
+		t.Fatalf("usage.input_tokens = %d, want 5; body=%s", got, string(out))
+	}
+}

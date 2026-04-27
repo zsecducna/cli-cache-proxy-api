@@ -6,6 +6,8 @@ import (
 
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/claude"
 	responsefmt "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // adaptOpenAIResponsesStreamChunkToClaude reuses the Codex Responses-to-Claude translator
@@ -17,6 +19,7 @@ func adaptOpenAIResponsesStreamChunkToClaude(ctx context.Context, model string, 
 }
 
 func adaptOpenAIResponsesNonStreamToClaude(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	rawJSON = normalizeOpenAIResponsesNonStreamForClaude(rawJSON)
 	return codexclaude.ConvertCodexResponseToClaudeNonStream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
@@ -66,4 +69,26 @@ func normalizeOpenAIResponsesStreamChunk(rawJSON []byte) []byte {
 	}
 
 	return trimmed
+}
+
+func normalizeOpenAIResponsesNonStreamForClaude(rawJSON []byte) []byte {
+	trimmed := bytes.TrimSpace(rawJSON)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
+	}
+	if !gjson.ValidBytes(trimmed) {
+		return trimmed
+	}
+
+	root := gjson.ParseBytes(trimmed)
+	if root.Get("type").String() == "response.completed" {
+		return trimmed
+	}
+	if root.Get("object").String() != "response" && !root.Get("output").Exists() {
+		return trimmed
+	}
+
+	wrapped := []byte(`{"type":"response.completed","response":{}}`)
+	wrapped, _ = sjson.SetRawBytes(wrapped, "response", trimmed)
+	return wrapped
 }

@@ -7,35 +7,40 @@ import (
 )
 
 func TestValidateClaudeRequestSyntax_AcceptsSupportedSubset(t *testing.T) {
-	request := []byte(`{
-		"model": "gpt-5.4",
-		"stream": true,
-		"max_tokens": 512,
-		"system": [{"type":"text","text":"You are helpful."}],
-		"tools": [{
-			"name": "lookup_weather",
-			"description": "Look up weather",
-			"input_schema": {
-				"type": "object",
-				"properties": {"city": {"type": "string"}},
-				"required": ["city"]
-			}
-		}],
-		"messages": [
-			{"role":"user","content":[{"type":"text","text":"Weather in Hanoi?"}]},
-			{"role":"assistant","content":[
-				{"type":"tool_use","id":"call_1","name":"lookup_weather","input":{"city":"Hanoi"}},
-				{"type":"tool_use","id":"call_2","name":"lookup_weather","input":{"city":"Saigon"}}
-			]},
-			{"role":"user","content":[
-				{"type":"tool_result","tool_use_id":"call_1","content":{"b":2,"a":1}},
-				{"type":"tool_result","tool_use_id":"call_2","content":"hot"}
-			]}
-		]
-	}`)
+	tests := []string{
+		`{
+			"model": "gpt-5.4",
+			"stream": true,
+			"max_tokens": 512,
+			"system": [{"type":"text","text":"You are helpful."}],
+			"tools": [{
+				"name": "lookup_weather",
+				"description": "Look up weather",
+				"input_schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			}],
+			"messages": [
+				{"role":"user","content":[{"type":"text","text":"Weather in Hanoi?"}]},
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"call_1","name":"lookup_weather","input":{"city":"Hanoi"}},
+					{"type":"tool_use","id":"call_2","name":"lookup_weather","input":{"city":"Saigon"}}
+				]},
+				{"role":"user","content":[
+					{"type":"tool_result","tool_use_id":"call_1","content":{"b":2,"a":1}},
+					{"type":"tool_result","tool_use_id":"call_2","content":"hot"}
+				]}
+			]
+		}`,
+		`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
+	}
 
-	if err := ValidateClaudeRequestSyntax(request); err != nil {
-		t.Fatalf("expected syntax validation to accept supported subset, got %v", err)
+	for _, request := range tests {
+		if err := ValidateClaudeRequestSyntax([]byte(request)); err != nil {
+			t.Fatalf("expected syntax validation to accept supported subset, got %v", err)
+		}
 	}
 }
 
@@ -46,12 +51,6 @@ func TestValidateClaudeRequestSyntax_RejectsUnsupportedCases(t *testing.T) {
 		wantClass  string
 		wantReason string
 	}{
-		{
-			name:       "non-stream request",
-			request:    `{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
-			wantClass:  CompatibilityClassStreamingNotSupported,
-			wantReason: "streaming_required",
-		},
 		{
 			name:       "assistant mixes text and tool_use",
 			request:    `{"model":"gpt-5.4","stream":true,"messages":[{"role":"assistant","content":[{"type":"text","text":"pre"},{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]}]}`,
@@ -222,5 +221,14 @@ func TestValidateClaudeRequestForSurface_RejectsTranscriptInvariantViolations(t 
 				t.Fatalf("expected reason %q, got %q", tt.wantReason, compatErr.Reason)
 			}
 		})
+	}
+}
+
+func TestValidateClaudeRequestForSurface_NonStreamDoesNotRequireStreamingSupport(t *testing.T) {
+	request := []byte(`{"model":"gpt-5.4","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	if _, err := ValidateClaudeRequestForSurface(request, BackendCapabilities{
+		SupportsOpenAIResponses: true,
+	}, BackendSurfaceResponses); err != nil {
+		t.Fatalf("ValidateClaudeRequestForSurface() error = %v", err)
 	}
 }

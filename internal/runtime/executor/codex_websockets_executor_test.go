@@ -26,6 +26,9 @@ func TestApplyCodexPromptCacheHeadersReusesPreviousResponsePromptCacheKey(t *tes
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "session-cache" {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
 	}
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("previous_response_id = %q, want %q", got, "resp-1")
+	}
 	if got := headers.Get("Conversation_id"); got != "session-cache" {
 		t.Fatalf("Conversation_id = %q, want %q", got, "session-cache")
 	}

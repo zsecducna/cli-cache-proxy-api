@@ -20,7 +20,7 @@ func ValidateClaudeViaOpenAIRequest(raw []byte, supportsResponses, supportsChat,
 	if err != nil {
 		return err
 	}
-	if !supportsStreaming {
+	if requestWantsStream(root) && !supportsStreaming {
 		return &CompatibilityError{
 			Class:   CompatibilityClassStreamingNotSupported,
 			Reason:  "streaming_not_supported",
@@ -90,15 +90,6 @@ func validateClaudeViaOpenAISyntax(raw []byte) (gjson.Result, *CompatibilityErro
 	}
 
 	root := gjson.ParseBytes(raw)
-	stream := root.Get("stream")
-	if !stream.Exists() || !stream.Bool() {
-		return gjson.Result{}, newCompatValidationError(
-			CompatibilityClassStreamingNotSupported,
-			"non_stream_not_supported",
-			"syntax",
-			"Claude-via-GPT routing rejected: non-stream requests are not supported in Phase 1.",
-		)
-	}
 	if root.Get("thinking").Exists() || root.Get("output_config.effort").Exists() {
 		return gjson.Result{}, newCompatValidationError(
 			CompatibilityClassIncompatibleRequest,

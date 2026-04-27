@@ -715,7 +715,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, codexPromptCacheSelection, error) {
-	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Session_id", codexUpstreamSupportsPromptCacheRetention(url))
+	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Session_id", codexUpstreamSupportsPromptCacheRetention(url), true)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(selection.Body))
 	if err != nil {
 		return nil, codexPromptCacheSelection{}, err

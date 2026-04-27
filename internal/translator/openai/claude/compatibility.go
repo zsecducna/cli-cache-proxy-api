@@ -32,6 +32,11 @@ type BackendCapabilities struct {
 	SupportsStreaming       bool
 }
 
+func requestWantsStream(root gjson.Result) bool {
+	stream := root.Get("stream")
+	return stream.Exists() && stream.Bool()
+}
+
 type CompatibilityError struct {
 	Class   string
 	Reason  string
@@ -69,16 +74,6 @@ func ValidateClaudeRequestSyntax(raw []byte) error {
 	}
 
 	root := gjson.ParseBytes(raw)
-	stream := root.Get("stream")
-	if !stream.Exists() || stream.Type == gjson.False {
-		return newCompatibilityError(
-			CompatibilityClassStreamingNotSupported,
-			"streaming_required",
-			"syntax-pass",
-			"",
-			"Claude-via-GPT routing rejected: streaming is required for Claude-via-GPT requests.",
-		)
-	}
 	if root.Get("thinking").Exists() || root.Get("output_config.effort").Exists() {
 		return newCompatibilityError(
 			CompatibilityClassIncompatibleRequest,
@@ -154,7 +149,8 @@ func ValidateClaudeRequestForSurface(raw []byte, caps BackendCapabilities, surfa
 	if err := ValidateClaudeRequestSyntax(raw); err != nil {
 		return nil, err
 	}
-	if !caps.SupportsStreaming {
+	root := gjson.ParseBytes(raw)
+	if requestWantsStream(root) && !caps.SupportsStreaming {
 		return nil, newCompatibilityError(
 			CompatibilityClassStreamingNotSupported,
 			"backend_streaming_required",
@@ -164,7 +160,6 @@ func ValidateClaudeRequestForSurface(raw []byte, caps BackendCapabilities, surfa
 		)
 	}
 
-	root := gjson.ParseBytes(raw)
 	usesTools := requestUsesTools(root)
 
 	switch surface {

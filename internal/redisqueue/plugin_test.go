@@ -22,14 +22,17 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:    "openai",
-			Model:       "gpt-5.4",
-			APIKey:      "test-key",
-			AuthIndex:   "0",
-			AuthType:    "apikey",
-			Source:      "user@example.com",
-			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:     1500 * time.Millisecond,
+			Provider:        "openai",
+			Model:           "gpt-5.4",
+			APIKey:          "test-key",
+			AuthIndex:       "0",
+			AuthType:        "apikey",
+			CustomerID:      "customer-1",
+			CustomerEmail:   "customer@example.com",
+			ReasoningEffort: "high",
+			Source:          "user@example.com",
+			RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:         1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -40,10 +43,41 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "provider", "openai")
 		requireStringField(t, payload, "model", "gpt-5.4")
+		requireStringField(t, payload, "reasoning_effort", "high")
+		requireStringField(t, payload, "customer_id", "customer-1")
+		requireStringField(t, payload, "customer_email", "customer@example.com")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireBoolField(t, payload, "failed", false)
+	})
+}
+
+func TestRegisterUsagePluginDeliversDefaultUsageRecords(t *testing.T) {
+	withEnabledQueue(t, func() {
+		RegisterUsagePlugin()
+		coreusage.PublishRecord(context.Background(), coreusage.Record{
+			Provider:        "codex",
+			Model:           "gpt-5.5",
+			AuthType:        "oauth",
+			CustomerID:      "customer-default",
+			CustomerEmail:   "default@example.com",
+			ReasoningEffort: "medium",
+			RequestedAt:     time.Date(2026, 4, 25, 1, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 2,
+				TotalTokens:  3,
+			},
+		})
+
+		payload := popSinglePayloadEventually(t)
+		requireStringField(t, payload, "provider", "codex")
+		requireStringField(t, payload, "model", "gpt-5.5")
+		requireStringField(t, payload, "auth_type", "oauth")
+		requireStringField(t, payload, "reasoning_effort", "medium")
+		requireStringField(t, payload, "customer_id", "customer-default")
+		requireStringField(t, payload, "customer_email", "default@example.com")
 	})
 }
 
@@ -125,6 +159,29 @@ func popSinglePayload(t *testing.T) map[string]json.RawMessage {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	return payload
+}
+
+func popSinglePayloadEventually(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		items := PopOldest(10)
+		if len(items) == 1 {
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(items[0], &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			return payload
+		}
+		if len(items) > 1 {
+			t.Fatalf("PopOldest() items = %d, want 1", len(items))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("PopOldest() items = 0, want 1")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, want string) {

@@ -163,12 +163,6 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-	if h.RequestRouteClass(h.HandlerType(), modelName) == "claude_via_openai_compat" {
-		stopKeepAlive()
-		writeClaudeLocalJSONError(c, http.StatusBadRequest, claudeRequestID(c), "non-stream Claude-via-GPT requests are not supported in Phase 1")
-		cliCancel(fmt.Errorf("claude_via_gpt_non_stream_not_supported"))
-		return
-	}
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	stopKeepAlive()

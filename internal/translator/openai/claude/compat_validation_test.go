@@ -21,6 +21,10 @@ func TestValidateClaudeViaOpenAIRequest_AcceptsSupportedSubset(t *testing.T) {
 			}`,
 		},
 		{
+			name: "non-stream text request",
+			raw:  `{"model":"gpt-5.4-custom","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
+		},
+		{
 			name: "single tool turn transcript",
 			raw: `{
 				"model":"gpt-5.4-custom",
@@ -67,11 +71,6 @@ func TestValidateClaudeViaOpenAIRequest_RejectsUnsupportedSyntax(t *testing.T) {
 		raw        string
 		wantReason string
 	}{
-		{
-			name:       "stream false",
-			raw:        `{"model":"gpt-5.4-custom","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
-			wantReason: "non_stream_not_supported",
-		},
 		{
 			name:       "thinking not supported",
 			raw:        `{"model":"gpt-5.4-custom","stream":true,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
@@ -216,6 +215,13 @@ func TestValidateClaudeViaOpenAIRequest_BackendPass(t *testing.T) {
 				t.Fatalf("error stage = %q, want %q", err.Stage, tt.wantStage)
 			}
 		})
+	}
+}
+
+func TestValidateClaudeViaOpenAIRequest_NonStreamDoesNotRequireStreamingSupport(t *testing.T) {
+	err := ValidateClaudeViaOpenAIRequest([]byte(`{"model":"gpt-5.4-custom","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`), true, true, true, false)
+	if err != nil {
+		t.Fatalf("ValidateClaudeViaOpenAIRequest() error = %v", err)
 	}
 }
 

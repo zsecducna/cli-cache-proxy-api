@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,7 +14,20 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
+var registerUsagePluginOnce sync.Once
+
 func init() {
+	RegisterUsagePlugin()
+}
+
+// RegisterUsagePlugin attaches the Redis queue usage sink to the global usage
+// manager. init calls this for compatibility; server startup also calls it to
+// make the side-effect dependency explicit.
+func RegisterUsagePlugin() {
+	registerUsagePluginOnce.Do(registerUsagePlugin)
+}
+
+func registerUsagePlugin() {
 	coreusage.RegisterPlugin(&usageQueuePlugin{})
 }
 
@@ -72,22 +86,25 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	detail := internalusage.RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    tokens,
-		Failed:    failed,
+		Timestamp:     timestamp,
+		CustomerID:    strings.TrimSpace(record.CustomerID),
+		CustomerEmail: strings.TrimSpace(record.CustomerEmail),
+		LatencyMs:     record.Latency.Milliseconds(),
+		Source:        record.Source,
+		AuthIndex:     record.AuthIndex,
+		Tokens:        tokens,
+		Failed:        failed,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		RequestDetail: detail,
-		Provider:      provider,
-		Model:         modelName,
-		Endpoint:      resolveEndpoint(ctx),
-		AuthType:      authType,
-		APIKey:        apiKey,
-		RequestID:     requestID,
+		RequestDetail:   detail,
+		Provider:        provider,
+		Model:           modelName,
+		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
+		Endpoint:        resolveEndpoint(ctx),
+		AuthType:        authType,
+		APIKey:          apiKey,
+		RequestID:       requestID,
 	})
 	if err != nil {
 		return
@@ -97,12 +114,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	internalusage.RequestDetail
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Endpoint  string `json:"endpoint"`
-	AuthType  string `json:"auth_type"`
-	APIKey    string `json:"api_key"`
-	RequestID string `json:"request_id"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Endpoint        string `json:"endpoint"`
+	AuthType        string `json:"auth_type"`
+	APIKey          string `json:"api_key"`
+	RequestID       string `json:"request_id"`
 }
 
 func resolveSuccess(ctx context.Context) bool {
