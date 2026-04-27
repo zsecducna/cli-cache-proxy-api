@@ -187,7 +187,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.SetBytes(body, "store", false)
+	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	if !gjson.GetBytes(body, "instructions").Exists() {
@@ -378,6 +378,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	body := req.Payload
+	originalPayload := opts.OriginalRequest
+	if len(originalPayload) == 0 {
+		originalPayload = req.Payload
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -386,7 +390,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
-	body, _ = sjson.SetBytes(body, "store", false)
+	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
@@ -661,6 +665,22 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
 	return fallback
+}
+
+func applyCodexWebsocketClientStore(body []byte, originalPayload []byte) []byte {
+	store := gjson.GetBytes(originalPayload, "store")
+	if store.Exists() {
+		updated, errSet := sjson.SetRawBytes(body, "store", []byte(store.Raw))
+		if errSet == nil {
+			return updated
+		}
+		return body
+	}
+	updated, errSet := sjson.SetBytes(body, "store", false)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

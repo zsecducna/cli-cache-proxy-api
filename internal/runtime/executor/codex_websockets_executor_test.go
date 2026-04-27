@@ -73,6 +73,40 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestApplyCodexWebsocketClientStore(t *testing.T) {
+	cases := []struct {
+		name     string
+		original string
+		want     string
+	}{
+		{
+			name:     "preserves explicit true",
+			original: `{"store":true}`,
+			want:     "true",
+		},
+		{
+			name:     "preserves explicit false",
+			original: `{"store":false}`,
+			want:     "false",
+		},
+		{
+			name:     "defaults missing store to false",
+			original: `{}`,
+			want:     "false",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := applyCodexWebsocketClientStore([]byte(`{"store":false}`), []byte(tc.original))
+			if store := gjson.GetBytes(got, "store").Raw; store != tc.want {
+				t.Fatalf("store = %s, want %s in %s", store, tc.want, got)
+			}
+		})
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
@@ -190,8 +224,8 @@ func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
 		if got := gjson.GetBytes(payload, "instructions").String(); got != "" {
 			t.Fatalf("instructions = %q, want empty", got)
 		}
-		if got := gjson.GetBytes(payload, "store").Raw; got != "false" {
-			t.Fatalf("store = %s, want false in %s", got, payload)
+		if got := gjson.GetBytes(payload, "store").Raw; got != "true" {
+			t.Fatalf("store = %s, want true in %s", got, payload)
 		}
 		if gjson.GetBytes(payload, "max_output_tokens").Exists() {
 			t.Fatalf("websocket request still has unsupported max_output_tokens: %s", payload)
