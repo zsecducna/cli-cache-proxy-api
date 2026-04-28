@@ -125,6 +125,43 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestFillFirstSelectorPick_PrefersHighestRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{
+			ID: "a-lower-quota",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 25},
+					"7days": map[string]any{"remaining_percent": 30},
+				},
+			},
+		},
+		{
+			ID: "b-higher-quota",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 80},
+					"7days": map[string]any{"remaining_percent": 70},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "b-higher-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "b-higher-quota")
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 

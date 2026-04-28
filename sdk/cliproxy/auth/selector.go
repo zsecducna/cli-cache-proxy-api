@@ -128,6 +128,116 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+type availabilityRank struct {
+	quotaPenalty   int
+	quotaRemaining int
+	priority       int
+}
+
+func authAvailabilityRank(auth *Auth, model string) availabilityRank {
+	return availabilityRank{
+		quotaPenalty:   authQuotaPenalty(auth, model),
+		quotaRemaining: authQuotaRemainingScore(auth),
+		priority:       authPriority(auth),
+	}
+}
+
+func betterAvailabilityRank(left, right availabilityRank) bool {
+	if left.quotaPenalty != right.quotaPenalty {
+		return left.quotaPenalty < right.quotaPenalty
+	}
+	if left.quotaRemaining != right.quotaRemaining {
+		return left.quotaRemaining > right.quotaRemaining
+	}
+	return left.priority > right.priority
+}
+
+func bestAvailabilityRank(available map[availabilityRank][]*Auth) (availabilityRank, bool) {
+	var best availabilityRank
+	found := false
+	for rank := range available {
+		if !found || betterAvailabilityRank(rank, best) {
+			best = rank
+			found = true
+		}
+	}
+	return best, found
+}
+
+func authQuotaRemainingScore(auth *Auth) int {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return 0
+	}
+	snapshot := readQuotaAutomationSnapshot(auth.Metadata)
+	remaining, ok := lowestKnownRemainingQuota(snapshot)
+	if !ok {
+		return 0
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	return int(math.Round(remaining * 1000))
+}
+
+func lowestKnownRemainingQuota(snapshot quotaAutomationSnapshot) (float64, bool) {
+	var remaining float64
+	found := false
+	for _, candidate := range []*float64{
+		snapshot.fiveHoursRemainingPercent,
+		snapshot.sevenDaysRemainingPercent,
+	} {
+		if candidate == nil {
+			continue
+		}
+		if !found || *candidate < remaining {
+			remaining = *candidate
+			found = true
+		}
+	}
+	return remaining, found
+}
+
+func authQuotaPenalty(auth *Auth, model string) int {
+	if auth == nil {
+		return 0
+	}
+	penalty := quotaStatePenalty(auth.Quota)
+	if state, ok := quotaModelState(auth, model); ok && state != nil {
+		if modelPenalty := quotaStatePenalty(state.Quota); modelPenalty > penalty {
+			penalty = modelPenalty
+		}
+	}
+	return penalty
+}
+
+func quotaModelState(auth *Auth, model string) (*ModelState, bool) {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
+		return nil, false
+	}
+	state, ok := auth.ModelStates[model]
+	if (!ok || state == nil) && model != "" {
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			state, ok = auth.ModelStates[baseModel]
+		}
+	}
+	if !ok || state == nil {
+		return nil, false
+	}
+	return state, true
+}
+
+func quotaStatePenalty(quota QuotaState) int {
+	if !quota.Exceeded && strings.TrimSpace(quota.Reason) == "" && quota.NextRecoverAt.IsZero() && quota.BackoffLevel == 0 {
+		return 0
+	}
+	backoffLevel := quota.BackoffLevel
+	if backoffLevel < 0 {
+		backoffLevel = 0
+	}
+	return backoffLevel + 1
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -204,14 +314,14 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
-	available = make(map[int][]*Auth)
+func collectAvailableByRank(auths []*Auth, model string, now time.Time) (available map[availabilityRank][]*Auth, cooldownCount int, earliest time.Time) {
+	available = make(map[availabilityRank][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			available[priority] = append(available[priority], candidate)
+			rank := authAvailabilityRank(candidate, model)
+			available[rank] = append(available[rank], candidate)
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -229,8 +339,8 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
-	if len(availableByPriority) == 0 {
+	availableByRank, cooldownCount, earliest := collectAvailableByRank(auths, model, now)
+	if len(availableByRank) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
@@ -245,16 +355,12 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	bestPriority := 0
-	found := false
-	for priority := range availableByPriority {
-		if !found || priority > bestPriority {
-			bestPriority = priority
-			found = true
-		}
+	bestRank, found := bestAvailabilityRank(availableByRank)
+	if !found {
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	available := availableByPriority[bestPriority]
+	available := availableByRank[bestRank]
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}

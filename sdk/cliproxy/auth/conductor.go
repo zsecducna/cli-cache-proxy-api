@@ -685,15 +685,15 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority := make(map[int][]*Auth)
+	availableByRank := make(map[availabilityRank][]*Auth)
 	cooldownCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			rank := authAvailabilityRank(candidate, checkModel)
+			availableByRank[rank] = append(availableByRank[rank], candidate)
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -704,7 +704,7 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		}
 	}
 
-	if len(availableByPriority) == 0 {
+	if len(availableByRank) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
@@ -719,16 +719,12 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	bestPriority := 0
-	found := false
-	for priority := range availableByPriority {
-		if !found || priority > bestPriority {
-			bestPriority = priority
-			found = true
-		}
+	bestRank, found := bestAvailabilityRank(availableByRank)
+	if !found {
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	available := availableByPriority[bestPriority]
+	available := availableByRank[bestRank]
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}

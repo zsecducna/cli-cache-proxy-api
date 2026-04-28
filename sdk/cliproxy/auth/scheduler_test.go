@@ -146,6 +146,47 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_PrefersHighestRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "a-lower-quota",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 30},
+					"7days": map[string]any{"remaining_percent": 35},
+				},
+			},
+		},
+		&Auth{
+			ID:       "b-higher-quota",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 90},
+					"7days": map[string]any{"remaining_percent": 80},
+				},
+			},
+		},
+	)
+
+	for index := 0; index < 2; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != "b-higher-quota" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "b-higher-quota")
+		}
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
