@@ -118,6 +118,38 @@ func TestParseOpenAIStreamUsageResponsesNestedUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresEmptyUsageChunks(t *testing.T) {
+	tests := []struct {
+		name string
+		line []byte
+	}{
+		{
+			name: "null usage",
+			line: []byte(`data: {"id":"chunk-1","usage":null}`),
+		},
+		{
+			name: "empty usage object",
+			line: []byte(`data: {"id":"chunk-1","usage":{}}`),
+		},
+		{
+			name: "zero chat completions usage",
+			line: []byte(`data: {"id":"chunk-1","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`),
+		},
+		{
+			name: "zero responses usage",
+			line: []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, ok := ParseOpenAIStreamUsage(tt.line); ok {
+				t.Fatalf("expected empty OpenAI-compatible usage chunk to be ignored")
+			}
+		})
+	}
+}
+
 func TestParseClaudeUsage_DoesNotTreatCacheCreationAsCacheRead(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":103562}}`)
 	detail := ParseClaudeUsage(data)
