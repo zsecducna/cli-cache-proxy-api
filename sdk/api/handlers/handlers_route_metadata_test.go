@@ -17,12 +17,18 @@ import (
 )
 
 type routeMetadataCaptureExecutor struct {
-	calls int
-	req   coreexecutor.Request
-	opts  coreexecutor.Options
+	identifier string
+	calls      int
+	req        coreexecutor.Request
+	opts       coreexecutor.Options
 }
 
-func (e *routeMetadataCaptureExecutor) Identifier() string { return OpenAICompatibilityProvider }
+func (e *routeMetadataCaptureExecutor) Identifier() string {
+	if strings.TrimSpace(e.identifier) != "" {
+		return e.identifier
+	}
+	return OpenAICompatibilityProvider
+}
 
 func (e *routeMetadataCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	e.calls++
@@ -31,8 +37,14 @@ func (e *routeMetadataCaptureExecutor) Execute(_ context.Context, _ *coreauth.Au
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *routeMetadataCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+func (e *routeMetadataCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.calls++
+	e.req = req
+	e.opts = opts
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {}\n\n")}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (e *routeMetadataCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -101,6 +113,111 @@ func TestExecuteWithAuthManager_ThreadsRouteAndRequestIDMetadata(t *testing.T) {
 	}
 	if got, want := executor.opts.Metadata[coreexecutor.RequestedModelMetadataKey], "gpt-5.4-custom"; got != want {
 		t.Fatalf("requested_model metadata = %v, want %q", got, want)
+	}
+}
+
+func TestExecuteWithAuthManager_MarksClaudeMessagesRouteMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &routeMetadataCaptureExecutor{identifier: "claude"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "claude-auth", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "claude-sonnet-4-6"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(`{"model":"claude-sonnet-4-6"}`))
+	ginCtx.Request = req
+
+	cliCtx, cliCancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+	defer cliCancel()
+
+	_, _, errMsg := base.ExecuteWithAuthManager(cliCtx, "claude", "claude-sonnet-4-6", []byte(`{"model":"claude-sonnet-4-6"}`), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %v, want nil", errMsg)
+	}
+	if got, want := executor.opts.Metadata[coreexecutor.RequestRouteMetadataKey], string(RequestRouteClaudeMessages); got != want {
+		t.Fatalf("route metadata = %v, want %q", got, want)
+	}
+}
+
+func TestExecuteWithAuthManager_MarksPrefixedClaudeMessagesRouteMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &routeMetadataCaptureExecutor{identifier: "claude"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	model := "teamA/claude-sonnet-4-6"
+	auth := &coreauth.Auth{ID: "claude-prefixed-auth", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(`{"model":"`+model+`"}`))
+	ginCtx.Request = req
+
+	cliCtx, cliCancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+	defer cliCancel()
+
+	_, _, errMsg := base.ExecuteWithAuthManager(cliCtx, "claude", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %v, want nil", errMsg)
+	}
+	if got, want := executor.opts.Metadata[coreexecutor.RequestRouteMetadataKey], string(RequestRouteClaudeMessages); got != want {
+		t.Fatalf("route metadata = %v, want %q", got, want)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_MarksClaudeMessagesRouteMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &routeMetadataCaptureExecutor{identifier: "claude"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "claude-stream-auth", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "claude-sonnet-4-6-stream-route-test"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages?beta=true", strings.NewReader(`{"model":"claude-sonnet-4-6-stream-route-test","stream":true}`))
+	ginCtx.Request = req
+
+	cliCtx, cliCancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+	defer cliCancel()
+
+	dataChan, _, errChan := base.ExecuteStreamWithAuthManager(cliCtx, "claude", "claude-sonnet-4-6-stream-route-test", []byte(`{"model":"claude-sonnet-4-6-stream-route-test","stream":true}`), "")
+	for range dataChan {
+	}
+	if errMsg, ok := <-errChan; ok && errMsg != nil {
+		t.Fatalf("ExecuteStreamWithAuthManager() error = %v, want nil", errMsg)
+	}
+	if got, want := executor.opts.Metadata[coreexecutor.RequestRouteMetadataKey], string(RequestRouteClaudeMessages); got != want {
+		t.Fatalf("route metadata = %v, want %q", got, want)
 	}
 }
 

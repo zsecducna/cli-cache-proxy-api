@@ -246,6 +246,33 @@ func headersFromContext(ctx context.Context) http.Header {
 	return nil
 }
 
+func isClaudeMessagesHTTPRoute(ctx context.Context, handlerType string, providers []string) bool {
+	if !strings.EqualFold(strings.TrimSpace(handlerType), "claude") {
+		return false
+	}
+	if !hasClaudeMessagesProvider(providers) {
+		return false
+	}
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.URL == nil {
+		return false
+	}
+	return ginCtx.Request.URL.Path == "/v1/messages"
+}
+
+func hasClaudeMessagesProvider(providers []string) bool {
+	for _, provider := range providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "claude", "anthropic", "antigravity", "vertex", "ampcode":
+			return true
+		}
+	}
+	return false
+}
+
 func pinnedAuthIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -530,9 +557,13 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
-	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
+	route := details.Route
+	if route == RequestRouteDefault && isClaudeMessagesHTTPRoute(ctx, handlerType, details.Providers) {
+		route = RequestRouteClaudeMessages
+	}
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, route)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -577,9 +608,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
-	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
+	route := details.Route
+	if route == RequestRouteDefault && isClaudeMessagesHTTPRoute(ctx, handlerType, details.Providers) {
+		route = RequestRouteClaudeMessages
+	}
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, route)
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -628,9 +663,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = details.NormalizedModel
-	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(details.Route)
+	route := details.Route
+	if route == RequestRouteDefault && isClaudeMessagesHTTPRoute(ctx, handlerType, details.Providers) {
+		route = RequestRouteClaudeMessages
+	}
+	reqMeta[coreexecutor.RequestRouteMetadataKey] = string(route)
 	payload := rawJSON
-	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, details.Route)
+	ctx, payload = withUsageReasoningEffort(ctx, payload, sdktranslator.FromString(handlerType), details.NormalizedModel, route)
 	if len(payload) == 0 {
 		payload = nil
 	}

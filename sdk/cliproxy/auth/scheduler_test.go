@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,55 @@ func (schedulerTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cl
 
 func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+type retryAffinityTestExecutor struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (e *retryAffinityTestExecutor) Identifier() string { return "anthropic" }
+
+func (e *retryAffinityTestExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls = append(e.calls, auth.ID)
+	if auth.ID == "auth-a" && countString(e.calls, "auth-a") == 1 {
+		return cliproxyexecutor.Response{}, errors.New("transient bootstrap failure")
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *retryAffinityTestExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *retryAffinityTestExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *retryAffinityTestExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *retryAffinityTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *retryAffinityTestExecutor) callIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.calls...)
+}
+
+func countString(values []string, want string) int {
+	count := 0
+	for _, value := range values {
+		if value == want {
+			count++
+		}
+	}
+	return count
 }
 
 type trackingSelector struct {
@@ -166,6 +217,175 @@ func TestSchedulerPick_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testin
 		if got.ID != "antigravity-scheduler-a" {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-scheduler-a")
 		}
+	}
+}
+
+func TestManagerPickNextMixed_ClaudeMessagesUsesRoundRobinSessionAffinity(t *testing.T) {
+	model := "claude-session-affinity-round-robin-test"
+	providers := []string{"anthropic", "antigravity", "vertex", "ampcode", "claude"}
+	auths := []*Auth{
+		{ID: "auth-a", Provider: "anthropic"},
+		{ID: "auth-b", Provider: "antigravity"},
+		{ID: "auth-c", Provider: "vertex"},
+		{ID: "auth-d", Provider: "ampcode"},
+		{ID: "auth-e", Provider: "claude"},
+	}
+	for _, auth := range auths {
+		registerSchedulerModels(t, auth.Provider, model, auth.ID)
+	}
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	for _, provider := range providers {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	pick := func(sessionID string) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{
+			OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_` + sessionID + `"},"messages":[{"role":"user","content":"hi"}]}`),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+			},
+		}
+		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed(%s) error = %v", sessionID, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed(%s) auth = nil", sessionID)
+		}
+		return got.ID
+	}
+
+	firstSession := "11111111-1111-1111-1111-111111111111"
+	secondSession := "22222222-2222-2222-2222-222222222222"
+	thirdSession := "33333333-3333-3333-3333-333333333333"
+
+	if got, want := pick(firstSession), "auth-a"; got != want {
+		t.Fatalf("first session auth = %q, want %q", got, want)
+	}
+	if got, want := pick(secondSession), "auth-b"; got != want {
+		t.Fatalf("second session auth = %q, want %q", got, want)
+	}
+	if got, want := pick(firstSession), "auth-a"; got != want {
+		t.Fatalf("first session repeat auth = %q, want sticky %q", got, want)
+	}
+	if got, want := pick(thirdSession), "auth-c"; got != want {
+		t.Fatalf("third session auth = %q, want %q", got, want)
+	}
+}
+
+func TestManagerPickNextMixed_PrefixedClaudeMessagesUsesRoundRobinSessionAffinity(t *testing.T) {
+	model := "teamA/claude-session-affinity-round-robin-test"
+	providers := []string{"anthropic", "antigravity", "vertex"}
+	auths := []*Auth{
+		{ID: "auth-a", Provider: "anthropic"},
+		{ID: "auth-b", Provider: "antigravity"},
+		{ID: "auth-c", Provider: "vertex"},
+	}
+	for _, auth := range auths {
+		registerSchedulerModels(t, auth.Provider, model, auth.ID)
+	}
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	for _, provider := range providers {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	pick := func(sessionID string) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{
+			OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_` + sessionID + `"},"messages":[{"role":"user","content":"hi"}]}`),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+			},
+		}
+		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed(%s) error = %v", sessionID, errPick)
+		}
+		return got.ID
+	}
+
+	firstSession := "44444444-4444-4444-4444-444444444444"
+	secondSession := "55555555-5555-5555-5555-555555555555"
+	if got, want := pick(firstSession), "auth-a"; got != want {
+		t.Fatalf("first session auth = %q, want %q", got, want)
+	}
+	if got, want := pick(secondSession), "auth-b"; got != want {
+		t.Fatalf("second session auth = %q, want %q", got, want)
+	}
+	if got, want := pick(firstSession), "auth-a"; got != want {
+		t.Fatalf("first session repeat auth = %q, want sticky %q", got, want)
+	}
+}
+
+func TestManagerExecute_ClaudeMessagesRetryDoesNotRewriteSessionBinding(t *testing.T) {
+	model := "claude-retry-affinity-test"
+	providers := []string{"anthropic"}
+	registerSchedulerModels(t, "anthropic", model, "auth-a", "auth-b")
+
+	executor := &retryAffinityTestExecutor{}
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, auth := range []*Auth{
+		{ID: "auth-a", Provider: "anthropic"},
+		{ID: "auth-b", Provider: "anthropic"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_66666666-6666-6666-6666-666666666666"},"messages":[{"role":"user","content":"hi"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+		},
+	}
+	req := cliproxyexecutor.Request{Model: model, Payload: opts.OriginalRequest}
+	if _, errExecute := manager.Execute(context.Background(), providers, req, opts); errExecute != nil {
+		t.Fatalf("first Execute() error = %v", errExecute)
+	}
+	if _, errExecute := manager.Execute(context.Background(), providers, req, opts); errExecute != nil {
+		t.Fatalf("second Execute() error = %v", errExecute)
+	}
+
+	got := executor.callIDs()
+	want := []string{"auth-a", "auth-b", "auth-a"}
+	if len(got) != len(want) {
+		t.Fatalf("executor calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("executor calls = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestManagerStopAutoRefreshStopsClaudeMessagesSelector(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	selector := manager.claudeMessagesSelector
+	if selector == nil || selector.cache == nil {
+		t.Fatal("test setup: claude messages selector cache is nil")
+	}
+
+	manager.StopAutoRefresh()
+
+	select {
+	case <-selector.cache.stopCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("StopAutoRefresh did not stop claude messages selector cache")
 	}
 }
 

@@ -173,6 +173,11 @@ type Manager struct {
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
+	// Claude /v1/messages traffic uses round-robin selection for new sessions,
+	// then sticks follow-up turns to the initially selected auth.
+	claudeMessagesSelector    *SessionAffinitySelector
+	claudeMessagesSelectorTTL time.Duration
+
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
@@ -195,6 +200,11 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
 	}
+	manager.claudeMessagesSelectorTTL = time.Hour
+	manager.claudeMessagesSelector = NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      manager.claudeMessagesSelectorTTL,
+	})
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
@@ -374,6 +384,52 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.configureClaudeMessagesSelectorTTL(cfg)
+}
+
+func (m *Manager) configureClaudeMessagesSelectorTTL(cfg *internalconfig.Config) {
+	if m == nil || cfg == nil {
+		return
+	}
+	ttl := parseDurationString(strings.TrimSpace(cfg.Routing.SessionAffinityTTL))
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	m.mu.Lock()
+	if m.claudeMessagesSelector != nil && m.claudeMessagesSelectorTTL == ttl {
+		m.mu.Unlock()
+		return
+	}
+	oldSelector := m.claudeMessagesSelector
+	m.claudeMessagesSelectorTTL = ttl
+	m.claudeMessagesSelector = NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      ttl,
+	})
+	m.mu.Unlock()
+	if oldSelector != nil {
+		oldSelector.Stop()
+	}
+}
+
+func (m *Manager) claudeMessagesAffinitySelector() Selector {
+	if m == nil {
+		return NewSessionAffinitySelector(&RoundRobinSelector{})
+	}
+	m.mu.RLock()
+	selector := m.claudeMessagesSelector
+	m.mu.RUnlock()
+	if selector != nil {
+		return selector
+	}
+	m.configureClaudeMessagesSelectorTTL(m.runtimeConfig.Load().(*internalconfig.Config))
+	m.mu.RLock()
+	selector = m.claudeMessagesSelector
+	m.mu.RUnlock()
+	if selector == nil {
+		return NewSessionAffinitySelector(&RoundRobinSelector{})
+	}
+	return selector
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -2953,6 +3009,20 @@ func (m *Manager) useSchedulerFastPath() bool {
 	return isBuiltInSelector(m.selector)
 }
 
+func forceClaudeMessagesSessionAffinity(opts cliproxyexecutor.Options) bool {
+	return requestRouteFromMetadata(opts.Metadata) == cliproxyexecutor.ClaudeMessagesRouteMetadataValue
+}
+
+func selectorForPerRequestRetry(selector Selector, tried map[string]struct{}) Selector {
+	if selector == nil || len(tried) == 0 {
+		return selector
+	}
+	if _, ok := selector.(*SessionAffinitySelector); ok {
+		return &RoundRobinSelector{}
+	}
+	return selector
+}
+
 func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
@@ -2976,6 +3046,10 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	return m.pickNextLegacyWithSelector(ctx, provider, model, opts, tried, nil)
+}
+
+func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, selectorOverride Selector) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -3022,7 +3096,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selector := effectiveBuiltInSelector(m.selector, provider, model)
+	selector := selectorOverride
+	if selector == nil {
+		selector = effectiveBuiltInSelector(m.selector, provider, model)
+	}
+	selector = selectorForPerRequestRetry(selector, tried)
 	selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -3046,6 +3124,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if forceClaudeMessagesSessionAffinity(opts) {
+		return m.pickNextLegacyWithSelector(ctx, provider, model, opts, tried, m.claudeMessagesAffinitySelector())
+	}
 	if !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
@@ -3103,6 +3184,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	return m.pickNextMixedLegacyWithSelector(ctx, providers, model, opts, tried, nil)
+}
+
+func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, selectorOverride Selector) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
 
@@ -3166,7 +3251,11 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selector := effectiveBuiltInSelector(m.selector, "", model)
+	selector := selectorOverride
+	if selector == nil {
+		selector = effectiveBuiltInSelector(m.selector, "", model)
+	}
+	selector = selectorForPerRequestRetry(selector, tried)
 	selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -3196,6 +3285,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if forceClaudeMessagesSessionAffinity(opts) {
+		return m.pickNextMixedLegacyWithSelector(ctx, providers, model, opts, tried, m.claudeMessagesAffinitySelector())
+	}
 	if !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
@@ -3514,6 +3606,8 @@ func (m *Manager) StopAutoRefresh() {
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	claudeMessagesSelector := m.claudeMessagesSelector
+	m.claudeMessagesSelector = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -3521,6 +3615,9 @@ func (m *Manager) StopAutoRefresh() {
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()
+	}
+	if claudeMessagesSelector != nil {
+		claudeMessagesSelector.Stop()
 	}
 }
 

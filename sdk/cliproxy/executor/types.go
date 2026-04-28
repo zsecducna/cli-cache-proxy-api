@@ -13,6 +13,9 @@ const RequestedModelMetadataKey = "requested_model"
 // RequestRouteMetadataKey stores the classified handler route in Options.Metadata.
 const RequestRouteMetadataKey = "request_route"
 
+// ClaudeMessagesRouteMetadataValue marks Claude-compatible /v1/messages traffic.
+const ClaudeMessagesRouteMetadataValue = "claude_messages"
+
 // IdempotencyKeyMetadataKey stores the client-supplied or generated idempotency key in Options.Metadata.
 const IdempotencyKeyMetadataKey = "idempotency_key"
 
