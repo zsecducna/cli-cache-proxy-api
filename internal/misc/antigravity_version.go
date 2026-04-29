@@ -80,21 +80,22 @@ func refreshAntigravityVersion(ctx context.Context) {
 		return
 	}
 
-	if cachedAntigravityVersion == "" || now.After(antigravityVersionExpiry) {
+	if cachedAntigravityVersion == "" {
 		cachedAntigravityVersion = antigravityFallbackVersion
 		antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
 		log.WithError(errFetch).Warn("failed to refresh antigravity version, using fallback version")
 		return
 	}
 
-	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping cached value")
+	antigravityVersionExpiry = now.Add(antigravityVersionCacheTTL)
+	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping last used value")
 }
 
 // AntigravityLatestVersion returns the cached antigravity version refreshed by StartAntigravityVersionUpdater.
-// It falls back to antigravityFallbackVersion if the cache is empty or stale.
+// It falls back to antigravityFallbackVersion only when no cached version exists.
 func AntigravityLatestVersion() string {
 	antigravityVersionMu.RLock()
-	if cachedAntigravityVersion != "" && time.Now().Before(antigravityVersionExpiry) {
+	if cachedAntigravityVersion != "" {
 		v := cachedAntigravityVersion
 		antigravityVersionMu.RUnlock()
 		return v
