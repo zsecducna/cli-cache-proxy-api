@@ -512,6 +512,42 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// RichestRandomSelector picks the auth with the best availability rank (lowest quota
+// penalty, highest quota remaining, highest priority) and selects randomly among auths
+// that share that top rank. This is the fallback for new /v1/messages sessions: each
+// new session gets the richest available auth, with ties broken by random selection so
+// load spreads across equally-quota'd OAuth files rather than concentrating on one.
+type RichestRandomSelector struct{}
+
+// Pick selects the richest available auth, random among equals at the top rank.
+func (s *RichestRandomSelector) Pick(_ context.Context, provider, model string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	availableByRank, cooldownCount, earliest := collectAvailableByRank(auths, model, now)
+	if len(availableByRank) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn)
+		}
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	best, found := bestAvailabilityRank(availableByRank)
+	if !found {
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	group := availableByRank[best]
+	if len(group) == 1 {
+		return group[0], nil
+	}
+	return group[rand.IntN(len(group))], nil
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}

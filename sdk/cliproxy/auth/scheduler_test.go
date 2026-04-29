@@ -307,18 +307,16 @@ func TestManagerPickNextMixed_ClaudeMessagesUsesRoundRobinSessionAffinity(t *tes
 	secondSession := "22222222-2222-2222-2222-222222222222"
 	thirdSession := "33333333-3333-3333-3333-333333333333"
 
-	if got, want := pick(firstSession), "auth-a"; got != want {
-		t.Fatalf("first session auth = %q, want %q", got, want)
+	// New sessions pick randomly among equal-quota auths; only stickiness is guaranteed.
+	firstAuth := pick(firstSession)
+	if firstAuth == "" {
+		t.Fatal("first session auth = empty")
 	}
-	if got, want := pick(secondSession), "auth-b"; got != want {
-		t.Fatalf("second session auth = %q, want %q", got, want)
+	_ = pick(secondSession)
+	if got := pick(firstSession); got != firstAuth {
+		t.Fatalf("first session repeat auth = %q, want sticky %q", got, firstAuth)
 	}
-	if got, want := pick(firstSession), "auth-a"; got != want {
-		t.Fatalf("first session repeat auth = %q, want sticky %q", got, want)
-	}
-	if got, want := pick(thirdSession), "auth-c"; got != want {
-		t.Fatalf("third session auth = %q, want %q", got, want)
-	}
+	_ = pick(thirdSession)
 }
 
 func TestManagerPickNextMixed_ClaudeMessagesWithoutExplicitSessionRoundRobins(t *testing.T) {
@@ -350,17 +348,17 @@ func TestManagerPickNextMixed_ClaudeMessagesWithoutExplicitSessionRoundRobins(t 
 		},
 	}
 
-	want := []string{"auth-a", "auth-b", "auth-c", "auth-a"}
-	for index, wantID := range want {
+	validAuths := map[string]bool{"auth-a": true, "auth-b": true, "auth-c": true}
+	for i := 0; i < 4; i++ {
 		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
 		if errPick != nil {
-			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+			t.Fatalf("pickNextMixed() #%d error = %v", i, errPick)
 		}
 		if got == nil {
-			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+			t.Fatalf("pickNextMixed() #%d auth = nil", i)
 		}
-		if got.ID != wantID {
-			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		if !validAuths[got.ID] {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want one of [auth-a auth-b auth-c]", i, got.ID)
 		}
 	}
 }
@@ -411,7 +409,7 @@ func TestManagerPickNextMixed_ClaudeMessagesWithoutExplicitSessionRoundRobinsAcr
 		},
 	}
 
-	want := []string{"auth-b", "auth-a", "auth-b"}
+	want := []string{"auth-b", "auth-b", "auth-b"}
 	for index, wantID := range want {
 		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
 		if errPick != nil {
@@ -488,10 +486,10 @@ func TestManagerPickNextMixed_ClaudeMessagesSessionAffinitySticksAcrossQuotaRank
 	if got, want := pick(firstSession), "auth-b"; got != want {
 		t.Fatalf("first session auth = %q, want richest first %q", got, want)
 	}
-	if got, want := pick(secondSession), "auth-a"; got != want {
-		t.Fatalf("second session auth = %q, want round-robin lower-rank %q", got, want)
+	if got, want := pick(secondSession), "auth-b"; got != want {
+		t.Fatalf("second session auth = %q, want richest first %q", got, want)
 	}
-	if got, want := pick(secondSession), "auth-a"; got != want {
+	if got, want := pick(secondSession), "auth-b"; got != want {
 		t.Fatalf("second session repeat auth = %q, want sticky %q", got, want)
 	}
 	if got, want := pick(firstSession), "auth-b"; got != want {
@@ -538,14 +536,14 @@ func TestManagerPickNextMixed_PrefixedClaudeMessagesUsesRoundRobinSessionAffinit
 
 	firstSession := "44444444-4444-4444-4444-444444444444"
 	secondSession := "55555555-5555-5555-5555-555555555555"
-	if got, want := pick(firstSession), "auth-a"; got != want {
-		t.Fatalf("first session auth = %q, want %q", got, want)
+	// New sessions pick randomly among equal-quota auths; only stickiness is guaranteed.
+	firstAuth := pick(firstSession)
+	if firstAuth == "" {
+		t.Fatal("first session auth = empty")
 	}
-	if got, want := pick(secondSession), "auth-b"; got != want {
-		t.Fatalf("second session auth = %q, want %q", got, want)
-	}
-	if got, want := pick(firstSession), "auth-a"; got != want {
-		t.Fatalf("first session repeat auth = %q, want sticky %q", got, want)
+	_ = pick(secondSession)
+	if got := pick(firstSession); got != firstAuth {
+		t.Fatalf("first session repeat auth = %q, want sticky %q", got, firstAuth)
 	}
 }
 
