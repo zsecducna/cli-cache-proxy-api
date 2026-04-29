@@ -43,6 +43,12 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// QuotaUsageRefresher is optionally implemented by OAuth executors that can
+// refresh quota/usage metadata outside the request path.
+type QuotaUsageRefresher interface {
+	RefreshQuotaUsage(ctx context.Context, auth *Auth) (*Auth, error)
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -71,6 +77,7 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	quotaUsageRefreshInterval = 5 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -179,8 +186,9 @@ type Manager struct {
 	claudeMessagesSelectorTTL time.Duration
 
 	// Auto refresh state
-	refreshCancel context.CancelFunc
-	refreshLoop   *authAutoRefreshLoop
+	refreshCancel         context.CancelFunc
+	refreshLoop           *authAutoRefreshLoop
+	quotaUsageRefreshStop context.CancelFunc
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -3608,6 +3616,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+	m.StartQuotaUsageAutoRefresh(parent, quotaUsageRefreshInterval)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -3623,6 +3632,7 @@ func (m *Manager) StopAutoRefresh() {
 	if cancel != nil {
 		cancel()
 	}
+	m.StopQuotaUsageAutoRefresh()
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()
@@ -3630,6 +3640,142 @@ func (m *Manager) StopAutoRefresh() {
 	if claudeMessagesSelector != nil {
 		claudeMessagesSelector.Stop()
 	}
+}
+
+// StartQuotaUsageAutoRefresh starts a loop that refreshes provider quota/usage
+// metadata for OAuth providers that expose a quota refresh implementation.
+func (m *Manager) StartQuotaUsageAutoRefresh(parent context.Context, interval time.Duration) {
+	if m == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = quotaUsageRefreshInterval
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+
+	m.mu.Lock()
+	cancelPrev := m.quotaUsageRefreshStop
+	m.quotaUsageRefreshStop = cancel
+	m.mu.Unlock()
+	if cancelPrev != nil {
+		cancelPrev()
+	}
+
+	go m.runQuotaUsageAutoRefresh(ctx, interval)
+}
+
+// StopQuotaUsageAutoRefresh stops the quota/usage metadata refresh loop.
+func (m *Manager) StopQuotaUsageAutoRefresh() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	cancel := m.quotaUsageRefreshStop
+	m.quotaUsageRefreshStop = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (m *Manager) runQuotaUsageAutoRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = quotaUsageRefreshInterval
+	}
+	m.refreshQuotaUsageOnce(ctx, time.Now())
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			m.refreshQuotaUsageOnce(ctx, now)
+		}
+	}
+}
+
+func (m *Manager) refreshQuotaUsageOnce(ctx context.Context, now time.Time) {
+	if m == nil {
+		return
+	}
+	for _, auth := range m.List() {
+		if !quotaUsageRefreshDue(auth, now) {
+			continue
+		}
+		refreshCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			refreshCtx = context.WithValue(refreshCtx, roundTripperContextKey{}, rt)
+			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+		}
+		executor, ok := m.Executor(auth.Provider)
+		if !ok || executor == nil {
+			continue
+		}
+		refresher, ok := executor.(QuotaUsageRefresher)
+		if !ok || refresher == nil {
+			continue
+		}
+		updated, err := refresher.RefreshQuotaUsage(refreshCtx, auth.Clone())
+		if err != nil {
+			log.WithError(err).Debugf("quota/usage refresh failed for %s auth %s", auth.Provider, auth.ID)
+			m.markQuotaUsageRefreshAttempt(ctx, auth, now, err)
+			continue
+		}
+		if updated == nil {
+			updated = auth.Clone()
+		}
+		ensureQuotaUsageRefreshMetadata(updated, now, nil)
+		if _, errUpdate := m.Update(ctx, updated); errUpdate != nil {
+			log.WithError(errUpdate).Debugf("quota/usage refresh update failed for %s auth %s", auth.Provider, auth.ID)
+		}
+	}
+}
+
+func quotaUsageRefreshDue(auth *Auth, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "codex", "antigravity", "claude":
+	default:
+		return false
+	}
+	if auth.Metadata == nil {
+		return true
+	}
+	if ts, ok := parseTimeValue(auth.Metadata["quota_usage_refreshed_at"]); ok {
+		return !now.Before(ts.Add(quotaUsageRefreshInterval))
+	}
+	return true
+}
+
+func (m *Manager) markQuotaUsageRefreshAttempt(ctx context.Context, auth *Auth, now time.Time, err error) {
+	if auth == nil {
+		return
+	}
+	updated := auth.Clone()
+	ensureQuotaUsageRefreshMetadata(updated, now, err)
+	_, _ = m.Update(ctx, updated)
+}
+
+func ensureQuotaUsageRefreshMetadata(auth *Auth, now time.Time, err error) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["quota_usage_refreshed_at"] = now.Format(time.RFC3339)
+	if err != nil {
+		auth.Metadata["quota_usage_refresh_error"] = err.Error()
+		return
+	}
+	delete(auth.Metadata, "quota_usage_refresh_error")
 }
 
 func (m *Manager) queueRefreshReschedule(authID string) {
