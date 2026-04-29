@@ -201,10 +201,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		modelPoolOffsets: make(map[string]int),
 	}
 	manager.claudeMessagesSelectorTTL = time.Hour
-	manager.claudeMessagesSelector = NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      manager.claudeMessagesSelectorTTL,
-	})
+	manager.claudeMessagesSelector = newClaudeMessagesSessionAffinitySelector(manager.claudeMessagesSelectorTTL)
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
@@ -402,19 +399,25 @@ func (m *Manager) configureClaudeMessagesSelectorTTL(cfg *internalconfig.Config)
 	}
 	oldSelector := m.claudeMessagesSelector
 	m.claudeMessagesSelectorTTL = ttl
-	m.claudeMessagesSelector = NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      ttl,
-	})
+	m.claudeMessagesSelector = newClaudeMessagesSessionAffinitySelector(ttl)
 	m.mu.Unlock()
 	if oldSelector != nil {
 		oldSelector.Stop()
 	}
 }
 
+func newClaudeMessagesSessionAffinitySelector(ttl time.Duration) *SessionAffinitySelector {
+	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:                    &RoundRobinSelector{includeAllAvailabilityRanks: true},
+		TTL:                         ttl,
+		DisableMessageHashFallback:  true,
+		IncludeAllAvailabilityRanks: true,
+	})
+}
+
 func (m *Manager) claudeMessagesAffinitySelector() Selector {
 	if m == nil {
-		return NewSessionAffinitySelector(&RoundRobinSelector{})
+		return newClaudeMessagesSessionAffinitySelector(time.Hour)
 	}
 	m.mu.RLock()
 	selector := m.claudeMessagesSelector
@@ -427,7 +430,7 @@ func (m *Manager) claudeMessagesAffinitySelector() Selector {
 	selector = m.claudeMessagesSelector
 	m.mu.RUnlock()
 	if selector == nil {
-		return NewSessionAffinitySelector(&RoundRobinSelector{})
+		return newClaudeMessagesSessionAffinitySelector(time.Hour)
 	}
 	return selector
 }
@@ -681,6 +684,10 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 }
 
 func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
+	return m.availableAuthsForRouteModelWithOptions(auths, provider, routeModel, now, false)
+}
+
+func (m *Manager) availableAuthsForRouteModelWithOptions(auths []*Auth, provider, routeModel string, now time.Time, includeAllRanks bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -719,14 +726,9 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	bestRank, found := bestAvailabilityRank(availableByRank)
-	if !found {
+	available := availableAuthsByRank(availableByRank, includeAllRanks)
+	if len(available) == 0 {
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
-	}
-
-	available := availableByRank[bestRank]
-	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
 	return available, nil
 }
@@ -746,6 +748,17 @@ func effectiveBuiltInSelector(selector Selector, provider, routeModel string) Se
 		}
 	}
 	return selector
+}
+
+func selectorIncludesAllAvailabilityRanks(selector Selector) bool {
+	switch typed := selector.(type) {
+	case *RoundRobinSelector:
+		return typed != nil && typed.includeAllAvailabilityRanks
+	case *SessionAffinitySelector:
+		return typed != nil && typed.includeAllAvailabilityRanks
+	default:
+		return false
+	}
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -3013,8 +3026,8 @@ func selectorForPerRequestRetry(selector Selector, tried map[string]struct{}) Se
 	if selector == nil || len(tried) == 0 {
 		return selector
 	}
-	if _, ok := selector.(*SessionAffinitySelector); ok {
-		return &RoundRobinSelector{}
+	if sessionSelector, ok := selector.(*SessionAffinitySelector); ok {
+		return &RoundRobinSelector{includeAllAvailabilityRanks: sessionSelector.includeAllAvailabilityRanks}
 	}
 	return selector
 }
@@ -3087,14 +3100,15 @@ func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, mode
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
-	if errAvailable != nil {
-		m.mu.RUnlock()
-		return nil, nil, errAvailable
-	}
 	selector := selectorOverride
 	if selector == nil {
 		selector = effectiveBuiltInSelector(m.selector, provider, model)
+	}
+	includeAllRanks := selectorIncludesAllAvailabilityRanks(selector)
+	available, errAvailable := m.availableAuthsForRouteModelWithOptions(candidates, provider, model, time.Now(), includeAllRanks)
+	if errAvailable != nil {
+		m.mu.RUnlock()
+		return nil, nil, errAvailable
 	}
 	selector = selectorForPerRequestRetry(selector, tried)
 	selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
@@ -3242,14 +3256,15 @@ func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
-	if errAvailable != nil {
-		m.mu.RUnlock()
-		return nil, nil, "", errAvailable
-	}
 	selector := selectorOverride
 	if selector == nil {
 		selector = effectiveBuiltInSelector(m.selector, "", model)
+	}
+	includeAllRanks := selectorIncludesAllAvailabilityRanks(selector)
+	available, errAvailable := m.availableAuthsForRouteModelWithOptions(candidates, "mixed", model, time.Now(), includeAllRanks)
+	if errAvailable != nil {
+		m.mu.RUnlock()
+		return nil, nil, "", errAvailable
 	}
 	selector = selectorForPerRequestRetry(selector, tried)
 	selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)

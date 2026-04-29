@@ -321,6 +321,184 @@ func TestManagerPickNextMixed_ClaudeMessagesUsesRoundRobinSessionAffinity(t *tes
 	}
 }
 
+func TestManagerPickNextMixed_ClaudeMessagesWithoutExplicitSessionRoundRobins(t *testing.T) {
+	model := "claude-no-explicit-session-round-robin-test"
+	providers := []string{"anthropic", "antigravity", "vertex"}
+	auths := []*Auth{
+		{ID: "auth-a", Provider: "anthropic"},
+		{ID: "auth-b", Provider: "antigravity"},
+		{ID: "auth-c", Provider: "vertex"},
+	}
+	for _, auth := range auths {
+		registerSchedulerModels(t, auth.Provider, model, auth.ID)
+	}
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	for _, provider := range providers {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"same prompt"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+		},
+	}
+
+	want := []string{"auth-a", "auth-b", "auth-c", "auth-a"}
+	for index, wantID := range want {
+		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestManagerPickNextMixed_ClaudeMessagesWithoutExplicitSessionRoundRobinsAcrossQuotaRanks(t *testing.T) {
+	model := "claude-no-explicit-session-quota-rank-round-robin-test"
+	providers := []string{"anthropic", "antigravity"}
+	auths := []*Auth{
+		{
+			ID:       "auth-a",
+			Provider: "anthropic",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+		{
+			ID:       "auth-b",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 90},
+					"7days": map[string]any{"remaining_percent": 90},
+				},
+			},
+		},
+	}
+	for _, auth := range auths {
+		registerSchedulerModels(t, auth.Provider, model, auth.ID)
+	}
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	for _, provider := range providers {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"messages":[{"role":"user","content":"same prompt"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+		},
+	}
+
+	want := []string{"auth-b", "auth-a", "auth-b"}
+	for index, wantID := range want {
+		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestManagerPickNextMixed_ClaudeMessagesSessionAffinitySticksAcrossQuotaRanks(t *testing.T) {
+	model := "claude-explicit-session-quota-rank-affinity-test"
+	providers := []string{"anthropic", "antigravity"}
+	auths := []*Auth{
+		{
+			ID:       "auth-a",
+			Provider: "anthropic",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+		{
+			ID:       "auth-b",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 90},
+					"7days": map[string]any{"remaining_percent": 90},
+				},
+			},
+		},
+	}
+	for _, auth := range auths {
+		registerSchedulerModels(t, auth.Provider, model, auth.ID)
+	}
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	for _, provider := range providers {
+		manager.executors[provider] = schedulerTestExecutor{}
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	pick := func(sessionID string) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{
+			OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_` + sessionID + `"},"messages":[{"role":"user","content":"same prompt"}]}`),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+			},
+		}
+		got, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed(%s) error = %v", sessionID, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed(%s) auth = nil", sessionID)
+		}
+		return got.ID
+	}
+
+	firstSession := "77777777-7777-7777-7777-777777777777"
+	secondSession := "88888888-8888-8888-8888-888888888888"
+	if got, want := pick(firstSession), "auth-b"; got != want {
+		t.Fatalf("first session auth = %q, want richest first %q", got, want)
+	}
+	if got, want := pick(secondSession), "auth-a"; got != want {
+		t.Fatalf("second session auth = %q, want round-robin lower-rank %q", got, want)
+	}
+	if got, want := pick(secondSession), "auth-a"; got != want {
+		t.Fatalf("second session repeat auth = %q, want sticky %q", got, want)
+	}
+	if got, want := pick(firstSession), "auth-b"; got != want {
+		t.Fatalf("first session repeat auth = %q, want sticky %q", got, want)
+	}
+}
+
 func TestManagerPickNextMixed_PrefixedClaudeMessagesUsesRoundRobinSessionAffinity(t *testing.T) {
 	model := "teamA/claude-session-affinity-round-robin-test"
 	providers := []string{"anthropic", "antigravity", "vertex"}

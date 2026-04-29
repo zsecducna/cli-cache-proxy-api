@@ -150,6 +150,41 @@ func TestExecuteWithAuthManager_MarksClaudeMessagesRouteMetadata(t *testing.T) {
 	}
 }
 
+func TestExecuteWithAuthManager_MarksPlainClaudeMessagesRouteMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &routeMetadataCaptureExecutor{identifier: "claude"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6-plain-route-test"
+	auth := &coreauth.Auth{ID: "claude-plain-auth", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"`+model+`"}`))
+	ginCtx.Request = req
+
+	cliCtx, cliCancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+	defer cliCancel()
+
+	_, _, errMsg := base.ExecuteWithAuthManager(cliCtx, "claude", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %v, want nil", errMsg)
+	}
+	if got, want := executor.opts.Metadata[coreexecutor.RequestRouteMetadataKey], string(RequestRouteClaudeMessages); got != want {
+		t.Fatalf("route metadata = %v, want %q", got, want)
+	}
+}
+
 func TestExecuteWithAuthManager_MarksPrefixedClaudeMessagesRouteMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

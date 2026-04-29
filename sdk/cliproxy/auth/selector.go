@@ -25,9 +25,10 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu                          sync.Mutex
+	cursors                     map[string]int
+	maxKeys                     int
+	includeAllAvailabilityRanks bool
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -162,6 +163,37 @@ func bestAvailabilityRank(available map[availabilityRank][]*Auth) (availabilityR
 		}
 	}
 	return best, found
+}
+
+func availableAuthsByRank(availableByRank map[availabilityRank][]*Auth, includeAllRanks bool) []*Auth {
+	if len(availableByRank) == 0 {
+		return nil
+	}
+	ranks := make([]availabilityRank, 0, len(availableByRank))
+	if includeAllRanks {
+		for rank := range availableByRank {
+			ranks = append(ranks, rank)
+		}
+		sort.Slice(ranks, func(i, j int) bool {
+			return betterAvailabilityRank(ranks[i], ranks[j])
+		})
+	} else {
+		bestRank, found := bestAvailabilityRank(availableByRank)
+		if !found {
+			return nil
+		}
+		ranks = append(ranks, bestRank)
+	}
+
+	available := make([]*Auth, 0)
+	for _, rank := range ranks {
+		ranked := availableByRank[rank]
+		if len(ranked) > 1 {
+			sort.Slice(ranked, func(i, j int) bool { return ranked[i].ID < ranked[j].ID })
+		}
+		available = append(available, ranked...)
+	}
+	return available
 }
 
 func authQuotaRemainingScore(auth *Auth) int {
@@ -335,6 +367,10 @@ func collectAvailableByRank(auths []*Auth, model string, now time.Time) (availab
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithOptions(auths, provider, model, now, false)
+}
+
+func getAvailableAuthsWithOptions(auths []*Auth, provider, model string, now time.Time, includeAllRanks bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -355,14 +391,9 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	bestRank, found := bestAvailabilityRank(availableByRank)
-	if !found {
+	available := availableAuthsByRank(availableByRank, includeAllRanks)
+	if len(available) == 0 {
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
-	}
-
-	available := availableByRank[bestRank]
-	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
 	return available, nil
 }
@@ -374,7 +405,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithOptions(auths, provider, model, now, s.includeAllAvailabilityRanks)
 	if err != nil {
 		return nil, err
 	}
@@ -548,14 +579,18 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback Selector
-	cache    *SessionCache
+	fallback                    Selector
+	cache                       *SessionCache
+	disableMessageHashFallback  bool
+	includeAllAvailabilityRanks bool
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
-	Fallback Selector
-	TTL      time.Duration
+	Fallback                    Selector
+	TTL                         time.Duration
+	DisableMessageHashFallback  bool
+	IncludeAllAvailabilityRanks bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -575,8 +610,10 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:                    cfg.Fallback,
+		cache:                       NewSessionCache(cfg.TTL),
+		disableMessageHashFallback:  cfg.DisableMessageHashFallback,
+		includeAllAvailabilityRanks: cfg.IncludeAllAvailabilityRanks,
 	}
 }
 
@@ -586,21 +623,21 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 //  2. X-Session-ID header
 //  3. metadata.user_id (non-Claude Code format)
 //  4. conversation_id field
-//  5. Hash-based fallback from messages
+//  5. Hash-based fallback from messages unless disabled
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	primaryID, fallbackID := extractSessionIDsWithConfig(opts.Headers, opts.OriginalRequest, opts.Metadata, !s.disableMessageHashFallback)
 	if primaryID == "" {
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithOptions(auths, provider, model, now, s.includeAllAvailabilityRanks)
 	if err != nil {
 		return nil, err
 	}
@@ -696,6 +733,10 @@ func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]a
 // primaryID: full hash including assistant response (stable after first turn)
 // fallbackID: short hash without assistant (used to inherit binding from first turn)
 func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]any) (string, string) {
+	return extractSessionIDsWithConfig(headers, payload, metadata, true)
+}
+
+func extractSessionIDsWithConfig(headers http.Header, payload []byte, metadata map[string]any, allowMessageHashFallback bool) (string, string) {
 	// 1. metadata.user_id with Claude Code session format (highest priority)
 	if len(payload) > 0 {
 		userID := gjson.GetBytes(payload, "metadata.user_id").String()
@@ -745,6 +786,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	}
 
 	// 6. Hash-based fallback from message content
+	if !allowMessageHashFallback {
+		return "", ""
+	}
 	return extractMessageHashIDs(payload)
 }
 
