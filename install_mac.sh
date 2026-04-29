@@ -11,6 +11,7 @@ SKIP_LAUNCHD="${CLI_PROXY_INSTALLER_SKIP_LAUNCHD:-0}"
 SKIP_POSTGRES_PROVISION="${CLI_PROXY_INSTALLER_SKIP_POSTGRES_PROVISION:-0}"
 SOURCE_CONFIG_OVERRIDE="${CLI_PROXY_INSTALLER_SOURCE_CONFIG:-}"
 SOURCE_STATS_OVERRIDE="${CLI_PROXY_INSTALLER_SOURCE_STATS:-}"
+BINARY_EXEC_TIMEOUT_SECONDS="${CLI_PROXY_INSTALLER_BINARY_EXEC_TIMEOUT_SECONDS:-5}"
 
 CONFIG_SOURCES=()
 AUTH_SOURCES=()
@@ -1012,6 +1013,53 @@ build_binary() {
     warn "  $build_cmd"
     return 1
   fi
+  validate_binary_exec "$output_path" || {
+    rm -f "$output_path"
+    return 1
+  }
+}
+
+validate_binary_exec() {
+  local binary_path="$1"
+  local timeout_seconds="${2:-$BINARY_EXEC_TIMEOUT_SECONDS}"
+  local stdout_path=""
+  local stderr_path=""
+  local pid=""
+  local deadline=0
+  local status=0
+
+  if [[ ! -x "$binary_path" ]]; then
+    warn "Binary validation failed: $binary_path is not executable"
+    return 1
+  fi
+  stdout_path="$(mktemp "${TMPDIR:-/tmp}/cli-proxy-binary-check.stdout.XXXXXX")"
+  stderr_path="$(mktemp "${TMPDIR:-/tmp}/cli-proxy-binary-check.stderr.XXXXXX")"
+  "$binary_path" -h >"$stdout_path" 2>"$stderr_path" &
+  pid="$!"
+  deadline=$((SECONDS + timeout_seconds))
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      kill -9 "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      rm -f "$stdout_path" "$stderr_path"
+      warn "Binary validation timed out after ${timeout_seconds}s: $binary_path"
+      return 1
+    fi
+    sleep 0.2
+  done
+  wait "$pid"
+  status="$?"
+  if (( status != 0 )); then
+    warn "Binary validation failed with exit code $status: $binary_path"
+    if [[ -s "$stderr_path" ]]; then
+      sed 's/^/  /' "$stderr_path" >&2
+    fi
+    rm -f "$stdout_path" "$stderr_path"
+    return 1
+  fi
+  rm -f "$stdout_path" "$stderr_path"
 }
 
 install_binary() {
@@ -1029,6 +1077,15 @@ install_binary() {
   fi
   mv "$staging_path" "$target_path"
   chmod +x "$target_path"
+  if ! validate_binary_exec "$target_path"; then
+    rm -f "$target_path"
+    if [[ -n "$backup_path" && -f "$backup_path" ]]; then
+      mv "$backup_path" "$target_path"
+      chmod +x "$target_path"
+      warn "Restored previous binary from $backup_path"
+    fi
+    return 1
+  fi
 }
 
 write_launchd_plist() {

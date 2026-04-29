@@ -149,6 +149,42 @@ EOF
   chmod +x "$binary_path"
 }
 
+make_fake_go_that_builds_hanging_binary() {
+  local fake_go_path="$1"
+
+  cat > "$fake_go_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "build" ]]; then
+  printf 'unexpected fake go command: %s\n' "$*" >&2
+  exit 1
+fi
+output_path=""
+while (($#)); do
+  if [[ "$1" == "-o" ]]; then
+    shift
+    output_path="${1:-}"
+    break
+  fi
+  shift
+done
+if [[ -z "$output_path" ]]; then
+  printf 'fake go build missing -o output\n' >&2
+  exit 1
+fi
+cat > "$output_path" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-h" ]]; then
+  sleep 30
+  exit 0
+fi
+printf 'broken fake cli-proxy-api\n'
+SCRIPT
+chmod +x "$output_path"
+EOF
+  chmod +x "$fake_go_path"
+}
+
 run_installer_capture() {
   local repo_root="$1"
   local answers_path="$2"
@@ -937,6 +973,63 @@ EOF
   fi
 }
 
+test_invalid_built_binary_does_not_replace_existing_target() {
+  local repo_root tmp_root home_root install_root source_auth_dir source_config empty_stats_dir
+  local fake_bin answers_path output_path existing_binary
+
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  tmp_root="$(mktemp -d)"
+  trap "cleanup_tmp_root '$tmp_root'" RETURN
+
+  home_root="$tmp_root/home"
+  install_root="$home_root/.cli-cache-proxy-test"
+  source_auth_dir="$tmp_root/source-auth"
+  source_config="$tmp_root/source-config.yaml"
+  empty_stats_dir="$tmp_root/empty-stats"
+  fake_bin="$tmp_root/fake-bin"
+  answers_path="$tmp_root/answers.txt"
+  output_path="$tmp_root/install.log"
+  existing_binary="$install_root/cli-proxy-api"
+
+  mkdir -p "$home_root" "$install_root" "$source_auth_dir" "$empty_stats_dir" "$fake_bin"
+  printf 'oauth-token\n' > "$source_auth_dir/sample-token.txt"
+  write_source_config "$source_config" "$source_auth_dir"
+  make_fake_binary "$existing_binary"
+  make_fake_go_that_builds_hanging_binary "$fake_bin/go"
+
+  write_answers \
+    "$answers_path" \
+    "$install_root" \
+    "$install_root/auth" \
+    "y" \
+    "n" \
+    "y" \
+    "y" \
+    "n"
+
+  if run_installer_capture \
+    "$repo_root" \
+    "$answers_path" \
+    "$output_path" \
+    HOME="$home_root" \
+    PATH="$fake_bin:$PATH" \
+    CLI_PROXY_INSTALLER_BINARY_EXEC_TIMEOUT_SECONDS=1 \
+    CLI_PROXY_INSTALLER_SKIP_LAUNCHD=1 \
+    CLI_PROXY_INSTALLER_SOURCE_CONFIG="$source_config" \
+    CLI_PROXY_INSTALLER_SOURCE_STATS="$empty_stats_dir" \
+    CLI_PROXY_FAKE_CONFIG_HINT="$install_root/config.yaml"; then
+    printf 'installer unexpectedly succeeded with a binary that hangs on -h\n' >&2
+    return 1
+  fi
+
+  grep -F 'uses config ${CLI_PROXY_FAKE_CONFIG_HINT:-unknown}' "$existing_binary" >/dev/null
+  grep -F "Binary validation timed out" "$output_path" >/dev/null
+  if find "$install_root" -maxdepth 1 -name 'cli-proxy-api.staging.*' | grep -q .; then
+    printf 'invalid staging binary was left behind\n' >&2
+    return 1
+  fi
+}
+
 main() {
   test_smoke_install
   test_postgres_install_writes_env_and_provisions_db
@@ -949,6 +1042,7 @@ main() {
   test_detection_uses_spec_default_fallbacks
   test_launchctl_bootout_runs_before_plist_rewrite_without_start
   test_launchctl_start_failure_is_non_fatal
+  test_invalid_built_binary_does_not_replace_existing_target
   printf 'Installer smoke test passed.\n'
 }
 
