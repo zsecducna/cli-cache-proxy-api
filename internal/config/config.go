@@ -544,12 +544,17 @@ type OpenAICompatibility struct {
 
 	// AppendReasoningEffortToModel rewrites upstream model IDs as
 	// "<model>-<reasoning_effort>" when a non-empty reasoning effort is present.
-	AppendReasoningEffortToModel bool `yaml:"append-reasoning-effort-to-model,omitempty" json:"append-reasoning-effort-to-model,omitempty"`
+	// Nil preserves the default enabled behavior; set false to disable.
+	AppendReasoningEffortToModel *bool `yaml:"append-reasoning-effort-to-model,omitempty" json:"append-reasoning-effort-to-model,omitempty"`
 
 	// AppendReasoningEffortToModelPercent limits the rewrite to the configured
 	// percentage of requests. Nil preserves the legacy "all requests" behavior
 	// whenever AppendReasoningEffortToModel is enabled.
 	AppendReasoningEffortToModelPercent *int `yaml:"append-reasoning-effort-to-model-percent,omitempty" json:"append-reasoning-effort-to-model-percent,omitempty"`
+}
+
+func (c OpenAICompatibility) AppendReasoningEffortToModelEnabled() bool {
+	return c.AppendReasoningEffortToModel == nil || *c.AppendReasoningEffortToModel
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -1351,6 +1356,11 @@ func appendPath(path []string, key string) []string {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	fullPath := strings.Join(path, ".")
+	if fullPath == "openai-compatibility.append-reasoning-effort-to-model" {
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
@@ -1360,8 +1370,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) == 0 {
 		return false
 	}
-
-	fullPath := strings.Join(path, ".")
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {

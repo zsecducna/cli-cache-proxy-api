@@ -28,11 +28,62 @@ openai-compatibility:
 	if len(cfg.OpenAICompatibility) != 1 {
 		t.Fatalf("OpenAICompatibility length = %d, want 1", len(cfg.OpenAICompatibility))
 	}
-	if !cfg.OpenAICompatibility[0].AppendReasoningEffortToModel {
-		t.Fatal("AppendReasoningEffortToModel = false, want true")
+	if !cfg.OpenAICompatibility[0].AppendReasoningEffortToModelEnabled() {
+		t.Fatal("AppendReasoningEffortToModelEnabled() = false, want true")
 	}
 	if cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent == nil || *cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent != 25 {
 		t.Fatalf("AppendReasoningEffortToModelPercent = %v, want 25", cfg.OpenAICompatibility[0].AppendReasoningEffortToModelPercent)
+	}
+}
+
+func TestLoadConfigOptional_OpenAICompatibilityAppendReasoningEffortDefaultsTrue(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+openai-compatibility:
+  - name: openrouter
+    base-url: https://openrouter.ai/api/v1
+    models:
+      - name: gpt-5.4
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+	if len(cfg.OpenAICompatibility) != 1 {
+		t.Fatalf("OpenAICompatibility length = %d, want 1", len(cfg.OpenAICompatibility))
+	}
+	if !cfg.OpenAICompatibility[0].AppendReasoningEffortToModelEnabled() {
+		t.Fatal("AppendReasoningEffortToModelEnabled() = false, want true")
+	}
+}
+
+func TestLoadConfigOptional_OpenAICompatibilityAppendReasoningEffortAllowsExplicitFalse(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+openai-compatibility:
+  - name: openrouter
+    base-url: https://openrouter.ai/api/v1
+    append-reasoning-effort-to-model: false
+    models:
+      - name: gpt-5.4
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+	if len(cfg.OpenAICompatibility) != 1 {
+		t.Fatalf("OpenAICompatibility length = %d, want 1", len(cfg.OpenAICompatibility))
+	}
+	if cfg.OpenAICompatibility[0].AppendReasoningEffortToModelEnabled() {
+		t.Fatal("AppendReasoningEffortToModelEnabled() = true, want false")
 	}
 }
 

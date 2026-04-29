@@ -532,7 +532,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	if body.Value.AppendReasoningEffortToModel != nil {
-		entry.AppendReasoningEffortToModel = *body.Value.AppendReasoningEffortToModel
+		entry.AppendReasoningEffortToModel = body.Value.AppendReasoningEffortToModel
 	}
 	if body.Value.AppendReasoningEffortToModelPercent != nil {
 		entry.AppendReasoningEffortToModelPercent = body.Value.AppendReasoningEffortToModelPercent

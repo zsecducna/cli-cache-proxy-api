@@ -11,12 +11,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestOpenAICompatExecutorBuildExecutionPlan_AppendsReasoningEffortSuffixWhenEnabled(t *testing.T) {
+func TestOpenAICompatExecutorBuildExecutionPlan_AppendsReasoningEffortSuffixByDefault(t *testing.T) {
 	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{{
-			Name:                         "openrouter",
-			BaseURL:                      "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel: true,
+			Name:    "openrouter",
+			BaseURL: "https://openrouter.ai/api/v1",
 		}},
 	})
 	auth := &cliproxyauth.Auth{
@@ -49,7 +48,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_AppendsReasoningEffortSuffixAtHu
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                                "openrouter",
 			BaseURL:                             "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel:        true,
+			AppendReasoningEffortToModel:        boolPtr(true),
 			AppendReasoningEffortToModelPercent: intPtr(100),
 		}},
 	})
@@ -73,8 +72,9 @@ func TestOpenAICompatExecutorBuildExecutionPlan_AppendsReasoningEffortSuffixAtHu
 func TestOpenAICompatExecutorBuildExecutionPlan_PreservesModelWhenToggleDisabled(t *testing.T) {
 	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{{
-			Name:    "openrouter",
-			BaseURL: "https://openrouter.ai/api/v1",
+			Name:                         "openrouter",
+			BaseURL:                      "https://openrouter.ai/api/v1",
+			AppendReasoningEffortToModel: boolPtr(false),
 		}},
 	})
 	auth := &cliproxyauth.Auth{
@@ -104,7 +104,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_PreservesModelAtZeroPercent(t *t
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                                "openrouter",
 			BaseURL:                             "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel:        true,
+			AppendReasoningEffortToModel:        boolPtr(true),
 			AppendReasoningEffortToModelPercent: intPtr(0),
 		}},
 	})
@@ -134,7 +134,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_UsesDeterministicSamplingPercent
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                                "openrouter",
 			BaseURL:                             "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel:        true,
+			AppendReasoningEffortToModel:        boolPtr(true),
 			AppendReasoningEffortToModelPercent: intPtr(percent),
 		}},
 	})
@@ -176,7 +176,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_PrefersMetadataKeyForSampling(t 
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                                "openrouter",
 			BaseURL:                             "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel:        true,
+			AppendReasoningEffortToModel:        boolPtr(true),
 			AppendReasoningEffortToModelPercent: intPtr(percent),
 		}},
 	})
@@ -224,7 +224,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_AppendsResponsesReasoningSuffixO
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                         "openrouter",
 			BaseURL:                      "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel: true,
+			AppendReasoningEffortToModel: boolPtr(true),
 		}},
 	})
 	auth := &cliproxyauth.Auth{
@@ -269,7 +269,7 @@ func TestOpenAICompatExecutorBuildExecutionPlan_NormalizesResponsesReasoningEffo
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:                         "openrouter",
 			BaseURL:                      "https://openrouter.ai/api/v1",
-			AppendReasoningEffortToModel: true,
+			AppendReasoningEffortToModel: boolPtr(true),
 		}},
 	})
 
@@ -343,5 +343,9 @@ func testOpenAICompatAuth() *cliproxyauth.Auth {
 }
 
 func intPtr(value int) *int {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
 	return &value
 }

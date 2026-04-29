@@ -680,7 +680,7 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 
 func (e *OpenAICompatExecutor) appendReasoningEffortToModelSuffix(payload []byte, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, format sdktranslator.Format, requestedModel string) []byte {
 	compat := e.resolveCompatConfig(auth)
-	if compat == nil || !compat.AppendReasoningEffortToModel || len(payload) == 0 {
+	if compat == nil || !compat.AppendReasoningEffortToModelEnabled() || len(payload) == 0 {
 		return payload
 	}
 	if !shouldAppendReasoningEffortToModel(compat, requestedModel, originalPayload, payload, metadata) {
@@ -711,7 +711,7 @@ func (e *OpenAICompatExecutor) appendReasoningEffortToModelSuffix(payload []byte
 }
 
 func shouldAppendReasoningEffortToModel(compat *config.OpenAICompatibility, requestedModel string, originalPayload []byte, translatedPayload []byte, metadata map[string]any) bool {
-	if compat == nil || !compat.AppendReasoningEffortToModel {
+	if compat == nil || !compat.AppendReasoningEffortToModelEnabled() {
 		return false
 	}
 	percent := 100
