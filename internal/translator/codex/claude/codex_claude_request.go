@@ -397,8 +397,6 @@ func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 			return true
 		}
 
-		names["web_search"] = struct{}{}
-		names[toolType] = struct{}{}
 		if name := tool.Get("name").String(); name != "" {
 			names[name] = struct{}{}
 		}
