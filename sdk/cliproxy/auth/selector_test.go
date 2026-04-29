@@ -125,6 +125,82 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_PriorityWinsBeforeQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{
+			ID:         "low-priority-rich",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 95},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		{
+			ID:         "high-priority-poorer",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Pick() auth = nil")
+	}
+	if got.ID != "high-priority-poorer" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "high-priority-poorer")
+	}
+}
+
+func TestFillFirstSelectorPick_PrefersFiveHourQuotaBeforeWeekly(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{
+			ID: "weekly-rich",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 70},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		{
+			ID: "five-hour-rich",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 80},
+					"7days": map[string]any{"remaining_percent": 10},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Pick() auth = nil")
+	}
+	if got.ID != "five-hour-rich" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "five-hour-rich")
+	}
+}
+
 func TestFillFirstSelectorPick_PrefersHighestRemainingQuota(t *testing.T) {
 	t.Parallel()
 

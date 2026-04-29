@@ -408,7 +408,7 @@ func (m *Manager) configureClaudeMessagesSelectorTTL(cfg *internalconfig.Config)
 
 func newClaudeMessagesSessionAffinitySelector(ttl time.Duration) *SessionAffinitySelector {
 	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback:                    &RichestRandomSelector{},
+		Fallback:                    &RoundRobinSelector{},
 		TTL:                         ttl,
 		DisableMessageHashFallback:  true,
 		IncludeAllAvailabilityRanks: true,

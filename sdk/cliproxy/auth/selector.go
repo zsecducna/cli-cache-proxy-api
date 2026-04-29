@@ -130,16 +130,19 @@ func authPriority(auth *Auth) int {
 }
 
 type availabilityRank struct {
-	quotaPenalty   int
-	quotaRemaining int
-	priority       int
+	quotaPenalty       int
+	priority           int
+	fiveHoursRemaining int
+	sevenDaysRemaining int
 }
 
 func authAvailabilityRank(auth *Auth, model string) availabilityRank {
+	fiveHoursRemaining, sevenDaysRemaining := authQuotaRemainingScores(auth)
 	return availabilityRank{
-		quotaPenalty:   authQuotaPenalty(auth, model),
-		quotaRemaining: authQuotaRemainingScore(auth),
-		priority:       authPriority(auth),
+		quotaPenalty:       authQuotaPenalty(auth, model),
+		priority:           authPriority(auth),
+		fiveHoursRemaining: fiveHoursRemaining,
+		sevenDaysRemaining: sevenDaysRemaining,
 	}
 }
 
@@ -147,10 +150,13 @@ func betterAvailabilityRank(left, right availabilityRank) bool {
 	if left.quotaPenalty != right.quotaPenalty {
 		return left.quotaPenalty < right.quotaPenalty
 	}
-	if left.quotaRemaining != right.quotaRemaining {
-		return left.quotaRemaining > right.quotaRemaining
+	if left.priority != right.priority {
+		return left.priority > right.priority
 	}
-	return left.priority > right.priority
+	if left.fiveHoursRemaining != right.fiveHoursRemaining {
+		return left.fiveHoursRemaining > right.fiveHoursRemaining
+	}
+	return left.sevenDaysRemaining > right.sevenDaysRemaining
 }
 
 func bestAvailabilityRank(available map[availabilityRank][]*Auth) (availabilityRank, bool) {
@@ -196,37 +202,23 @@ func availableAuthsByRank(availableByRank map[availabilityRank][]*Auth, includeA
 	return available
 }
 
-func authQuotaRemainingScore(auth *Auth) int {
+func authQuotaRemainingScores(auth *Auth) (int, int) {
 	if auth == nil || len(auth.Metadata) == 0 {
-		return 0
+		return 0, 0
 	}
 	snapshot := readQuotaAutomationSnapshot(auth.Metadata)
-	remaining, ok := lowestKnownRemainingQuota(snapshot)
-	if !ok {
-		return 0
-	}
-	if remaining < 0 {
-		remaining = 0
-	}
-	return int(math.Round(remaining * 1000))
+	return quotaRemainingScore(snapshot.fiveHoursRemainingPercent), quotaRemainingScore(snapshot.sevenDaysRemainingPercent)
 }
 
-func lowestKnownRemainingQuota(snapshot quotaAutomationSnapshot) (float64, bool) {
-	var remaining float64
-	found := false
-	for _, candidate := range []*float64{
-		snapshot.fiveHoursRemainingPercent,
-		snapshot.sevenDaysRemainingPercent,
-	} {
-		if candidate == nil {
-			continue
-		}
-		if !found || *candidate < remaining {
-			remaining = *candidate
-			found = true
-		}
+func quotaRemainingScore(remaining *float64) int {
+	if remaining == nil {
+		return 0
 	}
-	return remaining, found
+	value := *remaining
+	if value < 0 {
+		value = 0
+	}
+	return int(math.Round(value * 1000))
 }
 
 func authQuotaPenalty(auth *Auth, model string) int {
@@ -512,11 +504,12 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
-// RichestRandomSelector picks the auth with the best availability rank (lowest quota
-// penalty, highest quota remaining, highest priority) and selects randomly among auths
-// that share that top rank. This is the fallback for new /v1/messages sessions: each
-// new session gets the richest available auth, with ties broken by random selection so
-// load spreads across equally-quota'd OAuth files rather than concentrating on one.
+// RichestRandomSelector picks the auth with the best availability rank (usable
+// quota state, highest priority, highest 5-hour quota, then highest weekly quota)
+// and selects randomly among auths that share that top rank. This is the fallback
+// for new /v1/messages sessions: each new session gets the richest available auth,
+// with ties broken by random selection so load spreads across equally ranked OAuth
+// files rather than concentrating on one.
 type RichestRandomSelector struct{}
 
 // Pick selects the richest available auth, random among equals at the top rank.

@@ -187,6 +187,86 @@ func TestSchedulerPick_PrefersHighestRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_PriorityWinsBeforeQuota(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:         "low-priority-rich",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 95},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		&Auth{
+			ID:         "high-priority-poorer",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "high-priority-poorer" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "high-priority-poorer")
+	}
+}
+
+func TestSchedulerPick_PrefersFiveHourQuotaBeforeWeekly(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "weekly-rich",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 70},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		&Auth{
+			ID:       "five-hour-rich",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 80},
+					"7days": map[string]any{"remaining_percent": 10},
+				},
+			},
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "five-hour-rich" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "five-hour-rich")
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
@@ -307,7 +387,7 @@ func TestManagerPickNextMixed_ClaudeMessagesUsesRoundRobinSessionAffinity(t *tes
 	secondSession := "22222222-2222-2222-2222-222222222222"
 	thirdSession := "33333333-3333-3333-3333-333333333333"
 
-	// New sessions pick randomly among equal-quota auths; only stickiness is guaranteed.
+	// New sessions round-robin among equal-ranked auths; repeated sessions stay sticky.
 	firstAuth := pick(firstSession)
 	if firstAuth == "" {
 		t.Fatal("first session auth = empty")
@@ -497,6 +577,133 @@ func TestManagerPickNextMixed_ClaudeMessagesSessionAffinitySticksAcrossQuotaRank
 	}
 }
 
+func TestManagerPickNext_OpenAISessionAffinityPriorityWinsBeforeQuota(t *testing.T) {
+	model := "gpt-session-affinity-priority-test"
+	registerSchedulerModels(t, "codex", model, "low-priority-rich", "high-priority-poorer")
+
+	manager := NewManager(nil, NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	}), nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{
+			ID:         "low-priority-rich",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 95},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		{
+			ID:         "high-priority-poorer",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_99999999-9999-9999-9999-999999999999"},"input":"hi"}`),
+	}
+	first, _, errPick := manager.pickNext(context.Background(), "codex", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNext() error = %v", errPick)
+	}
+	if first == nil {
+		t.Fatal("first pickNext() auth = nil")
+	}
+	if first.ID != "high-priority-poorer" {
+		t.Fatalf("first pickNext() auth.ID = %q, want %q", first.ID, "high-priority-poorer")
+	}
+	second, _, errPick := manager.pickNext(context.Background(), "codex", model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNext() error = %v", errPick)
+	}
+	if second == nil {
+		t.Fatal("second pickNext() auth = nil")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second pickNext() auth.ID = %q, want sticky %q", second.ID, first.ID)
+	}
+}
+
+func TestManagerPickNextMixed_ClaudeMessagesPriorityWinsBeforeQuota(t *testing.T) {
+	model := "claude-session-affinity-priority-test"
+	providers := []string{"anthropic"}
+	registerSchedulerModels(t, "anthropic", model, "low-priority-rich", "high-priority-poorer")
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["anthropic"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{
+			ID:         "low-priority-rich",
+			Provider:   "anthropic",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 95},
+					"7days": map[string]any{"remaining_percent": 95},
+				},
+			},
+		},
+		{
+			ID:         "high-priority-poorer",
+			Provider:   "anthropic",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_hash_account__session_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},"messages":[{"role":"user","content":"hi"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: cliproxyexecutor.ClaudeMessagesRouteMetadataValue,
+		},
+	}
+	first, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("first pickNextMixed() error = %v", errPick)
+	}
+	if first == nil {
+		t.Fatal("first pickNextMixed() auth = nil")
+	}
+	if first.ID != "high-priority-poorer" {
+		t.Fatalf("first pickNextMixed() auth.ID = %q, want %q", first.ID, "high-priority-poorer")
+	}
+	second, _, _, errPick := manager.pickNextMixed(context.Background(), providers, model, opts, nil)
+	if errPick != nil {
+		t.Fatalf("second pickNextMixed() error = %v", errPick)
+	}
+	if second == nil {
+		t.Fatal("second pickNextMixed() auth = nil")
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second pickNextMixed() auth.ID = %q, want sticky %q", second.ID, first.ID)
+	}
+}
+
 func TestManagerPickNextMixed_PrefixedClaudeMessagesUsesRoundRobinSessionAffinity(t *testing.T) {
 	model := "teamA/claude-session-affinity-round-robin-test"
 	providers := []string{"anthropic", "antigravity", "vertex"}
@@ -536,7 +743,7 @@ func TestManagerPickNextMixed_PrefixedClaudeMessagesUsesRoundRobinSessionAffinit
 
 	firstSession := "44444444-4444-4444-4444-444444444444"
 	secondSession := "55555555-5555-5555-5555-555555555555"
-	// New sessions pick randomly among equal-quota auths; only stickiness is guaranteed.
+	// New sessions round-robin among equal-ranked auths; repeated sessions stay sticky.
 	firstAuth := pick(firstSession)
 	if firstAuth == "" {
 		t.Fatal("first session auth = empty")
