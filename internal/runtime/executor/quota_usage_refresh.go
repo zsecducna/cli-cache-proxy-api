@@ -128,6 +128,7 @@ func (e *AntigravityExecutor) RefreshQuotaUsage(ctx context.Context, auth *clipr
 
 	updated := withQuotaUsageMetadata(auth, "antigravity", httpResp.StatusCode, bodyBytes)
 	applyAntigravityCreditsMetadata(updated, bodyBytes)
+	applyAntigravityModelsQuota(ctx, e.cfg, updated)
 	return updated, nil
 }
 
@@ -251,4 +252,110 @@ func providerFromAuth(auth *cliproxyauth.Auth) string {
 
 func logQuotaUsageCloseError(provider string, err error) {
 	log.Errorf("%s quota/usage refresh: close response body error: %v", provider, err)
+}
+
+func applyAntigravityModelsQuota(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	token := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token"))
+	if token == "" {
+		return
+	}
+
+	baseURL := strings.TrimSuffix(buildBaseURL(auth), "/")
+	endpointURL := baseURL + "/v1internal:fetchAvailableModels"
+
+	projectID := strings.TrimSpace(metaStringValue(auth.Metadata, "project_id"))
+	var payload []byte
+	if projectID != "" {
+		payload, _ = json.Marshal(map[string]string{"project": projectID})
+	} else {
+		payload = []byte(`{}`)
+	}
+
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(payload))
+	if errReq != nil {
+		log.Debugf("antigravity executor: create fetchAvailableModels request error: %v", errReq)
+		return
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", resolveLoadCodeAssistUserAgent(auth))
+	httpReq.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
+
+	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		log.Debugf("antigravity executor: fetchAvailableModels request error: %v", errDo)
+		return
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close fetchAvailableModels response body error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		log.Debugf("antigravity executor: read fetchAvailableModels response error: %v", errRead)
+		return
+	}
+	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		log.Debugf("antigravity executor: fetchAvailableModels returned status %d", httpResp.StatusCode)
+		return
+	}
+
+	models := gjson.GetBytes(bodyBytes, "models")
+	if !models.Exists() || !models.IsObject() {
+		return
+	}
+
+	modelsQuota := make(map[string]any)
+	minFraction := 1.0
+	hasQuota := false
+
+	models.ForEach(func(key, value gjson.Result) bool {
+		modelName := key.String()
+		qi := value.Get("quotaInfo")
+		if !qi.Exists() {
+			return true
+		}
+		rf := qi.Get("remainingFraction")
+		if !rf.Exists() {
+			return true
+		}
+		remainingFraction := rf.Float()
+		resetTime := qi.Get("resetTime").String()
+
+		modelsQuota[modelName] = map[string]any{
+			"remainingFraction": remainingFraction,
+			"resetTime":         resetTime,
+			"displayName":       value.Get("displayName").String(),
+		}
+
+		hasQuota = true
+		if remainingFraction < minFraction {
+			minFraction = remainingFraction
+		}
+		return true
+	})
+
+	if !hasQuota {
+		return
+	}
+
+	auth.Metadata["antigravity_models_quota"] = modelsQuota
+	auth.Metadata["antigravity_models_quota_checked_at"] = time.Now().Format(time.RFC3339)
+	auth.Metadata["antigravity_models_quota_min_remaining"] = minFraction
+
+	auth.Metadata["five_hours"] = map[string]any{
+		"remainingPercent": minFraction * 100,
+	}
+	auth.Metadata["seven_days"] = map[string]any{
+		"remainingPercent": minFraction * 100,
+	}
 }

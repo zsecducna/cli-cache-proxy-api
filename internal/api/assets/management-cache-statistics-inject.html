@@ -68,6 +68,10 @@
   let openAICompatProvidersLoading = false;
   let openAICompatProvidersError = '';
   const openAICompatSavingNames = new Set();
+  let antigravityCreditCache = new Map();
+  let antigravityCreditFetchInFlight = false;
+  let antigravityCreditLastFetchAt = 0;
+  const ANTIGRAVITY_CREDIT_CACHE_TTL = 15000;
 
   function installStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -441,6 +445,154 @@
         .cliproxy-enhancer__config-toggle {
           white-space: normal;
         }
+      }
+      .cliproxy-credit-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.4;
+        margin-top: 4px;
+      }
+      .cliproxy-credit-badge--unlimited {
+        background: #e8f5e9;
+        color: #2e7d32;
+        border: 1px solid #a5d6a7;
+      }
+      .cliproxy-credit-badge--available {
+        background: #e3f2fd;
+        color: #1565c0;
+        border: 1px solid #90caf9;
+      }
+      .cliproxy-credit-badge--exhausted {
+        background: #ffebee;
+        color: #c62828;
+        border: 1px solid #ef9a9a;
+      }
+      .cliproxy-credit-badge--unknown {
+        background: #f5f5f5;
+        color: #757575;
+        border: 1px solid #e0e0e0;
+      }
+      .cliproxy-credit-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        padding: 2px 0;
+      }
+      @media (prefers-color-scheme: dark) {
+        .cliproxy-credit-badge--unlimited {
+          background: #1b5e20;
+          color: #a5d6a7;
+          border-color: #388e3c;
+        }
+        .cliproxy-credit-badge--available {
+          background: #0d47a1;
+          color: #90caf9;
+          border-color: #1565c0;
+        }
+        .cliproxy-credit-badge--exhausted {
+          background: #b71c1c;
+          color: #ef9a9a;
+          border-color: #c62828;
+        }
+        .cliproxy-credit-badge--unknown {
+          background: #424242;
+          color: #bdbdbd;
+          border-color: #616161;
+        }
+      }
+      .cliproxy-quota-summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.4;
+        margin-top: 4px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .cliproxy-quota-summary--good {
+        background: #e8f5e9;
+        color: #2e7d32;
+        border: 1px solid #a5d6a7;
+      }
+      .cliproxy-quota-summary--warn {
+        background: #fff3e0;
+        color: #e65100;
+        border: 1px solid #ffcc80;
+      }
+      .cliproxy-quota-summary--low {
+        background: #ffebee;
+        color: #c62828;
+        border: 1px solid #ef9a9a;
+      }
+      .cliproxy-quota-models {
+        display: none;
+        flex-direction: column;
+        gap: 3px;
+        padding: 6px 0 2px;
+        width: 100%;
+      }
+      .cliproxy-quota-models--open {
+        display: flex;
+      }
+      .cliproxy-quota-model-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+      }
+      .cliproxy-quota-model-label {
+        min-width: 110px;
+        max-width: 170px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #555;
+      }
+      .cliproxy-quota-bar {
+        flex: 1;
+        height: 7px;
+        background: #e0e0e0;
+        border-radius: 4px;
+        overflow: hidden;
+        min-width: 50px;
+      }
+      .cliproxy-quota-bar-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s;
+      }
+      .cliproxy-quota-bar-fill--good { background: #4caf50; }
+      .cliproxy-quota-bar-fill--warn { background: #ff9800; }
+      .cliproxy-quota-bar-fill--low { background: #f44336; }
+      .cliproxy-quota-model-pct {
+        min-width: 30px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #555;
+      }
+      .cliproxy-quota-reset {
+        font-size: 10px;
+        color: #999;
+        white-space: nowrap;
+      }
+      @media (prefers-color-scheme: dark) {
+        .cliproxy-quota-summary--good { background: #1b5e20; color: #a5d6a7; border-color: #388e3c; }
+        .cliproxy-quota-summary--warn { background: #e65100; color: #ffcc80; border-color: #f57c00; }
+        .cliproxy-quota-summary--low { background: #b71c1c; color: #ef9a9a; border-color: #c62828; }
+        .cliproxy-quota-model-label { color: #bbb; }
+        .cliproxy-quota-bar { background: #424242; }
+        .cliproxy-quota-model-pct { color: #bbb; }
+        .cliproxy-quota-reset { color: #888; }
       }
     `;
     document.head.appendChild(style);
@@ -2601,6 +2753,139 @@
     }, true);
   }
 
+
+  async function fetchAntigravityCredits() {
+    if (antigravityCreditFetchInFlight) return;
+    const now = Date.now();
+    if (now - antigravityCreditLastFetchAt < ANTIGRAVITY_CREDIT_CACHE_TTL && antigravityCreditCache.size > 0) return;
+    antigravityCreditFetchInFlight = true;
+    try {
+      const ready = await ensureManagementAuth();
+      if (!ready || !nativeFetch || !managementAuthorization) return;
+      const listResp = await nativeFetch('/v0/management/auth-files', {
+        headers: { Authorization: managementAuthorization },
+      });
+      if (!listResp.ok) return;
+      const listData = await listResp.json();
+      const files = (listData.files || []).filter(f => f.name && f.name.startsWith('antigravity-'));
+      if (!files.length) return;
+      const fetches = files.map(async (f) => {
+        try {
+          const dlResp = await nativeFetch('/v0/management/auth-files/download?name=' + encodeURIComponent(f.name), {
+            headers: { Authorization: managementAuthorization },
+          });
+          if (!dlResp.ok) return;
+          const dlData = await dlResp.json();
+          const quotaRaw = dlData.quota_usage;
+          const quotaUsage = (() => {
+            if (!quotaRaw) return {};
+            if (typeof quotaRaw === 'string') { try { return JSON.parse(quotaRaw); } catch { return {}; } }
+            return quotaRaw;
+          })();
+          const tierName = (quotaUsage.paidTier && quotaUsage.paidTier.name) || dlData.antigravity_paid_tier_id || '';
+          const userCredits = quotaUsage.userCredits || {};
+          const creditEntries = Object.values(userCredits);
+          const hasCredits = creditEntries.length > 0;
+          const creditAmount = hasCredits ? creditEntries.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0) : 0;
+          const minCredit = hasCredits ? creditEntries.reduce((s, c) => s + (parseFloat(c.minAmountForUsage) || 0), 0) : 0;
+          const available = !hasCredits || creditAmount > minCredit;
+          const creditType = hasCredits ? (creditEntries[0].creditType || '') : '';
+          const modelsQuota = dlData.antigravity_models_quota || null;
+          const modelsQuotaMinRemaining = typeof dlData.antigravity_models_quota_min_remaining === 'number' ? dlData.antigravity_models_quota_min_remaining : null;
+          const modelsQuotaCheckedAt = dlData.antigravity_models_quota_checked_at || '';
+          antigravityCreditCache.set(f.name, { tierName, creditAmount, minCredit, available, creditType, hasCredits, modelsQuota, modelsQuotaMinRemaining, modelsQuotaCheckedAt });
+        } catch {}
+      });
+      await Promise.all(fetches);
+      antigravityCreditLastFetchAt = Date.now();
+    } finally {
+      antigravityCreditFetchInFlight = false;
+    }
+  }
+
+  function buildCreditBadge(credit) {
+    if (!credit) return '<span class="cliproxy-credit-badge cliproxy-credit-badge--unknown">Unknown</span>';
+    const tier = escapeHTML(credit.tierName || 'Unknown Tier');
+    if (!credit.hasCredits) {
+      return '<span class="cliproxy-credit-badge cliproxy-credit-badge--unlimited">' + tier + ' &middot; Unlimited</span>';
+    }
+    const amt = credit.creditAmount.toFixed(2);
+    const pct = credit.minCredit > 0 ? Math.round((credit.creditAmount / (credit.creditAmount + credit.minCredit)) * 100) : (credit.creditAmount > 0 ? 100 : 0);
+    const cls = credit.available ? 'cliproxy-credit-badge--available' : 'cliproxy-credit-badge--exhausted';
+    const label = credit.available ? 'Available' : 'Exhausted';
+    return '<span class="cliproxy-credit-badge ' + cls + '">' + tier + ' &middot; Credits: ' + amt + ' (' + pct + '%) &middot; ' + label + '</span>';
+  }
+
+  function buildQuotaSummaryBadge(credit) {
+    if (!credit || !credit.modelsQuota || credit.modelsQuotaMinRemaining === null) return '';
+    const pct = Math.round(credit.modelsQuotaMinRemaining * 100);
+    const cls = pct > 50 ? 'good' : pct > 20 ? 'warn' : 'low';
+    return '<span class="cliproxy-quota-summary cliproxy-quota-summary--' + cls + '" onclick="var m=this.parentElement.querySelector(\'.cliproxy-quota-models\');if(m)m.classList.toggle(\'cliproxy-quota-models--open\')" title="Click for per-model breakdown">Quota: ' + pct + '%</span>';
+  }
+
+  function formatQuotaResetTime(isoStr) {
+    try {
+      var d = new Date(isoStr);
+      var now = new Date();
+      var diff = d - now;
+      if (diff <= 0) return 'reset';
+      if (diff < 3600000) return Math.ceil(diff / 60000) + 'm';
+      if (diff < 86400000) return Math.round(diff / 3600000) + 'h';
+      return Math.round(diff / 86400000) + 'd';
+    } catch (e) { return ''; }
+  }
+
+  function buildModelQuotaSection(credit) {
+    if (!credit || !credit.modelsQuota) return '';
+    var entries = Object.entries(credit.modelsQuota);
+    entries.sort(function(a, b) { return (a[1].remainingFraction || 0) - (b[1].remainingFraction || 0); });
+    if (!entries.length) return '';
+    var html = '<div class="cliproxy-quota-models">';
+    for (var i = 0; i < entries.length; i++) {
+      var modelId = entries[i][0];
+      var info = entries[i][1];
+      var pct = Math.round((info.remainingFraction || 0) * 100);
+      var cls = pct > 50 ? 'good' : pct > 20 ? 'warn' : 'low';
+      var label = escapeHTML(info.displayName || modelId);
+      var resetStr = info.resetTime ? formatQuotaResetTime(info.resetTime) : '';
+      html += '<div class="cliproxy-quota-model-row">'
+        + '<span class="cliproxy-quota-model-label" title="' + escapeHTML(modelId) + '">' + label + '</span>'
+        + '<div class="cliproxy-quota-bar"><div class="cliproxy-quota-bar-fill cliproxy-quota-bar-fill--' + cls + '" style="width:' + pct + '%"></div></div>'
+        + '<span class="cliproxy-quota-model-pct">' + pct + '%</span>'
+        + (resetStr ? '<span class="cliproxy-quota-reset">' + escapeHTML(resetStr) + '</span>' : '')
+        + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function injectAntigravityCreditBadges(container) {
+    if (antigravityCreditCache.size === 0) return;
+    const cards = container.querySelectorAll('.card');
+    let agCard = null;
+    cards.forEach(card => {
+      const text = card.textContent || '';
+      if (text.includes('Antigravity Quota')) agCard = card;
+    });
+    if (!agCard) return;
+    const allDivs = agCard.querySelectorAll('div');
+    allDivs.forEach(div => {
+      const text = div.textContent || '';
+      if (!text.includes('antigravity-') || !text.includes('.json')) return;
+      for (const [key, credit] of antigravityCreditCache) {
+        if (text.includes(key)) {
+          if (div.parentElement && !div.parentElement.querySelector('.cliproxy-credit-row')) {
+            const row = document.createElement('div');
+            row.className = 'cliproxy-credit-row';
+            row.innerHTML = buildCreditBadge(credit) + buildQuotaSummaryBadge(credit) + buildModelQuotaSection(credit);
+            div.parentElement.appendChild(row);
+          }
+          break;
+        }
+      }
+    });
+  }
+
   async function refreshQuotaPage(background) {
     if (quotaRefreshInFlight || !isQuotaPageReady()) return;
     quotaRefreshInFlight = true;
@@ -2615,6 +2900,10 @@
         const mode = quotaModes.get(context.key) || 'paged';
         applyQuotaMode(context, mode, { resetPage: false });
       });
+      fetchAntigravityCredits().then(() => {
+        const c = getPageContainer();
+        if (c) injectAntigravityCreditBadges(c);
+      }).catch(() => {});
     } finally {
       quotaRefreshInFlight = false;
     }
