@@ -71,6 +71,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		setWebsocketTimelineBody(c, wsTimelineLog.String())
+		closeCode := websocket.CloseNormalClosure
+		if wsTerminateErr != nil {
+			closeCode = websocket.CloseInternalServerErr
+		}
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(closeCode, ""),
+			time.Now().Add(2*time.Second),
+		)
 		if errClose := conn.Close(); errClose != nil {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
 		}
