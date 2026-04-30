@@ -544,18 +544,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 
 		var param any
-		var wsBootstrapBuf []cliproxyexecutor.StreamChunk
-		wsBootstrapDone := false
-		flushBootstrap := func() bool {
-			for _, buf := range wsBootstrapBuf {
-				if !send(buf) {
-					return false
-				}
-			}
-			wsBootstrapBuf = nil
-			wsBootstrapDone = true
-			return true
-		}
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -620,24 +608,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			line := encodeCodexWebsocketAsSSE(payload)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
-			if !wsBootstrapDone {
-				for i := range chunks {
-					wsBootstrapBuf = append(wsBootstrapBuf, cliproxyexecutor.StreamChunk{Payload: chunks[i]})
-				}
-				if strings.Contains(eventType, ".delta") || eventType == "response.completed" || eventType == "response.done" {
-					if !flushBootstrap() {
-						terminateReason = "context_done"
-						terminateErr = ctx.Err()
-						return
-					}
-				}
-			} else {
-				for i := range chunks {
-					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-						terminateReason = "context_done"
-						terminateErr = ctx.Err()
-						return
-					}
+			for i := range chunks {
+				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					terminateReason = "context_done"
+					terminateErr = ctx.Err()
+					return
 				}
 			}
 			if eventType == "response.completed" || eventType == "response.done" {
