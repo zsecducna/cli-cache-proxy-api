@@ -22,6 +22,10 @@ const IdempotencyKeyMetadataKey = "idempotency_key"
 // RequestIDMetadataKey stores the request correlation identifier in Options.Metadata.
 const RequestIDMetadataKey = "request_id"
 
+// RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
+// It is optional and may be absent for non-HTTP executions.
+const RequestPathMetadataKey = "request_path"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 

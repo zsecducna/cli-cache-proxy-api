@@ -343,6 +343,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
 	originalPayload := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = opts.OriginalRequest
@@ -359,7 +360,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	if opts.Alt == "responses/compact" {
 		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, originalPayload, stream)
 		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, req.Payload, stream)
-		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel, requestPath)
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
@@ -375,7 +376,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	}
 
 	if plan.routeClass == openAICompatClaudeViaGPTRouteClass && from == sdktranslator.FormatClaude {
-		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, originalPayload, opts.Metadata, auth, stream, plan)
+		return e.buildClaudeViaGPTExecutionPlan(baseModel, from, req, requestedModel, requestPath, originalPayload, opts.Metadata, auth, stream, plan)
 	}
 
 	// When the inbound request is already in OpenAI Responses format, forward
@@ -384,7 +385,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	if from == sdktranslator.FormatOpenAIResponse {
 		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, originalPayload, stream)
 		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAIResponse, baseModel, req.Payload, stream)
-		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel, requestPath)
 		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAIResponse.String(), e.Identifier())
 		if err != nil {
 			return openAICompatExecutionPlan{}, err
@@ -399,7 +400,7 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 
 	originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, originalPayload, stream)
 	translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, req.Payload, stream)
-	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel, requestPath)
 	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAI.String(), e.Identifier())
 	if err != nil {
 		return openAICompatExecutionPlan{}, err
@@ -409,10 +410,10 @@ func (e *OpenAICompatExecutor) buildExecutionPlan(req cliproxyexecutor.Request, 
 	return plan, nil
 }
 
-func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, error) {
+func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, requestPath string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, error) {
 	caps := e.claudeViaGPTCapabilities(auth)
 
-	responsePlan, responseCompatErr, responseErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceResponses, plan)
+	responsePlan, responseCompatErr, responseErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, requestPath, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceResponses, plan)
 	if responseErr != nil {
 		return openAICompatExecutionPlan{}, responseErr
 	}
@@ -420,7 +421,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, 
 		return responsePlan, nil
 	}
 
-	chatPlan, chatCompatErr, chatErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceChatCompletions, plan)
+	chatPlan, chatCompatErr, chatErr := e.buildClaudeViaGPTSurfacePlan(baseModel, from, req, requestedModel, requestPath, originalPayload, metadata, auth, stream, caps, openaiclaude.BackendSurfaceChatCompletions, plan)
 	if chatErr != nil {
 		return openAICompatExecutionPlan{}, chatErr
 	}
@@ -434,7 +435,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTExecutionPlan(baseModel string, 
 	return openAICompatExecutionPlan{}, compatibilityStatusErr(responseCompatErr)
 }
 
-func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, caps openaiclaude.BackendCapabilities, surface openaiclaude.BackendSurface, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, *openaiclaude.CompatibilityError, error) {
+func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, from sdktranslator.Format, req cliproxyexecutor.Request, requestedModel string, requestPath string, originalPayload []byte, metadata map[string]any, auth *cliproxyauth.Auth, stream bool, caps openaiclaude.BackendCapabilities, surface openaiclaude.BackendSurface, plan openAICompatExecutionPlan) (openAICompatExecutionPlan, *openaiclaude.CompatibilityError, error) {
 	validatedOriginal, compatErr := openaiclaude.ValidateClaudeRequestForSurface(originalPayload, caps, surface)
 	if compatErr != nil {
 		if typed, ok := compatErr.(*openaiclaude.CompatibilityError); ok {
@@ -464,7 +465,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, fr
 		chatPayload := openaiclaude.ConvertClaudeRequestToOpenAIWithTools(baseModel, validatedPayload, stream)
 		originalTranslated := responsefmt.LiftOpenAIChatCompletionsRequestToOpenAIResponses(baseModel, chatOriginal)
 		translated := responsefmt.LiftOpenAIChatCompletionsRequestToOpenAIResponses(baseModel, chatPayload)
-		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAIResponse.String(), "", translated, originalTranslated, requestedModel, requestPath)
 		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAIResponse.String(), e.Identifier())
 		if err != nil {
 			return openAICompatExecutionPlan{}, nil, err
@@ -478,7 +479,7 @@ func (e *OpenAICompatExecutor) buildClaudeViaGPTSurfacePlan(baseModel string, fr
 	case openaiclaude.BackendSurfaceChatCompletions:
 		originalTranslated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, validatedOriginal, stream)
 		translated := sdktranslator.TranslateRequest(from, sdktranslator.FormatOpenAI, baseModel, validatedPayload, stream)
-		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel)
+		translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, sdktranslator.FormatOpenAI.String(), "", translated, originalTranslated, requestedModel, requestPath)
 		translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), sdktranslator.FormatOpenAI.String(), e.Identifier())
 		if err != nil {
 			return openAICompatExecutionPlan{}, nil, err
