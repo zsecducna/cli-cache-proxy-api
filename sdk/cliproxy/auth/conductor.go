@@ -76,7 +76,7 @@ const (
 	// burn CPU at idle.
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
+	quotaBackoffMax           = 30 * time.Second
 	quotaUsageRefreshInterval = 5 * time.Minute
 )
 
@@ -2804,56 +2804,8 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
-func shouldStopMixedRoutingOnError(auth *Auth, provider string, err error) bool {
-	if !isRequestInvalidError(err) {
-		return false
-	}
-	return !shouldFallbackAfterThirdPartyInvalidRequest(auth, provider, err)
-}
-
-func shouldFallbackAfterThirdPartyInvalidRequest(auth *Auth, provider string, err error) bool {
-	if auth == nil || err == nil {
-		return false
-	}
-	if statusCodeFromError(err) != http.StatusBadRequest {
-		return false
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "invalid_request_error") {
-		return false
-	}
-	return isThirdPartyAIProvider(auth, provider)
-}
-
-func isThirdPartyAIProvider(auth *Auth, provider string) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Attributes != nil {
-		if strings.TrimSpace(auth.Attributes["compat_name"]) != "" || strings.TrimSpace(auth.Attributes["provider_key"]) != "" {
-			return true
-		}
-	}
-	providerKey := strings.TrimSpace(strings.ToLower(provider))
-	authProvider := strings.TrimSpace(strings.ToLower(auth.Provider))
-	switch {
-	case providerKey == "openai-compatibility", authProvider == "openai-compatibility":
-		return true
-	case providerKey != "" && !isBuiltInProvider(providerKey):
-		return true
-	case authProvider != "" && !isBuiltInProvider(authProvider):
-		return true
-	default:
-		return false
-	}
-}
-
-func isBuiltInProvider(provider string) bool {
-	switch strings.TrimSpace(strings.ToLower(provider)) {
-	case "antigravity", "aistudio", "claude", "codex", "gemini", "gemini-cli", "iflow", "kimi", "openai", "qwen", "vertex":
-		return true
-	default:
-		return false
-	}
+func shouldStopMixedRoutingOnError(_ *Auth, _ string, _ error) bool {
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

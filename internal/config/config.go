@@ -689,6 +689,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.ErrorLogsMaxFiles = 10
 	}
 
+	if cfg.RequestRetry <= 0 {
+		cfg.RequestRetry = 3
+	}
+	if cfg.MaxRetryInterval <= 0 {
+		cfg.MaxRetryInterval = 30
+	}
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
