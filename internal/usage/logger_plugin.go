@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -646,21 +645,8 @@ func cloneStringInt64Map(source map[string]int64) map[string]int64 {
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-			path := ginCtx.FullPath()
-			if path == "" && ginCtx.Request != nil {
-				path = ginCtx.Request.URL.Path
-			}
-			method := ""
-			if ginCtx.Request != nil {
-				method = ginCtx.Request.Method
-			}
-			if path != "" {
-				if method != "" {
-					return method + " " + path
-				}
-				return path
-			}
+		if endpoint := strings.TrimSpace(logging.GetEndpoint(ctx)); endpoint != "" {
+			return endpoint
 		}
 	}
 	if record.Provider != "" {
@@ -670,20 +656,7 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 }
 
 func resolveSuccess(ctx context.Context) bool {
-	if ctx == nil {
-		return true
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil {
-		return true
-	}
-	if logging.WasRequestCanceled(ginCtx) {
-		return true
-	}
-	if ginCtx.Request != nil && ginCtx.Request.Context() != nil && ginCtx.Request.Context().Err() == context.Canceled {
-		return true
-	}
-	status := ginCtx.Writer.Status()
+	status := logging.GetResponseStatus(ctx)
 	if status == 0 {
 		return true
 	}
