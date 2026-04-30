@@ -396,7 +396,7 @@ func mapCodexStopReasonToClaude(stopReason string, hasToolCall bool) string {
 	switch stopReason {
 	case "", "stop", "completed":
 		return "end_turn"
-	case "max_tokens", "max_output_tokens":
+	case "length", "max_tokens", "max_output_tokens":
 		return "max_tokens"
 	case "tool_use", "tool_calls", "function_call":
 		return "tool_use"
@@ -438,23 +438,6 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	}
 
 	return inputTokens, outputTokens, cachedTokens
-}
-
-func mapResponsesStopReasonToClaude(stopReason string, hasToolCall bool) string {
-	if hasToolCall {
-		return "tool_use"
-	}
-
-	switch strings.TrimSpace(stopReason) {
-	case "tool_use", "tool_calls", "function_call":
-		return "tool_use"
-	case "length", "max_tokens":
-		return "max_tokens"
-	case "stop", "end_turn", "":
-		return "end_turn"
-	default:
-		return "end_turn"
-	}
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

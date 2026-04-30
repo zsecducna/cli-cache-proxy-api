@@ -80,12 +80,14 @@ type CacheStatisticsModelSummary struct {
 	LongContextInputTokens  int64   `json:"long_context_input_tokens,omitempty"`
 	LongContextCachedTokens int64   `json:"long_context_cached_tokens,omitempty"`
 	LongContextOutputTokens int64   `json:"long_context_output_tokens,omitempty"`
-	OutputTokens            int64   `json:"output_tokens"`
-	ReasoningTokens         int64   `json:"reasoning_tokens"`
-	CachedTokens            int64   `json:"cached_tokens"`
-	TotalTokens             int64   `json:"total_tokens"`
-	CacheRatio              float64 `json:"cache_ratio"`
-	AvgLatencyMs            float64 `json:"avg_latency_ms"`
+	OutputTokens                    int64   `json:"output_tokens"`
+	ReasoningTokens                 int64   `json:"reasoning_tokens"`
+	CachedTokens                    int64   `json:"cached_tokens"`
+	TotalTokens                     int64   `json:"total_tokens"`
+	CacheRatio                      float64 `json:"cache_ratio"`
+	AvgLatencyMs                    float64 `json:"avg_latency_ms"`
+	AnthropicCacheWrite5mTokens     int64   `json:"anthropic_cache_write_5m_tokens,omitempty"`
+	AnthropicCacheWrite1hTokens     int64   `json:"anthropic_cache_write_1h_tokens,omitempty"`
 }
 
 type CacheStatisticsDaySummary struct {
@@ -914,7 +916,9 @@ SELECT
     COALESCE(SUM(reasoning_tokens), 0),
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
-    COALESCE(AVG(latency_ms), 0)
+    COALESCE(AVG(latency_ms), 0),
+    COALESCE(SUM(CASE WHEN anthropic_cache_ttl IN ('', '5m') AND anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN anthropic_cache_ttl = '1h' THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
@@ -943,6 +947,8 @@ LIMIT ` + s.bind(len(args)+1)
 			&item.CachedTokens,
 			&item.TotalTokens,
 			&item.AvgLatencyMs,
+			&item.AnthropicCacheWrite5mTokens,
+			&item.AnthropicCacheWrite1hTokens,
 		); err != nil {
 			return nil, fmt.Errorf("cache statistics store: scan model summary: %w", err)
 		}

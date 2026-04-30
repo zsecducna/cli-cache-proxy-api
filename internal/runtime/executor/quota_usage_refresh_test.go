@@ -102,7 +102,10 @@ func TestAntigravityRefreshQuotaUsageCallsLoadCodeAssist(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", quotaUsageRoundTripper(func(req *http.Request) (*http.Response, error) {
-		if got := req.URL.String(); got != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if strings.Contains(req.URL.String(), "fetchAvailableModels") {
+			return quotaUsageJSONResponse(`{"models":{}}`), nil
+		}
+		if got := req.URL.String(); got != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("url = %s, want loadCodeAssist", got)
 		}
 		if got := req.Method; got != http.MethodPost {

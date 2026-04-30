@@ -551,10 +551,18 @@ func SetAnthropicCacheObservability(ctx context.Context, value any) {
 			obs.CacheReadInputTokens = typed.CacheReadInputTokens
 		}
 	case []byte:
-		if creation := gjson.GetBytes(typed, "usage.cache_creation_input_tokens"); creation.Exists() {
+		payload := jsonPayload(typed)
+		if len(payload) == 0 {
+			break
+		}
+		if creation := gjson.GetBytes(payload, "usage.cache_creation_input_tokens"); creation.Exists() {
+			obs.CacheCreationInputTokens = creation.Int()
+		} else if creation := gjson.GetBytes(payload, "message.usage.cache_creation_input_tokens"); creation.Exists() {
 			obs.CacheCreationInputTokens = creation.Int()
 		}
-		if read := gjson.GetBytes(typed, "usage.cache_read_input_tokens"); read.Exists() {
+		if read := gjson.GetBytes(payload, "usage.cache_read_input_tokens"); read.Exists() {
+			obs.CacheReadInputTokens = read.Int()
+		} else if read := gjson.GetBytes(payload, "message.usage.cache_read_input_tokens"); read.Exists() {
 			obs.CacheReadInputTokens = read.Int()
 		}
 	}

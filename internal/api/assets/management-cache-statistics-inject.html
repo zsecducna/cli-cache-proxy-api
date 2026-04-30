@@ -1400,7 +1400,7 @@
     return normalized === 'gpt-5.4' || normalized === 'gpt-5.4-pro';
   }
 
-  function calculateModelCostFromBreakdown(modelName, pricing, inputTokens, cachedTokens, outputTokens, longContextInputTokens, longContextCachedTokens, longContextOutputTokens) {
+  function calculateModelCostFromBreakdown(modelName, pricing, inputTokens, cachedTokens, outputTokens, longContextInputTokens, longContextCachedTokens, longContextOutputTokens, cacheWrite5mTokens, cacheWrite1hTokens) {
     const safeInputTokens = Math.max(0, Number(inputTokens || 0));
     const safeCachedTokens = Math.max(0, Number(cachedTokens || 0));
     const safeOutputTokens = Math.max(0, Number(outputTokens || 0));
@@ -1419,12 +1419,17 @@
     const uncachedInputTokens = Math.max(safeInputTokens - safeCachedTokens, 0);
     const standardUncachedInputTokens = Math.max(uncachedInputTokens - longContextUncachedInputTokens, 0);
     const standardOutputTokens = Math.max(safeOutputTokens - cappedLongContextOutputTokens, 0);
+    const promptPrice = Math.max(0, Number(pricing && pricing.prompt || 0));
+    const safeCacheWrite5m = Math.max(0, Number(cacheWrite5mTokens || 0));
+    const safeCacheWrite1h = Math.max(0, Number(cacheWrite1hTokens || 0));
     const cost = (
-      (standardUncachedInputTokens * Math.max(0, Number(pricing && pricing.prompt || 0))) +
-      (longContextUncachedInputTokens * Math.max(0, Number(pricing && pricing.prompt || 0)) * OPENAI_LONG_CONTEXT_PROMPT_MULTIPLIER) +
+      (standardUncachedInputTokens * promptPrice) +
+      (longContextUncachedInputTokens * promptPrice * OPENAI_LONG_CONTEXT_PROMPT_MULTIPLIER) +
       (safeCachedTokens * Math.max(0, Number(pricing && pricing.cache || 0))) +
       (standardOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0))) +
-      (cappedLongContextOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0)) * OPENAI_LONG_CONTEXT_COMPLETION_MULTIPLIER)
+      (cappedLongContextOutputTokens * Math.max(0, Number(pricing && pricing.completion || 0)) * OPENAI_LONG_CONTEXT_COMPLETION_MULTIPLIER) +
+      (safeCacheWrite5m * promptPrice * 1.25) +
+      (safeCacheWrite1h * promptPrice * 2)
     ) / 1000000;
     return Number.isFinite(cost) ? cost : 0;
   }
@@ -1474,6 +1479,8 @@
         item && item.long_context_input_tokens,
         item && item.long_context_cached_tokens,
         item && item.long_context_output_tokens,
+        item && item.anthropic_cache_write_5m_tokens,
+        item && item.anthropic_cache_write_1h_tokens,
       );
       return total + (Number.isFinite(cost) ? cost : 0);
     }, 0);
