@@ -1464,7 +1464,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			if shouldStopMixedRoutingOnError(auth, provider, authErr) {
+			if isAccountBoundRequestError(authErr) || shouldStopMixedRoutingOnError(auth, provider, authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1546,7 +1546,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
-			if shouldStopMixedRoutingOnError(auth, provider, authErr) {
+			if isAccountBoundRequestError(authErr) || shouldStopMixedRoutingOnError(auth, provider, authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1599,7 +1599,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if shouldStopMixedRoutingOnError(auth, provider, errStream) {
+			if isAccountBoundRequestError(errStream) || shouldStopMixedRoutingOnError(auth, provider, errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -2806,6 +2806,18 @@ func isRequestInvalidError(err error) bool {
 
 func shouldStopMixedRoutingOnError(_ *Auth, _ string, _ error) bool {
 	return false
+}
+
+func isAccountBoundRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if isRequestScopedNotFoundMessage(msg) {
+		return true
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "previous response") && strings.Contains(lower, "not found")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
