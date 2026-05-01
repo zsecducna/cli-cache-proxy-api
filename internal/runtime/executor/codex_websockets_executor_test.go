@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -467,5 +468,137 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
+	}
+}
+
+func TestCodexPreferWSUpstream(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want bool
+	}{
+		{
+			name: "nil auth",
+			auth: nil,
+			want: false,
+		},
+		{
+			name: "no attributes or metadata",
+			auth: &cliproxyauth.Auth{},
+			want: false,
+		},
+		{
+			name: "ws_upstream attribute true",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"ws_upstream": "true"}},
+			want: true,
+		},
+		{
+			name: "ws_upstream attribute false",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"ws_upstream": "false"}},
+			want: false,
+		},
+		{
+			name: "websocket_upstream attribute true",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websocket_upstream": "true"}},
+			want: true,
+		},
+		{
+			name: "ws_upstream metadata bool",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"ws_upstream": true}},
+			want: true,
+		},
+		{
+			name: "ws_upstream metadata string",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"ws_upstream": "true"}},
+			want: true,
+		},
+		{
+			name: "websocket_upstream metadata bool",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket_upstream": true}},
+			want: true,
+		},
+		{
+			name: "websockets enabled but no ws_upstream",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "true"}},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := codexPreferWSUpstream(tc.auth)
+			if got != tc.want {
+				t.Fatalf("codexPreferWSUpstream() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsWSUpstreamFallbackEligible(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "dial error",
+			err:  fmt.Errorf("websocket dial tcp: connection refused"),
+			want: true,
+		},
+		{
+			name: "handshake error",
+			err:  fmt.Errorf("websocket handshake failed: 502"),
+			want: true,
+		},
+		{
+			name: "conn nil",
+			err:  fmt.Errorf("codex websockets executor: websocket conn is nil"),
+			want: true,
+		},
+		{
+			name: "i/o timeout",
+			err:  fmt.Errorf("read tcp: i/o timeout"),
+			want: true,
+		},
+		{
+			name: "no such host",
+			err:  fmt.Errorf("dial tcp: no such host"),
+			want: true,
+		},
+		{
+			name: "auth error not eligible",
+			err:  fmt.Errorf("401 unauthorized"),
+			want: false,
+		},
+		{
+			name: "rate limit not eligible",
+			err:  fmt.Errorf("429 rate limit exceeded"),
+			want: false,
+		},
+		{
+			name: "model not supported not eligible",
+			err:  fmt.Errorf("model gpt-5.5 is not supported"),
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isWSUpstreamFallbackEligible(tc.err)
+			if got != tc.want {
+				t.Fatalf("isWSUpstreamFallbackEligible() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

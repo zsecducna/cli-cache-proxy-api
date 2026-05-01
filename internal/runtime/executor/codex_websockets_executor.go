@@ -1435,11 +1435,14 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	}
 }
 
-// CodexAutoExecutor routes Codex requests to the websocket transport only when:
-//  1. The downstream transport is websocket, and
-//  2. The selected auth enables websockets.
+// CodexAutoExecutor routes Codex requests to the websocket transport when:
+//  1. The downstream transport is websocket AND the selected auth enables websockets, OR
+//  2. The request is streaming AND the selected auth enables websockets AND has ws_upstream
+//     set to true (prefer websocket upstream for streaming, with HTTP fallback).
 //
-// For non-websocket downstream requests, it always uses the legacy HTTP implementation.
+// Non-streaming requests always use the HTTP implementation because the websocket
+// executor sends stream:true upstream and the response.completed event does not
+// carry output text that was already delivered via delta events.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -1484,6 +1487,20 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
+	}
+	if codexWebsocketsEnabled(auth) && codexPreferWSUpstream(auth) {
+		wsReq := req
+		if from := opts.SourceFormat; from != sdktranslator.FromString("codex") {
+			baseModel := thinking.ParseSuffix(req.Model).ModelName
+			to := sdktranslator.FromString("codex")
+			wsReq.Payload = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+		}
+		result, err := e.wsExec.ExecuteStream(ctx, auth, wsReq, opts)
+		if err == nil || !isWSUpstreamFallbackEligible(err) {
+			return result, err
+		}
+		log.Warnf("codex ws_upstream: websocket stream failed, falling back to HTTP: %v", err)
+		return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }
@@ -1540,6 +1557,63 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 				return parsed
 			}
 		default:
+		}
+	}
+	return false
+}
+
+func codexPreferWSUpstream(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if len(auth.Attributes) > 0 {
+		for _, key := range []string{"ws_upstream", "websocket_upstream"} {
+			if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+				parsed, errParse := strconv.ParseBool(raw)
+				if errParse == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	if len(auth.Metadata) == 0 {
+		return false
+	}
+	for _, key := range []string{"ws_upstream", "websocket_upstream"} {
+		raw, ok := auth.Metadata[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
+			if errParse == nil {
+				return parsed
+			}
+		default:
+		}
+	}
+	return false
+}
+
+func isWSUpstreamFallbackEligible(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, pattern := range []string{
+		"dial",
+		"handshake",
+		"websocket conn is nil",
+		"connection refused",
+		"i/o timeout",
+		"no such host",
+		"network is unreachable",
+	} {
+		if strings.Contains(msg, pattern) {
+			return true
 		}
 	}
 	return false
