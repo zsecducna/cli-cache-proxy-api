@@ -32,7 +32,7 @@ func (e *CodexExecutor) RefreshQuotaUsage(ctx context.Context, auth *cliproxyaut
 		return auth, nil
 	}
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, codexQuotaUsageURL, bytes.NewReader([]byte("{}")))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, codexQuotaUsageURL, nil)
 	if errReq != nil {
 		return auth, errReq
 	}

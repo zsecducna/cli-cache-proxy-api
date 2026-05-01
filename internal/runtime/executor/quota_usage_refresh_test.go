@@ -32,8 +32,8 @@ func TestCodexRefreshQuotaUsageCallsWhamUsage(t *testing.T) {
 		if got := req.URL.String(); got != codexQuotaUsageURL {
 			t.Fatalf("url = %s, want %s", got, codexQuotaUsageURL)
 		}
-		if got := req.Method; got != http.MethodPost {
-			t.Fatalf("method = %s, want POST", got)
+		if got := req.Method; got != http.MethodGet {
+			t.Fatalf("method = %s, want GET", got)
 		}
 		if got := req.Header.Get("Authorization"); got != "Bearer codex-token" {
 			t.Fatalf("authorization = %q", got)

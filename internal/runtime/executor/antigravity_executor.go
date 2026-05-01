@@ -529,6 +529,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
+	const maxSoftRateLimitRetries = 3
+	softRateLimitRetries := 0
+
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
 		var lastStatus int
@@ -638,14 +641,16 @@ attemptLoop:
 					}
 				}
 				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					softRateLimitRetries++
+					if softRateLimitRetries < maxSoftRateLimitRetries && attempt+1 < attempts {
+						delay := antigravitySoftRateLimitDelay(softRateLimitRetries - 1)
+						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (soft retry %d/%d)", baseModel, delay, softRateLimitRetries, maxSoftRateLimitRetries)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
 						continue attemptLoop
 					}
+					log.Debugf("antigravity executor: soft rate limit retries exhausted (%d/%d) for model %s, bubbling up to conductor", softRateLimitRetries, maxSoftRateLimitRetries, baseModel)
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return resp, err
@@ -727,6 +732,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
+
+	const maxSoftRateLimitRetries = 3
+	softRateLimitRetries := 0
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -849,14 +857,16 @@ attemptLoop:
 					}
 				}
 				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					softRateLimitRetries++
+					if softRateLimitRetries < maxSoftRateLimitRetries && attempt+1 < attempts {
+						delay := antigravitySoftRateLimitDelay(softRateLimitRetries - 1)
+						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (soft retry %d/%d)", baseModel, delay, softRateLimitRetries, maxSoftRateLimitRetries)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
 						continue attemptLoop
 					}
+					log.Debugf("antigravity executor: soft rate limit retries exhausted (%d/%d) for model %s, bubbling up to conductor", softRateLimitRetries, maxSoftRateLimitRetries, baseModel)
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return resp, err
@@ -1202,6 +1212,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
+	const maxSoftRateLimitRetries = 3
+	softRateLimitRetries := 0
+
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
 		var lastStatus int
@@ -1322,14 +1335,16 @@ attemptLoop:
 					}
 				}
 				if antigravityShouldRetrySoftRateLimit(httpResp.StatusCode, bodyBytes) {
-					if attempt+1 < attempts {
-						delay := antigravitySoftRateLimitDelay(attempt)
-						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					softRateLimitRetries++
+					if softRateLimitRetries < maxSoftRateLimitRetries && attempt+1 < attempts {
+						delay := antigravitySoftRateLimitDelay(softRateLimitRetries - 1)
+						log.Debugf("antigravity executor: soft rate limit for model %s, retrying in %s (soft retry %d/%d)", baseModel, delay, softRateLimitRetries, maxSoftRateLimitRetries)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
 						}
 						continue attemptLoop
 					}
+					log.Debugf("antigravity executor: soft rate limit retries exhausted (%d/%d) for model %s, bubbling up to conductor", softRateLimitRetries, maxSoftRateLimitRetries, baseModel)
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return nil, err
