@@ -498,6 +498,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Tokens:          detail.Tokens,
 		Cache:           detail.Cache,
 		AnthropicCache:  valueOrZeroAnthropic(detail.AnthropicCache),
+		StreamID:        helps.GetMessagesStreamID(ctx),
 	}
 }
 

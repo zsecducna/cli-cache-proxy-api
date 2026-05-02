@@ -39,6 +39,7 @@ type CacheStatisticsEvent struct {
 	Tokens          TokenStats
 	Cache           *helps.CodexCacheObservability
 	AnthropicCache  helps.AnthropicCacheObservability
+	StreamID        string
 }
 
 type CacheStatisticsSummary struct {
@@ -55,9 +56,11 @@ type CacheStatisticsSummary struct {
 	ReasoningTokens         int64                         `json:"reasoning_tokens"`
 	CachedTokens            int64                         `json:"cached_tokens"`
 	TotalTokens             int64                         `json:"total_tokens"`
-	CacheRatio              float64                       `json:"cache_ratio"`
-	AvgLatencyMs            float64                       `json:"avg_latency_ms"`
-	GPT54                   CacheStatisticsModelBreakdown `json:"gpt_5_4"`
+	CacheRatio                      float64                       `json:"cache_ratio"`
+	AvgLatencyMs                    float64                       `json:"avg_latency_ms"`
+	AnthropicCacheWrite5mTokens     int64                         `json:"anthropic_cache_write_5m_tokens,omitempty"`
+	AnthropicCacheWrite1hTokens     int64                         `json:"anthropic_cache_write_1h_tokens,omitempty"`
+	GPT54                           CacheStatisticsModelBreakdown `json:"gpt_5_4"`
 }
 
 type CacheStatisticsBreakdownBucket struct {
@@ -368,7 +371,8 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     anthropic_cache_ttl TEXT NOT NULL DEFAULT '',
     anthropic_breakpoints TEXT NOT NULL DEFAULT '',
     anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
-    anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
+    anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    messages_stream_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_requested_at ON cache_statistics_requests(requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_requests(model);
@@ -418,6 +422,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "anthropic_cache_read_input_tokens", "ALTER TABLE cache_statistics_requests ADD COLUMN anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "messages_stream_id", "ALTER TABLE cache_statistics_requests ADD COLUMN messages_stream_id TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_id ON cache_statistics_requests(messages_stream_id)`); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
 	if err := s.backfillCacheStatisticsEventKeys(); err != nil {
 		return err
 	}
@@ -451,13 +461,14 @@ INSERT INTO %s (
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
-    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens,
+    messages_stream_id
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_key) DO NOTHING`,
 			s.requestsTableName(),
 			s.bind(1), s.bind(2), s.bind(3), s.bind(4), s.bind(5), s.bind(6), s.bind(7), s.bind(8), s.bind(9), s.bind(10), s.bind(11),
 			s.bind(12), s.bind(13), s.bind(14), s.bind(15), s.bind(16), s.bind(17), s.bind(18), s.bind(19), s.bind(20), s.bind(21), s.bind(22),
-			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28), s.bind(29)),
+			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28), s.bind(29), s.bind(30)),
 			eventKey,
 			s.timestampArg(timestamp),
 			strings.TrimSpace(event.Provider),
@@ -487,10 +498,12 @@ ON CONFLICT (event_key) DO NOTHING`,
 			anthropicBreakpointSummary(event.AnthropicCache),
 			anthropicCacheCreationTokens(event.AnthropicCache),
 			anthropicCacheReadTokens(event.AnthropicCache),
+			strings.TrimSpace(event.StreamID),
 		)
 		if err != nil {
 			return fmt.Errorf("cache statistics store: insert event: %w", err)
 		}
+		s.estimateAntigravityCacheCreation(ctx, event)
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -499,8 +512,9 @@ INSERT OR IGNORE INTO cache_statistics_requests (
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
-    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens,
+    messages_stream_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventKey,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
@@ -530,11 +544,90 @@ INSERT OR IGNORE INTO cache_statistics_requests (
 		anthropicBreakpointSummary(event.AnthropicCache),
 		anthropicCacheCreationTokens(event.AnthropicCache),
 		anthropicCacheReadTokens(event.AnthropicCache),
+		strings.TrimSpace(event.StreamID),
 	)
 	if err != nil {
 		return fmt.Errorf("cache statistics store: insert event: %w", err)
 	}
+	s.estimateAntigravityCacheCreation(ctx, event)
 	return nil
+}
+
+func (s *CacheStatisticsStore) estimateAntigravityCacheCreation(ctx context.Context, event CacheStatisticsEvent) {
+	if s == nil || s.db == nil {
+		return
+	}
+	if !strings.Contains(strings.ToLower(event.Model), "claude") {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(event.Provider)) != "antigravity" {
+		return
+	}
+	streamID := strings.TrimSpace(event.StreamID)
+	if streamID == "" {
+		return
+	}
+	currentCacheRead := anthropicCacheReadTokens(event.AnthropicCache)
+	if currentCacheRead <= 0 {
+		return
+	}
+	timestamp := event.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	windowStart := timestamp.Add(-1 * time.Hour)
+
+	var prevID int64
+	var prevCacheRead int64
+	if s.isPostgres() {
+		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT id, COALESCE(anthropic_cache_read_input_tokens, 0)
+FROM %s
+WHERE messages_stream_id = %s
+  AND LOWER(model) LIKE '%%claude%%'
+  AND provider = 'antigravity'
+  AND requested_at < %s
+  AND requested_at > %s
+  AND anthropic_cache_creation_input_tokens = 0
+ORDER BY requested_at DESC
+LIMIT 1`, s.requestsTableName(), s.bind(1), s.bind(2), s.bind(3)),
+			streamID, timestamp, windowStart,
+		).Scan(&prevID, &prevCacheRead)
+		if err != nil {
+			return
+		}
+		estimated := currentCacheRead - prevCacheRead
+		if estimated <= 0 {
+			return
+		}
+		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET anthropic_cache_creation_input_tokens = %s WHERE id = %s`,
+			s.requestsTableName(), s.bind(1), s.bind(2)), estimated, prevID)
+	} else {
+		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+SELECT id, COALESCE(anthropic_cache_read_input_tokens, 0)
+FROM %s
+WHERE messages_stream_id = ?
+  AND LOWER(model) LIKE '%%claude%%'
+  AND provider = 'antigravity'
+  AND requested_at < ?
+  AND requested_at > ?
+  AND anthropic_cache_creation_input_tokens = 0
+ORDER BY requested_at DESC
+LIMIT 1`, s.requestsTableName()),
+			streamID,
+			timestamp.UTC().Format(time.RFC3339Nano),
+			windowStart.UTC().Format(time.RFC3339Nano),
+		).Scan(&prevID, &prevCacheRead)
+		if err != nil {
+			return
+		}
+		estimated := currentCacheRead - prevCacheRead
+		if estimated <= 0 {
+			return
+		}
+		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET anthropic_cache_creation_input_tokens = ? WHERE id = ?`,
+			s.requestsTableName()), estimated, prevID)
+	}
 }
 
 func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelLimit, days int) (CacheStatisticsSnapshot, error) {
@@ -844,7 +937,7 @@ SELECT
     COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
-        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+        WHEN LOWER(provider) = 'claude' OR LOWER(model) LIKE '%%claude%%' THEN input_tokens + anthropic_cache_creation_input_tokens +
             CASE
                 WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
                 ELSE cached_tokens
@@ -855,7 +948,9 @@ SELECT
     COALESCE(SUM(reasoning_tokens), 0),
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
-    COALESCE(AVG(latency_ms), 0)
+    COALESCE(AVG(latency_ms), 0),
+    COALESCE(SUM(CASE WHEN anthropic_cache_ttl IN ('', '5m') AND anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0),
+    COALESCE(SUM(CASE WHEN anthropic_cache_ttl = '1h' THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
@@ -871,6 +966,8 @@ WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 		&summary.CachedTokens,
 		&summary.TotalTokens,
 		&summary.AvgLatencyMs,
+		&summary.AnthropicCacheWrite5mTokens,
+		&summary.AnthropicCacheWrite1hTokens,
 	)
 	if err != nil {
 		return summary, fmt.Errorf("cache statistics store: query summary: %w", err)
@@ -905,7 +1002,7 @@ SELECT
     COALESCE(SUM(CASE WHEN failed THEN 1 ELSE 0 END), 0),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
-        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+        WHEN LOWER(provider) = 'claude' OR LOWER(model) LIKE '%%claude%%' THEN input_tokens + anthropic_cache_creation_input_tokens +
             CASE
                 WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
                 ELSE cached_tokens
@@ -1155,7 +1252,7 @@ SELECT
     COUNT(*),
     COALESCE(SUM(input_tokens), 0),
     COALESCE(SUM(CASE
-        WHEN LOWER(provider) = 'claude' THEN input_tokens + anthropic_cache_creation_input_tokens +
+        WHEN LOWER(provider) = 'claude' OR LOWER(model) LIKE '%%claude%%' THEN input_tokens + anthropic_cache_creation_input_tokens +
             CASE
                 WHEN anthropic_cache_read_input_tokens > 0 THEN anthropic_cache_read_input_tokens
                 ELSE cached_tokens

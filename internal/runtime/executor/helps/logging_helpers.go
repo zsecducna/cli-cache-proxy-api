@@ -573,6 +573,27 @@ func GetAnthropicCacheObservability(ctx context.Context) (AnthropicCacheObservab
 	return getAnthropicCacheObservabilityFromGin(ginContextFrom(ctx))
 }
 
+func SetMessagesStreamID(ctx context.Context, streamID string) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil || streamID == "" {
+		return
+	}
+	ginCtx.Set("MESSAGES_STREAM_ID", streamID)
+}
+
+func GetMessagesStreamID(ctx context.Context) string {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return ""
+	}
+	v, ok := ginCtx.Get("MESSAGES_STREAM_ID")
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
 func FormatCodexCacheRequestSummary(obs CodexCacheObservability) string {
 	lines := make([]string, 0, 3)
 	if obs.PromptCacheKey != "" {

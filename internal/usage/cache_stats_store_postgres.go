@@ -208,6 +208,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON ` + s.requestsTableNa
 	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "customer_email", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
 	}
+	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "messages_stream_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_id ON ` + s.requestsTableName() + ` (messages_stream_id)`); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres stream_id index: %w", err)
+	}
 	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS ` + s.promptCacheTableName() + ` (
     response_id TEXT PRIMARY KEY,

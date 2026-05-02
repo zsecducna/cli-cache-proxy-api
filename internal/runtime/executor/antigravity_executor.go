@@ -694,6 +694,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
+	if streamID := computeClaudeMessagesStreamID(req.Payload); streamID != "" {
+		helps.SetMessagesStreamID(ctx, streamID)
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 	originalPayloadSource := req.Payload
@@ -901,6 +905,11 @@ attemptLoop:
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 						reporter.Publish(ctx, detail)
+						if detail.CachedTokens > 0 {
+							helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+								CacheReadInputTokens: detail.CachedTokens,
+							})
+						}
 					}
 
 					out <- cliproxyexecutor.StreamChunk{Payload: payload}
@@ -926,7 +935,13 @@ attemptLoop:
 			}
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
-			reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
+			detail := helps.ParseAntigravityUsage(resp.Payload)
+			reporter.Publish(ctx, detail)
+			if detail.CachedTokens > 0 {
+				helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+					CacheReadInputTokens: detail.CachedTokens,
+				})
+			}
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
@@ -1160,6 +1175,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
+	if isClaudeModel {
+		if streamID := computeClaudeMessagesStreamID(req.Payload); streamID != "" {
+			helps.SetMessagesStreamID(ctx, streamID)
+		}
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
@@ -1380,6 +1401,11 @@ attemptLoop:
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 						reporter.Publish(ctx, detail)
+						if isClaudeModel && detail.CachedTokens > 0 {
+							helps.SetAnthropicCacheObservability(ctx, helps.AnthropicCacheObservability{
+								CacheReadInputTokens: detail.CachedTokens,
+							})
+						}
 					}
 
 					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
@@ -2420,6 +2446,31 @@ func generateSessionID() string {
 	n := randSource.Int63n(9_000_000_000_000_000_000)
 	randSourceMutex.Unlock()
 	return "-" + strconv.FormatInt(n, 10)
+}
+
+func computeClaudeMessagesStreamID(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			var text string
+			content := msg.Get("content")
+			if content.Type == gjson.String {
+				text = content.String()
+			} else {
+				text = content.Get("0.text").String()
+			}
+			if text != "" {
+				h := sha256.Sum256([]byte(text))
+				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+				return strconv.FormatInt(n, 36)
+			}
+			break
+		}
+	}
+	return ""
 }
 
 func generateStableSessionID(payload []byte) string {
