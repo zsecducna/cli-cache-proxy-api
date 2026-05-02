@@ -219,10 +219,6 @@ Cross-platform desktop app (macOS, Windows, Linux) wrapping CLIProxyAPI with a n
 
 Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-account codex 5h/7d quota windows, plan-based sorting, status coloring, and multi-account summary analytics.
 
-### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
-
-Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
-
 ### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
 
 Windows-focused, local-first desktop management platform for Codex CLI built on CLIProxyAPI, focused on simplifying local setup, account and runtime management, and providing a more complete Codex CLI experience for local users.
