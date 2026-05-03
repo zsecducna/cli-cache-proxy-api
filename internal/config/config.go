@@ -544,6 +544,10 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// WSUpstream enables WebSocket upstream transport for this provider.
+	// When true, streaming requests use wss://{base-url}/responses instead of HTTP SSE.
+	WSUpstream bool `yaml:"ws-upstream,omitempty" json:"ws-upstream,omitempty"`
+
 	// AppendReasoningEffortToModel rewrites upstream model IDs as
 	// "<model>-<reasoning_effort>" when a non-empty reasoning effort is present.
 	// Nil preserves the default enabled behavior; set false to disable.
