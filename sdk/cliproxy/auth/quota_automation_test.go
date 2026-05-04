@@ -94,6 +94,95 @@ func TestManager_Register_UsesTemporaryCooldownWhenQuotaResetIsKnown(t *testing.
 	}
 }
 
+func TestManager_Register_UsesTemporaryCooldownForCodexWhamWeeklyWindow(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	fiveHourReset := time.Now().Add(5 * time.Hour).UTC().Truncate(time.Second)
+	weeklyReset := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+
+	auth := &Auth{
+		ID:       "codex-wham-weekly.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"quota_usage": map[string]any{
+				"rate_limit": map[string]any{
+					"allowed":       false,
+					"limit_reached": true,
+					"primary_window": map[string]any{
+						"limit_window_seconds": 18000,
+						"used_percent":         0,
+						"reset_at":             fiveHourReset.Unix(),
+					},
+					"secondary_window": map[string]any{
+						"limit_window_seconds": 604800,
+						"used_percent":         100,
+						"reset_at":             weeklyReset.Unix(),
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || stored == nil {
+		t.Fatalf("expected auth %q to be registered", auth.ID)
+	}
+	if stored.Disabled || stored.Status == StatusDisabled {
+		t.Fatalf("expected temporary cooldown, got disabled=%v status=%q", stored.Disabled, stored.Status)
+	}
+	if !stored.Unavailable || !stored.Quota.Exceeded || !stored.NextRetryAfter.Equal(weeklyReset) {
+		t.Fatalf("expected weekly cooldown until %v, got unavailable=%v quota=%+v next_retry_after=%v", weeklyReset, stored.Unavailable, stored.Quota, stored.NextRetryAfter)
+	}
+	if reason := quotaAutoCooldownReason(stored.Metadata); !strings.Contains(reason, "7days quota exhausted") {
+		t.Fatalf("expected weekly cooldown reason, got %q", reason)
+	}
+}
+
+func TestManager_Register_UsesTemporaryCooldownForCodexWhamFiveHourWindow(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	resetAt := time.Now().Add(5 * time.Hour).UTC().Truncate(time.Second)
+
+	auth := &Auth{
+		ID:       "codex-wham-five-hour.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"quota_usage": map[string]any{
+				"rate_limit": map[string]any{
+					"primary_window": map[string]any{
+						"limit_window_seconds": 18000,
+						"used_percent":         100,
+						"reset_at":             resetAt.Unix(),
+					},
+					"secondary_window": map[string]any{
+						"limit_window_seconds": 604800,
+						"used_percent":         50,
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || stored == nil {
+		t.Fatalf("expected auth %q to be registered", auth.ID)
+	}
+	if !stored.Unavailable || !stored.Quota.Exceeded || !stored.NextRetryAfter.Equal(resetAt) {
+		t.Fatalf("expected 5hrs cooldown until %v, got unavailable=%v quota=%+v next_retry_after=%v", resetAt, stored.Unavailable, stored.Quota, stored.NextRetryAfter)
+	}
+	if reason := quotaAutoCooldownReason(stored.Metadata); !strings.Contains(reason, "5hrs quota exhausted") {
+		t.Fatalf("expected 5hrs cooldown reason, got %q", reason)
+	}
+}
+
 func TestManager_Register_DoesNotCooldownAfterKnownResetPassed(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	resetAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)

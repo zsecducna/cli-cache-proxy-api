@@ -12,6 +12,8 @@ import (
 const (
 	quotaAutoDisable5HoursThreshold = 5.0
 	quotaAutoDisable7DaysThreshold  = 3.0
+	fiveHourQuotaWindowSeconds      = 5 * 60 * 60
+	sevenDayQuotaWindowSeconds      = 7 * 24 * 60 * 60
 
 	quotaAutoDisabledMetadataKey       = "quota_auto_disabled"
 	quotaAutoDisabledAtMetadataKey     = "quota_auto_disabled_at"
@@ -70,6 +72,20 @@ var (
 		"remaining_fraction",
 		"remainingFraction",
 	)
+	quotaUsedPercentKeys = normalizedQuotaKeySet(
+		"used_percent",
+		"usedPercent",
+		"used_pct",
+		"usedPct",
+		"used_percentage",
+		"usedPercentage",
+	)
+	quotaUsedRatioKeys = normalizedQuotaKeySet(
+		"used_ratio",
+		"usedRatio",
+		"used_fraction",
+		"usedFraction",
+	)
 	quotaRemainingContainerKeys = normalizedQuotaKeySet(
 		"remaining",
 		"quota_remaining",
@@ -108,6 +124,21 @@ var (
 		"secondsUntilReset",
 		"retry_after_seconds",
 		"retryAfterSeconds",
+	)
+	quotaWindowDurationSecondsKeys = normalizedQuotaKeySet(
+		"limit_window_seconds",
+		"limitWindowSeconds",
+		"window_seconds",
+		"windowSeconds",
+		"period_seconds",
+		"periodSeconds",
+	)
+	quotaLimitReachedKeys = normalizedQuotaKeySet(
+		"limit_reached",
+		"limitReached",
+		"quota_exceeded",
+		"quotaExceeded",
+		"exceeded",
 	)
 	quotaWindowTagKeys = normalizedQuotaKeySet(
 		"window",
@@ -420,12 +451,75 @@ func readQuotaAutomationSnapshot(metadata map[string]any) quotaAutomationSnapsho
 }
 
 func readQuotaAutomationSnapshotAt(metadata map[string]any, now time.Time) quotaAutomationSnapshot {
-	return quotaAutomationSnapshot{
-		fiveHoursRemainingPercent: findQuotaWindowRemainingPercent(metadata, fiveHourQuotaWindowAliases),
-		sevenDaysRemainingPercent: findQuotaWindowRemainingPercent(metadata, sevenDayQuotaWindowAliases),
-		fiveHoursResetAt:          findQuotaWindowResetAt(metadata, fiveHourQuotaWindowAliases, now),
-		sevenDaysResetAt:          findQuotaWindowResetAt(metadata, sevenDayQuotaWindowAliases, now),
+	fiveHoursRemaining := findQuotaWindowRemainingPercent(metadata, fiveHourQuotaWindowAliases)
+	fiveHoursReset := findQuotaWindowResetAt(metadata, fiveHourQuotaWindowAliases, now)
+	if remaining, resetAt := findQuotaWindowByDuration(metadata, fiveHourQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
+		if remaining != nil {
+			fiveHoursRemaining = remaining
+		}
+		if resetAt != nil {
+			fiveHoursReset = resetAt
+		}
 	}
+
+	sevenDaysRemaining := findQuotaWindowRemainingPercent(metadata, sevenDayQuotaWindowAliases)
+	sevenDaysReset := findQuotaWindowResetAt(metadata, sevenDayQuotaWindowAliases, now)
+	if remaining, resetAt := findQuotaWindowByDuration(metadata, sevenDayQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
+		if remaining != nil {
+			sevenDaysRemaining = remaining
+		}
+		if resetAt != nil {
+			sevenDaysReset = resetAt
+		}
+	}
+
+	return quotaAutomationSnapshot{
+		fiveHoursRemainingPercent: fiveHoursRemaining,
+		sevenDaysRemainingPercent: sevenDaysRemaining,
+		fiveHoursResetAt:          fiveHoursReset,
+		sevenDaysResetAt:          sevenDaysReset,
+	}
+}
+
+func findQuotaWindowByDuration(node any, targetSeconds int64, now time.Time) (*float64, *time.Time) {
+	switch typed := node.(type) {
+	case map[string]any:
+		if seconds, ok := quotaWindowDurationSecondsFromMap(typed); ok && seconds == targetSeconds {
+			var remaining *float64
+			if value, found := findRemainingPercentInMap(typed, true); found {
+				remaining = float64Ptr(value)
+			}
+			var resetAt *time.Time
+			if value, found := findResetAtInMap(typed, now); found {
+				resetAt = timePtr(value)
+			}
+			return remaining, resetAt
+		}
+		for _, rawValue := range typed {
+			remaining, resetAt := findQuotaWindowByDuration(rawValue, targetSeconds, now)
+			if remaining != nil || resetAt != nil {
+				return remaining, resetAt
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			remaining, resetAt := findQuotaWindowByDuration(item, targetSeconds, now)
+			if remaining != nil || resetAt != nil {
+				return remaining, resetAt
+			}
+		}
+	}
+	return nil, nil
+}
+
+func quotaWindowDurationSecondsFromMap(node map[string]any) (int64, bool) {
+	for key, rawValue := range node {
+		if !containsNormalizedQuotaKey(quotaWindowDurationSecondsKeys, normalizeQuotaKey(key)) {
+			continue
+		}
+		return parseQuotaWindowSeconds(rawValue)
+	}
+	return 0, false
 }
 
 func findQuotaWindowRemainingPercent(node any, aliases map[string]struct{}) *float64 {
@@ -618,6 +712,14 @@ func findRemainingPercentInMap(node map[string]any, allowBarePercent bool) (floa
 			if value, ok := parseQuotaRatioValue(rawValue); ok {
 				return value, true
 			}
+		case containsNormalizedQuotaKey(quotaUsedPercentKeys, normalizedKey):
+			if value, ok := parseUsedQuotaPercentValue(rawValue); ok {
+				return value, true
+			}
+		case containsNormalizedQuotaKey(quotaUsedRatioKeys, normalizedKey):
+			if value, ok := parseUsedQuotaRatioValue(rawValue); ok {
+				return value, true
+			}
 		case containsNormalizedQuotaKey(quotaRemainingContainerKeys, normalizedKey):
 			if value, ok := extractPercentFromRemainingNode(rawValue); ok {
 				return value, true
@@ -632,18 +734,24 @@ func findRemainingPercentInMap(node map[string]any, allowBarePercent bool) (floa
 			}
 		}
 	}
+	if quotaLimitReachedInMap(node) {
+		return 0, true
+	}
 	return 0, false
 }
 
 func findResetAtInMap(node map[string]any, now time.Time) (time.Time, bool) {
 	for key, rawValue := range node {
 		normalizedKey := normalizeQuotaKey(key)
-		switch {
-		case containsNormalizedQuotaKey(quotaResetTimeKeys, normalizedKey):
+		if containsNormalizedQuotaKey(quotaResetTimeKeys, normalizedKey) {
 			if value, ok := parseResetTimeValue(rawValue, now); ok {
 				return value, true
 			}
-		case containsNormalizedQuotaKey(quotaResetSecondsKeys, normalizedKey):
+		}
+	}
+	for key, rawValue := range node {
+		normalizedKey := normalizeQuotaKey(key)
+		if containsNormalizedQuotaKey(quotaResetSecondsKeys, normalizedKey) {
 			if value, ok := parseResetSecondsValue(rawValue, now); ok {
 				return value, true
 			}
@@ -715,6 +823,68 @@ func parseQuotaRatioValue(value any) (float64, bool) {
 		return 0, false
 	}
 	return parsed * 100, true
+}
+
+func parseUsedQuotaPercentValue(value any) (float64, bool) {
+	used, ok := parseQuotaPercentValue(value)
+	if !ok {
+		return 0, false
+	}
+	return clampQuotaPercent(100 - used), true
+}
+
+func parseUsedQuotaRatioValue(value any) (float64, bool) {
+	used, ok := parseQuotaRatioValue(value)
+	if !ok {
+		return 0, false
+	}
+	return clampQuotaPercent(100 - used), true
+}
+
+func parseQuotaWindowSeconds(value any) (int64, bool) {
+	parsed, ok := parseQuotaPercentValue(value)
+	if !ok || parsed <= 0 {
+		return 0, false
+	}
+	return int64(parsed), true
+}
+
+func quotaLimitReachedInMap(node map[string]any) bool {
+	for key, rawValue := range node {
+		if !containsNormalizedQuotaKey(quotaLimitReachedKeys, normalizeQuotaKey(key)) {
+			continue
+		}
+		if value, ok := parseBoolValue(rawValue); ok && value {
+			return true
+		}
+	}
+	return false
+}
+
+func parseBoolValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return false, false
+		}
+		parsed, err := strconv.ParseBool(trimmed)
+		return parsed, err == nil
+	default:
+		return false, false
+	}
+}
+
+func clampQuotaPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }
 
 func parseResetTimeValue(value any, now time.Time) (time.Time, bool) {
