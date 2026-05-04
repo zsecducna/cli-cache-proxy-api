@@ -373,7 +373,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
 		mergedInput = normalizeResponsesInputArrayRaw(nextInput)
 	} else {
-		appendInputRaw := nextInput.Raw
+		appendInputRaw := normalizeResponsesInputArrayRaw(nextInput)
 		if inputContainsFullTranscript(nextInput) {
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}

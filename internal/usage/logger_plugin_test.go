@@ -106,8 +106,12 @@ func TestRequestStatisticsRecordKeepsPlain408AsFailure(t *testing.T) {
 	ginCtx.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 	ginCtx.Status(http.StatusRequestTimeout)
 
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx = logging.WithResponseStatusHolder(ctx)
+	logging.SetResponseStatus(ctx, http.StatusRequestTimeout)
+
 	stats := NewRequestStatistics()
-	stats.Record(context.WithValue(context.Background(), "gin", ginCtx), coreusage.Record{
+	stats.Record(ctx, coreusage.Record{
 		APIKey:      "test-key",
 		Model:       "gpt-5.4",
 		RequestedAt: time.Date(2026, 4, 10, 12, 0, 2, 0, time.UTC),
