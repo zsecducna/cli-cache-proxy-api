@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -877,6 +878,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, *interfaces.ErrorMessage, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	streamedOutputItemsByIndex := make(map[int64][]byte)
+	var streamedOutputItemsFallback [][]byte
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -958,9 +961,15 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
+				if eventType == "response.output_item.done" {
+					collectResponsesWebsocketOutputItemDone(payloads[i], streamedOutputItemsByIndex, &streamedOutputItemsFallback)
+				}
 				if eventType == wsEventTypeCompleted {
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
+					if responsesWebsocketOutputIsEmpty(completedOutput) {
+						completedOutput = responsesWebsocketStreamedOutputItems(streamedOutputItemsByIndex, streamedOutputItemsFallback)
+					}
 				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
@@ -983,6 +992,63 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 		}
 	}
+}
+
+func collectResponsesWebsocketOutputItemDone(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+	itemResult := gjson.GetBytes(payload, "item")
+	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+		return
+	}
+	outputIndexResult := gjson.GetBytes(payload, "output_index")
+	if outputIndexResult.Exists() {
+		outputItemsByIndex[outputIndexResult.Int()] = bytes.Clone([]byte(itemResult.Raw))
+		return
+	}
+	*outputItemsFallback = append(*outputItemsFallback, bytes.Clone([]byte(itemResult.Raw)))
+}
+
+func responsesWebsocketStreamedOutputItems(outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
+		return []byte("[]")
+	}
+
+	indexes := make([]int64, 0, len(outputItemsByIndex))
+	for idx := range outputItemsByIndex {
+		indexes = append(indexes, idx)
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		return indexes[i] < indexes[j]
+	})
+
+	items := make([][]byte, 0, len(outputItemsByIndex)+len(outputItemsFallback))
+	for _, idx := range indexes {
+		items = append(items, outputItemsByIndex[idx])
+	}
+	items = append(items, outputItemsFallback...)
+
+	var buf bytes.Buffer
+	totalLen := 2
+	for _, item := range items {
+		totalLen += len(item)
+	}
+	if len(items) > 1 {
+		totalLen += len(items) - 1
+	}
+	buf.Grow(totalLen)
+	buf.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(item)
+	}
+	buf.WriteByte(']')
+	return buf.Bytes()
+}
+
+func responsesWebsocketOutputIsEmpty(output []byte) bool {
+	result := gjson.ParseBytes(output)
+	return !result.IsArray() || len(result.Array()) == 0
 }
 
 func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) bool {
