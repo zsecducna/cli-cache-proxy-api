@@ -26,6 +26,7 @@ import (
 type websocketCaptureExecutor struct {
 	streamCalls int
 	payloads    [][]byte
+	models      []string
 }
 
 type websocketCompactionCaptureExecutor struct {
@@ -201,6 +202,7 @@ func (e *websocketCaptureExecutor) Execute(context.Context, *coreauth.Auth, core
 func (e *websocketCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	e.streamCalls++
 	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	e.models = append(e.models, req.Model)
 	chunks := make(chan coreexecutor.StreamChunk, 1)
 	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
 	close(chunks)
@@ -1094,6 +1096,42 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketAuthMatchesPrefixedRouteWithUnprefixedRegisteredModel(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "auth-prefixed-ws",
+		Provider: "test-provider",
+		Prefix:   "gate1",
+		Status:   coreauth.StatusActive,
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-5.5"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	providerSet := map[string]struct{}{"test-provider": {}}
+	if !responsesWebsocketAuthMatchesModel(auth, providerSet, "gate1/gpt-5.5", registry.GetGlobalRegistry(), time.Now()) {
+		t.Fatalf("expected prefixed websocket route to match auth supporting unprefixed upstream model")
+	}
+}
+
+func TestResponsesWebsocketAuthMatchesPrefixedRouteRejectsMismatchedPrefix(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "auth-prefixed-ws-mismatch",
+		Provider: "test-provider",
+		Prefix:   "gate2",
+		Status:   coreauth.StatusActive,
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-5.5"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	providerSet := map[string]struct{}{"test-provider": {}}
+	if responsesWebsocketAuthMatchesModel(auth, providerSet, "gate1/gpt-5.5", registry.GetGlobalRegistry(), time.Now()) {
+		t.Fatalf("expected mismatched provider prefix to be rejected")
+	}
+}
+
 func TestWebsocketUpstreamSupportsIncrementalInputAcceptsSingularAuthMetadata(t *testing.T) {
 	if !websocketUpstreamSupportsIncrementalInput(nil, map[string]any{"websocket": true}) {
 		t.Fatalf("expected singular websocket metadata to enable incremental websocket input")
@@ -1251,6 +1289,66 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	}
+}
+
+func TestResponsesWebsocketRoutesPrefixedModelToUnprefixedExecutionModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-prefixed",
+		Provider:   executor.Identifier(),
+		Prefix:     "gate1",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "gpt-5.5"},
+		{ID: "gate1/gpt-5.5"},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gate1/gpt-5.5","input":[{"type":"message","id":"msg-1"}]}`))
+	if errWrite != nil {
+		t.Fatalf("write websocket message: %v", errWrite)
+	}
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("payload type = %s, want %s: %s", got, wsEventTypeCompleted, payload)
+	}
+	if len(executor.models) != 1 || executor.models[0] != "gpt-5.5" {
+		t.Fatalf("executor models = %v, want [gpt-5.5]", executor.models)
 	}
 }
 

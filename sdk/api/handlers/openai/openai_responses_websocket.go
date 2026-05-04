@@ -637,10 +637,55 @@ func responsesWebsocketAuthMatchesModel(auth *coreauth.Auth, providerSet map[str
 	if _, ok := providerSet[providerKey]; !ok {
 		return false
 	}
-	if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
-		return false
+	modelKeys := responsesWebsocketAuthModelSupportKeys(auth, modelKey)
+	if len(modelKeys) > 0 && registryRef != nil {
+		supported := false
+		for _, key := range modelKeys {
+			if registryRef.ClientSupportsModel(auth.ID, key) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return false
+		}
 	}
-	return responsesWebsocketAuthAvailableForModel(auth, modelKey, now)
+	return responsesWebsocketAuthAvailableForModel(auth, responsesWebsocketAuthAvailabilityModelKey(auth, modelKey), now)
+}
+
+func responsesWebsocketAuthModelSupportKeys(auth *coreauth.Auth, modelKey string) []string {
+	modelKey = strings.TrimSpace(modelKey)
+	if modelKey == "" {
+		return nil
+	}
+	keys := []string{modelKey}
+	if stripped := responsesWebsocketAuthPrefixedModelTarget(auth, modelKey); stripped != "" && !strings.EqualFold(stripped, modelKey) {
+		keys = append(keys, stripped)
+	}
+	return keys
+}
+
+func responsesWebsocketAuthAvailabilityModelKey(auth *coreauth.Auth, modelKey string) string {
+	if stripped := responsesWebsocketAuthPrefixedModelTarget(auth, modelKey); stripped != "" {
+		return stripped
+	}
+	return strings.TrimSpace(modelKey)
+}
+
+func responsesWebsocketAuthPrefixedModelTarget(auth *coreauth.Auth, modelKey string) string {
+	if auth == nil {
+		return ""
+	}
+	prefix := strings.TrimSpace(auth.Prefix)
+	modelKey = strings.TrimSpace(modelKey)
+	if prefix == "" || modelKey == "" {
+		return ""
+	}
+	needle := prefix + "/"
+	if !strings.HasPrefix(modelKey, needle) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(modelKey, needle))
 }
 
 func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {

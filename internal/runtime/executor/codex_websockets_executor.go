@@ -393,6 +393,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel, requestPath)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
 	body = normalizeCodexInstructions(body)
