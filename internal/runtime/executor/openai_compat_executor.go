@@ -109,6 +109,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
+	plan.translated = helps.EnsureSchemaAdditionalProperties(plan.translated)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(plan.translated))
 	if err != nil {
 		return resp, err
@@ -203,6 +204,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + plan.endpoint
+	plan.translated = helps.EnsureSchemaAdditionalProperties(plan.translated)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(plan.translated))
 	if err != nil {
 		return nil, err
