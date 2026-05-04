@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestManager_Register_AutoDisablesWhenFiveHourRemainingQuotaReachesThreshold(t *testing.T) {
@@ -44,6 +45,89 @@ func TestManager_Register_AutoDisablesWhenFiveHourRemainingQuotaReachesThreshold
 	}
 	if !strings.Contains(stored.StatusMessage, "5hrs remaining quota 5% <= 5%") {
 		t.Fatalf("unexpected status message: %q", stored.StatusMessage)
+	}
+}
+
+func TestManager_Register_UsesTemporaryCooldownWhenQuotaResetIsKnown(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	resetAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+	auth := &Auth{
+		ID:       "quota-reset.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"quota": map[string]any{
+				"5hrs": map[string]any{
+					"remaining_percent": 0,
+					"reset_at":          resetAt.Format(time.RFC3339),
+				},
+				"7days": map[string]any{
+					"remaining_percent": 50,
+				},
+			},
+		},
+	}
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || stored == nil {
+		t.Fatalf("expected auth %q to be registered", auth.ID)
+	}
+	if stored.Disabled || stored.Status == StatusDisabled {
+		t.Fatalf("expected auth to stay selector-cooldown only, got disabled=%v status=%q", stored.Disabled, stored.Status)
+	}
+	if !stored.Unavailable || stored.Status != StatusError {
+		t.Fatalf("expected auth cooldown status, got unavailable=%v status=%q", stored.Unavailable, stored.Status)
+	}
+	if !stored.Quota.Exceeded || stored.NextRetryAfter.IsZero() || !stored.Quota.NextRecoverAt.Equal(resetAt) {
+		t.Fatalf("expected quota cooldown until %v, got quota=%+v next_retry_after=%v", resetAt, stored.Quota, stored.NextRetryAfter)
+	}
+	if !quotaAutoCooldownMarked(stored.Metadata) {
+		t.Fatal("expected quota cooldown marker")
+	}
+	if quotaAutomationMarked(stored.Metadata) {
+		t.Fatal("did not expect permanent auto-disable marker")
+	}
+}
+
+func TestManager_Register_DoesNotCooldownAfterKnownResetPassed(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	resetAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+
+	auth := &Auth{
+		ID:       "quota-reset-passed.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"quota": map[string]any{
+				"5hrs": map[string]any{
+					"remaining_percent": 0,
+					"reset_at":          resetAt.Format(time.RFC3339),
+				},
+				"7days": map[string]any{
+					"remaining_percent": 50,
+				},
+			},
+		},
+	}
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || stored == nil {
+		t.Fatalf("expected auth %q to be registered", auth.ID)
+	}
+	if stored.Disabled || stored.Unavailable || stored.Status != StatusActive {
+		t.Fatalf("expected auth ready after reset passed, got disabled=%v unavailable=%v status=%q", stored.Disabled, stored.Unavailable, stored.Status)
+	}
+	if quotaAutoCooldownMarked(stored.Metadata) || quotaAutomationMarked(stored.Metadata) {
+		t.Fatalf("did not expect quota automation marker after reset passed: %+v", stored.Metadata)
 	}
 }
 

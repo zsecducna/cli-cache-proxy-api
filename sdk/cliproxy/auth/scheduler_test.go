@@ -187,6 +187,48 @@ func TestSchedulerPick_PrefersHighestRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_SkipsExhaustedWeeklyOAuthUntilReset(t *testing.T) {
+	t.Parallel()
+
+	resetAt := time.Now().Add(7 * 24 * time.Hour).UTC()
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:         "high-priority-weekly-exhausted",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 80},
+					"7days": map[string]any{"remaining_percent": 0, "reset_at": resetAt.Format(time.RFC3339)},
+				},
+			},
+		},
+		&Auth{
+			ID:         "lower-priority-ready",
+			Provider:   "codex",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 40},
+					"7days": map[string]any{"remaining_percent": 40},
+				},
+			},
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "lower-priority-ready" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "lower-priority-ready")
+	}
+}
+
 func TestSchedulerPick_PriorityWinsBeforeQuota(t *testing.T) {
 	t.Parallel()
 

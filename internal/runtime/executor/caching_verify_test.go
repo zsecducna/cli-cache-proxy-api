@@ -225,8 +225,8 @@ func TestEnsureCacheControl(t *testing.T) {
 		if userCache.Get("type").String() != "ephemeral" {
 			t.Errorf("messages policy cache_control.type = %q, want ephemeral", userCache.Get("type").String())
 		}
-		if userCache.Get("ttl").String() != "5m" {
-			t.Errorf("messages policy cache_control.ttl = %q, want 5m", userCache.Get("ttl").String())
+		if userCache.Get("ttl").String() != "1h" {
+			t.Errorf("messages policy cache_control.ttl = %q, want 1h", userCache.Get("ttl").String())
 		}
 
 		existingCache := gjson.GetBytes(output, "messages.1.content.0.cache_control")

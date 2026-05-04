@@ -2169,7 +2169,7 @@ func decideAnthropicCachePolicy(payload []byte) anthropicCachePolicyDecision {
 		Breakpoints: anthropicCacheBreakpointPlan{
 			Tools:  gjson.GetBytes(payload, "tools.#").Int() > 0,
 			System: gjson.GetBytes(payload, "system").Exists(),
-			TTL:    "5m",
+			TTL:    "1h",
 		},
 	}
 
@@ -2186,9 +2186,6 @@ func decideAnthropicCachePolicy(payload []byte) anthropicCachePolicyDecision {
 
 	decision.Breakpoints.Messages = userTurns >= 2
 	decision.MatchedAgenticCodingLoop = decision.Breakpoints.Tools && decision.Breakpoints.Messages
-	if decision.MatchedAgenticCodingLoop {
-		decision.Breakpoints.TTL = "1h"
-	}
 	decision.OverwroteClientLayout = countCacheControls(payload) > 0
 	if hasSignedAnthropicThinkingHistory(payload) {
 		decision.Breakpoints = anthropicCacheBreakpointPlan{}

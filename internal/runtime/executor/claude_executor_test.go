@@ -1153,21 +1153,6 @@ func assertOneHourEphemeralCacheControl(t *testing.T, payload []byte, path strin
 	}
 }
 
-func assertFiveMinuteEphemeralCacheControl(t *testing.T, payload []byte, path string) {
-	t.Helper()
-
-	cc := gjson.GetBytes(payload, path)
-	if !cc.Exists() {
-		t.Fatalf("expected %s to exist", path)
-	}
-	if got := cc.Get("type").String(); got != "ephemeral" {
-		t.Fatalf("%s.type = %q, want %q", path, got, "ephemeral")
-	}
-	if ttl := cc.Get("ttl").String(); ttl != "" && ttl != "5m" {
-		t.Fatalf("%s.ttl = %q, want empty or %q", path, ttl, "5m")
-	}
-}
-
 func assertNoCacheControlAtPath(t *testing.T, payload []byte, path string) {
 	t.Helper()
 
@@ -1297,7 +1282,7 @@ func TestDecideAnthropicCachePolicy_PromotesToolLoopsWithTwoUserTurns(t *testing
 	}
 }
 
-func TestEnsureCacheControl_ShortTrafficRewritesToFiveMinuteBreakpoints(t *testing.T) {
+func TestEnsureCacheControl_DefaultsCacheBreakpointsToOneHour(t *testing.T) {
 	payload := []byte(fmt.Sprintf(`{
 		"tools": [
 			{"name":"tool-a","description":%q,"cache_control":{"type":"ephemeral","ttl":"24h"}},
@@ -1320,9 +1305,9 @@ func TestEnsureCacheControl_ShortTrafficRewritesToFiveMinuteBreakpoints(t *testi
 	out := ensureCacheControl(payload)
 
 	assertNoCacheControlAtPath(t, out, "tools.0.cache_control")
-	assertFiveMinuteEphemeralCacheControl(t, out, "tools.1.cache_control")
+	assertOneHourEphemeralCacheControl(t, out, "tools.1.cache_control")
 	assertNoCacheControlAtPath(t, out, "system.0.cache_control")
-	assertFiveMinuteEphemeralCacheControl(t, out, "system.1.cache_control")
+	assertOneHourEphemeralCacheControl(t, out, "system.1.cache_control")
 	assertNoCacheControlAtPath(t, out, "messages.0.content.0.cache_control")
 }
 

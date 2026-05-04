@@ -102,6 +102,124 @@ func TestCacheStatisticsStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestCacheStatisticsStoreEstimatesAntigravityClaudeCacheCreationOnCurrentRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	reads := []int64{0, 100, 150, 130}
+	for i, read := range reads {
+		err := store.InsertEvent(context.Background(), CacheStatisticsEvent{
+			Timestamp: now.Add(time.Duration(i) * time.Minute),
+			Provider:  "antigravity",
+			Model:     "claude-sonnet-4-6",
+			AuthID:    "auth-1",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  10,
+				OutputTokens: 2,
+				TotalTokens:  12,
+			},
+			AnthropicCache: helps.AnthropicCacheObservability{
+				TTL:                  "1h",
+				CacheReadInputTokens: read,
+			},
+			StreamID: "stream-1",
+		})
+		if err != nil {
+			t.Fatalf("InsertEvent(%d) error = %v", i, err)
+		}
+	}
+
+	rows, err := store.db.Query(`SELECT anthropic_cache_read_input_tokens, anthropic_cache_creation_input_tokens FROM cache_statistics_requests ORDER BY requested_at ASC`)
+	if err != nil {
+		t.Fatalf("query rows error = %v", err)
+	}
+	defer rows.Close()
+
+	wantWrites := []int64{0, 100, 50, 0}
+	i := 0
+	for rows.Next() {
+		var gotRead, gotWrite int64
+		if err := rows.Scan(&gotRead, &gotWrite); err != nil {
+			t.Fatalf("scan row %d error = %v", i, err)
+		}
+		if i >= len(reads) {
+			t.Fatalf("unexpected extra row %d", i)
+		}
+		if gotRead != reads[i] {
+			t.Fatalf("row %d cache read = %d, want %d", i, gotRead, reads[i])
+		}
+		if gotWrite != wantWrites[i] {
+			t.Fatalf("row %d cache write = %d, want %d", i, gotWrite, wantWrites[i])
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows error = %v", err)
+	}
+	if i != len(reads) {
+		t.Fatalf("row count = %d, want %d", i, len(reads))
+	}
+}
+
+func TestCacheStatisticsStoreCountsAnthropicCacheWritesAsOneHour(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
+	store, err := OpenCacheStatisticsStore(path)
+	if err != nil {
+		t.Fatalf("OpenCacheStatisticsStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	ttls := []string{"", "5m", "1h"}
+	for i, ttl := range ttls {
+		err := store.InsertEvent(context.Background(), CacheStatisticsEvent{
+			Timestamp: now.Add(time.Duration(i) * time.Minute),
+			Provider:  "claude",
+			Model:     "claude-sonnet-4-6",
+			AuthID:    "auth-1",
+			AuthIndex: "0",
+			Tokens: TokenStats{
+				InputTokens:  10,
+				OutputTokens: 2,
+				TotalTokens:  12,
+			},
+			AnthropicCache: helps.AnthropicCacheObservability{
+				TTL:                      ttl,
+				CacheCreationInputTokens: 10,
+			},
+		})
+		if err != nil {
+			t.Fatalf("InsertEvent(%d) error = %v", i, err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(context.Background(), 10, 10, 14)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.Summary.AnthropicCacheWrite5mTokens != 0 {
+		t.Fatalf("summary 5m cache write = %d, want 0", snapshot.Summary.AnthropicCacheWrite5mTokens)
+	}
+	if snapshot.Summary.AnthropicCacheWrite1hTokens != 30 {
+		t.Fatalf("summary 1h cache write = %d, want 30", snapshot.Summary.AnthropicCacheWrite1hTokens)
+	}
+	if len(snapshot.ByModel) != 1 {
+		t.Fatalf("len(ByModel) = %d, want 1", len(snapshot.ByModel))
+	}
+	if snapshot.ByModel[0].AnthropicCacheWrite5mTokens != 0 {
+		t.Fatalf("model 5m cache write = %d, want 0", snapshot.ByModel[0].AnthropicCacheWrite5mTokens)
+	}
+	if snapshot.ByModel[0].AnthropicCacheWrite1hTokens != 30 {
+		t.Fatalf("model 1h cache write = %d, want 30", snapshot.ByModel[0].AnthropicCacheWrite1hTokens)
+	}
+}
+
 func TestCacheStatisticsStoreSnapshotTracksOpenAILongContextSessions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache-statistics.sqlite")
 	store, err := OpenCacheStatisticsStore(path)

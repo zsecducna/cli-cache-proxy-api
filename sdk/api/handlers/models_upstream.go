@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -122,6 +123,7 @@ func (h *BaseAPIHandler) selectCodexModelsAuth() (*coreauth.Auth, coreauth.Provi
 		return nil, nil, fmt.Errorf("codex models upstream fetch unavailable: codex executor is not registered")
 	}
 	auths := h.AuthManager.List()
+	now := time.Now()
 	sort.SliceStable(auths, func(i, j int) bool {
 		if auths[i] == nil || auths[j] == nil {
 			return auths[j] != nil
@@ -147,7 +149,7 @@ func (h *BaseAPIHandler) selectCodexModelsAuth() (*coreauth.Auth, coreauth.Provi
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			continue
 		}
-		if auth.Disabled || auth.Status == coreauth.StatusDisabled || auth.Unavailable {
+		if !coreauth.AuthSelectableForModel(auth, "", now) {
 			continue
 		}
 		return auth, executor, nil

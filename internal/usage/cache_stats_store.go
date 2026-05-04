@@ -43,24 +43,24 @@ type CacheStatisticsEvent struct {
 }
 
 type CacheStatisticsSummary struct {
-	TotalRequests           int64                         `json:"total_requests"`
-	SuccessRequests         int64                         `json:"success_requests"`
-	FailedRequests          int64                         `json:"failed_requests"`
-	SuccessPercentage       float64                       `json:"success_percentage"`
-	InputTokens             int64                         `json:"input_tokens"`
-	EffectiveInputTokens    int64                         `json:"effective_input_tokens"`
-	LongContextInputTokens  int64                         `json:"long_context_input_tokens,omitempty"`
-	LongContextCachedTokens int64                         `json:"long_context_cached_tokens,omitempty"`
-	LongContextOutputTokens int64                         `json:"long_context_output_tokens,omitempty"`
-	OutputTokens            int64                         `json:"output_tokens"`
-	ReasoningTokens         int64                         `json:"reasoning_tokens"`
-	CachedTokens            int64                         `json:"cached_tokens"`
-	TotalTokens             int64                         `json:"total_tokens"`
-	CacheRatio                      float64                       `json:"cache_ratio"`
-	AvgLatencyMs                    float64                       `json:"avg_latency_ms"`
-	AnthropicCacheWrite5mTokens     int64                         `json:"anthropic_cache_write_5m_tokens,omitempty"`
-	AnthropicCacheWrite1hTokens     int64                         `json:"anthropic_cache_write_1h_tokens,omitempty"`
-	GPT54                           CacheStatisticsModelBreakdown `json:"gpt_5_4"`
+	TotalRequests               int64                         `json:"total_requests"`
+	SuccessRequests             int64                         `json:"success_requests"`
+	FailedRequests              int64                         `json:"failed_requests"`
+	SuccessPercentage           float64                       `json:"success_percentage"`
+	InputTokens                 int64                         `json:"input_tokens"`
+	EffectiveInputTokens        int64                         `json:"effective_input_tokens"`
+	LongContextInputTokens      int64                         `json:"long_context_input_tokens,omitempty"`
+	LongContextCachedTokens     int64                         `json:"long_context_cached_tokens,omitempty"`
+	LongContextOutputTokens     int64                         `json:"long_context_output_tokens,omitempty"`
+	OutputTokens                int64                         `json:"output_tokens"`
+	ReasoningTokens             int64                         `json:"reasoning_tokens"`
+	CachedTokens                int64                         `json:"cached_tokens"`
+	TotalTokens                 int64                         `json:"total_tokens"`
+	CacheRatio                  float64                       `json:"cache_ratio"`
+	AvgLatencyMs                float64                       `json:"avg_latency_ms"`
+	AnthropicCacheWrite5mTokens int64                         `json:"anthropic_cache_write_5m_tokens,omitempty"`
+	AnthropicCacheWrite1hTokens int64                         `json:"anthropic_cache_write_1h_tokens,omitempty"`
+	GPT54                       CacheStatisticsModelBreakdown `json:"gpt_5_4"`
 }
 
 type CacheStatisticsBreakdownBucket struct {
@@ -75,22 +75,22 @@ type CacheStatisticsModelBreakdown struct {
 }
 
 type CacheStatisticsModelSummary struct {
-	Model                   string  `json:"model"`
-	Requests                int64   `json:"requests"`
-	FailedRequests          int64   `json:"failed_requests"`
-	InputTokens             int64   `json:"input_tokens"`
-	EffectiveInputTokens    int64   `json:"effective_input_tokens"`
-	LongContextInputTokens  int64   `json:"long_context_input_tokens,omitempty"`
-	LongContextCachedTokens int64   `json:"long_context_cached_tokens,omitempty"`
-	LongContextOutputTokens int64   `json:"long_context_output_tokens,omitempty"`
-	OutputTokens                    int64   `json:"output_tokens"`
-	ReasoningTokens                 int64   `json:"reasoning_tokens"`
-	CachedTokens                    int64   `json:"cached_tokens"`
-	TotalTokens                     int64   `json:"total_tokens"`
-	CacheRatio                      float64 `json:"cache_ratio"`
-	AvgLatencyMs                    float64 `json:"avg_latency_ms"`
-	AnthropicCacheWrite5mTokens     int64   `json:"anthropic_cache_write_5m_tokens,omitempty"`
-	AnthropicCacheWrite1hTokens     int64   `json:"anthropic_cache_write_1h_tokens,omitempty"`
+	Model                       string  `json:"model"`
+	Requests                    int64   `json:"requests"`
+	FailedRequests              int64   `json:"failed_requests"`
+	InputTokens                 int64   `json:"input_tokens"`
+	EffectiveInputTokens        int64   `json:"effective_input_tokens"`
+	LongContextInputTokens      int64   `json:"long_context_input_tokens,omitempty"`
+	LongContextCachedTokens     int64   `json:"long_context_cached_tokens,omitempty"`
+	LongContextOutputTokens     int64   `json:"long_context_output_tokens,omitempty"`
+	OutputTokens                int64   `json:"output_tokens"`
+	ReasoningTokens             int64   `json:"reasoning_tokens"`
+	CachedTokens                int64   `json:"cached_tokens"`
+	TotalTokens                 int64   `json:"total_tokens"`
+	CacheRatio                  float64 `json:"cache_ratio"`
+	AvgLatencyMs                float64 `json:"avg_latency_ms"`
+	AnthropicCacheWrite5mTokens int64   `json:"anthropic_cache_write_5m_tokens,omitempty"`
+	AnthropicCacheWrite1hTokens int64   `json:"anthropic_cache_write_1h_tokens,omitempty"`
 }
 
 type CacheStatisticsDaySummary struct {
@@ -452,6 +452,8 @@ func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStati
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
+	event.Timestamp = timestamp
+	event = s.estimateAntigravityCacheCreation(ctx, event)
 	cache := event.Cache
 	eventKey := buildCacheStatisticsEventKey(event)
 	if s.isPostgres() {
@@ -503,7 +505,6 @@ ON CONFLICT (event_key) DO NOTHING`,
 		if err != nil {
 			return fmt.Errorf("cache statistics store: insert event: %w", err)
 		}
-		s.estimateAntigravityCacheCreation(ctx, event)
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -549,27 +550,29 @@ INSERT OR IGNORE INTO cache_statistics_requests (
 	if err != nil {
 		return fmt.Errorf("cache statistics store: insert event: %w", err)
 	}
-	s.estimateAntigravityCacheCreation(ctx, event)
 	return nil
 }
 
-func (s *CacheStatisticsStore) estimateAntigravityCacheCreation(ctx context.Context, event CacheStatisticsEvent) {
+func (s *CacheStatisticsStore) estimateAntigravityCacheCreation(ctx context.Context, event CacheStatisticsEvent) CacheStatisticsEvent {
 	if s == nil || s.db == nil {
-		return
+		return event
 	}
 	if !strings.Contains(strings.ToLower(event.Model), "claude") {
-		return
+		return event
 	}
 	if strings.ToLower(strings.TrimSpace(event.Provider)) != "antigravity" {
-		return
+		return event
 	}
 	streamID := strings.TrimSpace(event.StreamID)
 	if streamID == "" {
-		return
+		return event
+	}
+	if anthropicCacheCreationTokens(event.AnthropicCache) > 0 {
+		return event
 	}
 	currentCacheRead := anthropicCacheReadTokens(event.AnthropicCache)
 	if currentCacheRead <= 0 {
-		return
+		return event
 	}
 	timestamp := event.Timestamp
 	if timestamp.IsZero() {
@@ -577,57 +580,52 @@ func (s *CacheStatisticsStore) estimateAntigravityCacheCreation(ctx context.Cont
 	}
 	windowStart := timestamp.Add(-1 * time.Hour)
 
-	var prevID int64
 	var prevCacheRead int64
 	if s.isPostgres() {
 		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT id, COALESCE(anthropic_cache_read_input_tokens, 0)
+SELECT COALESCE(anthropic_cache_read_input_tokens, 0)
 FROM %s
 WHERE messages_stream_id = %s
   AND LOWER(model) LIKE '%%claude%%'
-  AND provider = 'antigravity'
+  AND LOWER(provider) = 'antigravity'
   AND requested_at < %s
   AND requested_at > %s
-  AND anthropic_cache_creation_input_tokens = 0
 ORDER BY requested_at DESC
 LIMIT 1`, s.requestsTableName(), s.bind(1), s.bind(2), s.bind(3)),
 			streamID, timestamp, windowStart,
-		).Scan(&prevID, &prevCacheRead)
+		).Scan(&prevCacheRead)
 		if err != nil {
-			return
+			return event
 		}
-		estimated := currentCacheRead - prevCacheRead
-		if estimated <= 0 {
-			return
-		}
-		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET anthropic_cache_creation_input_tokens = %s WHERE id = %s`,
-			s.requestsTableName(), s.bind(1), s.bind(2)), estimated, prevID)
 	} else {
 		err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-SELECT id, COALESCE(anthropic_cache_read_input_tokens, 0)
+SELECT COALESCE(anthropic_cache_read_input_tokens, 0)
 FROM %s
 WHERE messages_stream_id = ?
   AND LOWER(model) LIKE '%%claude%%'
-  AND provider = 'antigravity'
+  AND LOWER(provider) = 'antigravity'
   AND requested_at < ?
   AND requested_at > ?
-  AND anthropic_cache_creation_input_tokens = 0
 ORDER BY requested_at DESC
 LIMIT 1`, s.requestsTableName()),
 			streamID,
 			timestamp.UTC().Format(time.RFC3339Nano),
 			windowStart.UTC().Format(time.RFC3339Nano),
-		).Scan(&prevID, &prevCacheRead)
+		).Scan(&prevCacheRead)
 		if err != nil {
-			return
+			return event
 		}
-		estimated := currentCacheRead - prevCacheRead
-		if estimated <= 0 {
-			return
-		}
-		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET anthropic_cache_creation_input_tokens = ? WHERE id = ?`,
-			s.requestsTableName()), estimated, prevID)
 	}
+
+	estimated := currentCacheRead - normaliseNonNegative(prevCacheRead)
+	if estimated < 0 {
+		estimated = 0
+	}
+	event.AnthropicCache.CacheCreationInputTokens = estimated
+	if estimated > 0 && strings.TrimSpace(event.AnthropicCache.TTL) == "" {
+		event.AnthropicCache.TTL = "1h"
+	}
+	return event
 }
 
 func (s *CacheStatisticsStore) Snapshot(ctx context.Context, recentLimit, modelLimit, days int) (CacheStatisticsSnapshot, error) {
@@ -949,8 +947,8 @@ SELECT
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0),
-    COALESCE(SUM(CASE WHEN anthropic_cache_ttl IN ('', '5m') AND anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0),
-    COALESCE(SUM(CASE WHEN anthropic_cache_ttl = '1h' THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
+    0,
+    COALESCE(SUM(CASE WHEN anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
@@ -1014,8 +1012,8 @@ SELECT
     COALESCE(SUM(cached_tokens), 0),
     COALESCE(SUM(total_tokens), 0),
     COALESCE(AVG(latency_ms), 0),
-    COALESCE(SUM(CASE WHEN anthropic_cache_ttl IN ('', '5m') AND anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0),
-    COALESCE(SUM(CASE WHEN anthropic_cache_ttl = '1h' THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
+    0,
+    COALESCE(SUM(CASE WHEN anthropic_cache_creation_input_tokens > 0 THEN anthropic_cache_creation_input_tokens ELSE 0 END), 0)
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}

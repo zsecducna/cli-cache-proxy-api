@@ -17,7 +17,12 @@ const (
 	quotaAutoDisabledAtMetadataKey     = "quota_auto_disabled_at"
 	quotaAutoDisabledReasonMetadataKey = "quota_auto_disabled_reason"
 
+	quotaAutoCooldownMetadataKey       = "quota_auto_cooldown"
+	quotaAutoCooldownUntilMetadataKey  = "quota_auto_cooldown_until"
+	quotaAutoCooldownReasonMetadataKey = "quota_auto_cooldown_reason"
+
 	quotaAutoDisabledStatusPrefix = "disabled automatically due to low remaining quota"
+	quotaAutoCooldownStatusPrefix = "temporarily disabled due to exhausted quota"
 )
 
 var (
@@ -80,6 +85,30 @@ var (
 		"ratio",
 		"fraction",
 	)
+	quotaResetTimeKeys = normalizedQuotaKeySet(
+		"reset_at",
+		"resetAt",
+		"resets_at",
+		"resetsAt",
+		"reset_time",
+		"resetTime",
+		"next_reset_at",
+		"nextResetAt",
+		"quota_reset_at",
+		"quotaResetAt",
+	)
+	quotaResetSecondsKeys = normalizedQuotaKeySet(
+		"reset_seconds",
+		"resetSeconds",
+		"resets_in_seconds",
+		"resetsInSeconds",
+		"reset_in_seconds",
+		"resetInSeconds",
+		"seconds_until_reset",
+		"secondsUntilReset",
+		"retry_after_seconds",
+		"retryAfterSeconds",
+	)
 	quotaWindowTagKeys = normalizedQuotaKeySet(
 		"window",
 		"period",
@@ -93,6 +122,8 @@ var (
 type quotaAutomationSnapshot struct {
 	fiveHoursRemainingPercent *float64
 	sevenDaysRemainingPercent *float64
+	fiveHoursResetAt          *time.Time
+	sevenDaysResetAt          *time.Time
 }
 
 func applyQuotaAutomation(auth *Auth, existing *Auth) {
@@ -104,8 +135,27 @@ func applyQuotaAutomation(auth *Auth, existing *Auth) {
 	if !autoDisabled && existing != nil {
 		autoDisabled = quotaAutomationMarked(existing.Metadata)
 	}
+	autoCooldown := quotaAutoCooldownMarked(auth.Metadata)
+	if !autoCooldown && existing != nil {
+		autoCooldown = quotaAutoCooldownMarked(existing.Metadata)
+	}
+	if auth.Disabled && !autoDisabled && !autoCooldown {
+		return
+	}
 
-	snapshot := readQuotaAutomationSnapshot(auth.Metadata)
+	now := time.Now().UTC()
+	snapshot := readQuotaAutomationSnapshotAt(auth.Metadata, now)
+	if reason, resetAt, ok := quotaExhaustionCooldown(snapshot, now); ok {
+		markQuotaAutoCooldown(auth, reason, resetAt)
+		return
+	}
+	if autoCooldown {
+		clearQuotaAutoCooldown(auth)
+	}
+	if autoDisabled && quotaSnapshotHasReset(snapshot) {
+		clearQuotaAutoDisabled(auth)
+		return
+	}
 	shouldDisable, reason := shouldAutoDisableFromQuota(auth, snapshot, autoDisabled)
 	if shouldDisable {
 		markQuotaAutoDisabled(auth, existing, reason)
@@ -145,13 +195,54 @@ func quotaWindowsRecovered(snapshot quotaAutomationSnapshot) bool {
 
 func quotaAutoDisableReason(snapshot quotaAutomationSnapshot) string {
 	reasons := make([]string, 0, 2)
-	if snapshot.fiveHoursRemainingPercent != nil && *snapshot.fiveHoursRemainingPercent <= quotaAutoDisable5HoursThreshold {
+	if snapshot.fiveHoursResetAt == nil && snapshot.fiveHoursRemainingPercent != nil && *snapshot.fiveHoursRemainingPercent <= quotaAutoDisable5HoursThreshold {
 		reasons = append(reasons, fmt.Sprintf("5hrs remaining quota %s%% <= %s%%", formatQuotaPercent(*snapshot.fiveHoursRemainingPercent), formatQuotaPercent(quotaAutoDisable5HoursThreshold)))
 	}
-	if snapshot.sevenDaysRemainingPercent != nil && *snapshot.sevenDaysRemainingPercent <= quotaAutoDisable7DaysThreshold {
+	if snapshot.sevenDaysResetAt == nil && snapshot.sevenDaysRemainingPercent != nil && *snapshot.sevenDaysRemainingPercent <= quotaAutoDisable7DaysThreshold {
 		reasons = append(reasons, fmt.Sprintf("7days remaining quota %s%% <= %s%%", formatQuotaPercent(*snapshot.sevenDaysRemainingPercent), formatQuotaPercent(quotaAutoDisable7DaysThreshold)))
 	}
 	return strings.Join(reasons, "; ")
+}
+
+func quotaExhaustionCooldown(snapshot quotaAutomationSnapshot, now time.Time) (string, time.Time, bool) {
+	if reason, resetAt, ok := quotaWindowExhaustionCooldown("7days", snapshot.sevenDaysRemainingPercent, snapshot.sevenDaysResetAt, now); ok {
+		return reason, resetAt, true
+	}
+	return quotaWindowExhaustionCooldown("5hrs", snapshot.fiveHoursRemainingPercent, snapshot.fiveHoursResetAt, now)
+}
+
+func quotaWindowExhaustionCooldown(label string, remaining *float64, resetAt *time.Time, now time.Time) (string, time.Time, bool) {
+	if remaining == nil || *remaining > 0 || resetAt == nil {
+		return "", time.Time{}, false
+	}
+	reset := resetAt.UTC()
+	if !reset.After(now) {
+		return "", time.Time{}, false
+	}
+	reason := fmt.Sprintf("%s quota exhausted; reset at %s", label, reset.Format(time.RFC3339))
+	return reason, reset, true
+}
+
+func quotaSnapshotHasReset(snapshot quotaAutomationSnapshot) bool {
+	return snapshot.fiveHoursResetAt != nil || snapshot.sevenDaysResetAt != nil
+}
+
+func quotaAutomationCooldown(auth *Auth, now time.Time) (string, time.Time, bool) {
+	if auth == nil {
+		return "", time.Time{}, false
+	}
+	snapshot := readQuotaAutomationSnapshotAt(auth.Metadata, now)
+	if reason, resetAt, ok := quotaExhaustionCooldown(snapshot, now); ok {
+		return reason, resetAt, true
+	}
+	if resetAt, ok := quotaAutoCooldownUntil(auth.Metadata); ok && resetAt.After(now) {
+		reason := quotaAutoCooldownReason(auth.Metadata)
+		if reason == "" {
+			reason = "quota exhausted"
+		}
+		return reason, resetAt, true
+	}
+	return "", time.Time{}, false
 }
 
 func markQuotaAutoDisabled(auth *Auth, existing *Auth, reason string) {
@@ -209,6 +300,54 @@ func clearQuotaAutoDisabled(auth *Auth) {
 	auth.StatusMessage = ""
 }
 
+func markQuotaAutoCooldown(auth *Auth, reason string, resetAt time.Time) {
+	if auth == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	resetAt = resetAt.UTC()
+	auth.Metadata["disabled"] = false
+	auth.Metadata[quotaAutoCooldownMetadataKey] = true
+	auth.Metadata[quotaAutoCooldownUntilMetadataKey] = resetAt.Format(time.RFC3339Nano)
+	if reason != "" {
+		auth.Metadata[quotaAutoCooldownReasonMetadataKey] = reason
+	} else {
+		delete(auth.Metadata, quotaAutoCooldownReasonMetadataKey)
+	}
+	delete(auth.Metadata, quotaAutoDisabledMetadataKey)
+	delete(auth.Metadata, quotaAutoDisabledAtMetadataKey)
+	delete(auth.Metadata, quotaAutoDisabledReasonMetadataKey)
+
+	auth.Disabled = false
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.StatusMessage = quotaAutoCooldownStatusMessage(reason, resetAt)
+	auth.NextRetryAfter = resetAt
+	auth.Quota = QuotaState{
+		Exceeded:      true,
+		Reason:        reason,
+		NextRecoverAt: resetAt,
+	}
+}
+
+func clearQuotaAutoCooldown(auth *Auth) {
+	if auth == nil || !quotaAutoCooldownMarked(auth.Metadata) {
+		return
+	}
+	delete(auth.Metadata, quotaAutoCooldownMetadataKey)
+	delete(auth.Metadata, quotaAutoCooldownUntilMetadataKey)
+	delete(auth.Metadata, quotaAutoCooldownReasonMetadataKey)
+	if auth.Unavailable && auth.Quota.Exceeded {
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		auth.Quota = QuotaState{}
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+	}
+}
+
 func quotaAutoDisabledStatusMessage(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -217,11 +356,36 @@ func quotaAutoDisabledStatusMessage(reason string) string {
 	return quotaAutoDisabledStatusPrefix + ": " + reason
 }
 
+func quotaAutoCooldownStatusMessage(reason string, resetAt time.Time) string {
+	parts := []string{quotaAutoCooldownStatusPrefix}
+	if reason != "" {
+		parts = append(parts, reason)
+	}
+	if !resetAt.IsZero() {
+		parts = append(parts, "reset at "+resetAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, ": ")
+}
+
 func quotaAutomationMarked(metadata map[string]any) bool {
 	if len(metadata) == 0 {
 		return false
 	}
 	switch v := metadata[quotaAutoDisabledMetadataKey].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
+func quotaAutoCooldownMarked(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	switch v := metadata[quotaAutoCooldownMetadataKey].(type) {
 	case bool:
 		return v
 	case string:
@@ -252,9 +416,15 @@ func quotaAutoDisabledAt(metadata map[string]any) string {
 }
 
 func readQuotaAutomationSnapshot(metadata map[string]any) quotaAutomationSnapshot {
+	return readQuotaAutomationSnapshotAt(metadata, time.Now().UTC())
+}
+
+func readQuotaAutomationSnapshotAt(metadata map[string]any, now time.Time) quotaAutomationSnapshot {
 	return quotaAutomationSnapshot{
 		fiveHoursRemainingPercent: findQuotaWindowRemainingPercent(metadata, fiveHourQuotaWindowAliases),
 		sevenDaysRemainingPercent: findQuotaWindowRemainingPercent(metadata, sevenDayQuotaWindowAliases),
+		fiveHoursResetAt:          findQuotaWindowResetAt(metadata, fiveHourQuotaWindowAliases, now),
+		sevenDaysResetAt:          findQuotaWindowResetAt(metadata, sevenDayQuotaWindowAliases, now),
 	}
 }
 
@@ -288,6 +458,36 @@ func findQuotaWindowRemainingPercent(node any, aliases map[string]struct{}) *flo
 	return nil
 }
 
+func findQuotaWindowResetAt(node any, aliases map[string]struct{}, now time.Time) *time.Time {
+	switch typed := node.(type) {
+	case map[string]any:
+		if value, ok := quotaWindowResetFromTaggedMap(typed, aliases, now); ok {
+			return timePtr(value)
+		}
+		for key, rawValue := range typed {
+			normalizedKey := normalizeQuotaKey(key)
+			if _, ok := aliases[normalizedKey]; ok {
+				if value, found := findResetAtForWindowValue(rawValue, now); found {
+					return timePtr(value)
+				}
+			}
+			if value, found := combinedQuotaWindowResetAt(normalizedKey, rawValue, aliases, now); found {
+				return timePtr(value)
+			}
+			if nested := findQuotaWindowResetAt(rawValue, aliases, now); nested != nil {
+				return nested
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if nested := findQuotaWindowResetAt(item, aliases, now); nested != nil {
+				return nested
+			}
+		}
+	}
+	return nil
+}
+
 func quotaWindowPercentFromTaggedMap(node map[string]any, aliases map[string]struct{}) (float64, bool) {
 	for key, rawValue := range node {
 		if _, ok := quotaWindowTagKeys[normalizeQuotaKey(key)]; !ok {
@@ -299,6 +499,19 @@ func quotaWindowPercentFromTaggedMap(node map[string]any, aliases map[string]str
 		return findRemainingPercentInMap(node, true)
 	}
 	return 0, false
+}
+
+func quotaWindowResetFromTaggedMap(node map[string]any, aliases map[string]struct{}, now time.Time) (time.Time, bool) {
+	for key, rawValue := range node {
+		if _, ok := quotaWindowTagKeys[normalizeQuotaKey(key)]; !ok {
+			continue
+		}
+		if !quotaWindowAliasMatches(rawValue, aliases) {
+			continue
+		}
+		return findResetAtInMap(node, now)
+	}
+	return time.Time{}, false
 }
 
 func quotaWindowAliasMatches(value any, aliases map[string]struct{}) bool {
@@ -341,6 +554,26 @@ func combinedQuotaWindowPercent(normalizedKey string, value any, aliases map[str
 	}
 }
 
+func combinedQuotaWindowResetAt(normalizedKey string, value any, aliases map[string]struct{}, now time.Time) (time.Time, bool) {
+	if normalizedKey == "" || len(aliases) == 0 || !strings.Contains(normalizedKey, "reset") {
+		return time.Time{}, false
+	}
+	hasAlias := false
+	for alias := range aliases {
+		if strings.Contains(normalizedKey, alias) {
+			hasAlias = true
+			break
+		}
+	}
+	if !hasAlias {
+		return time.Time{}, false
+	}
+	if strings.Contains(normalizedKey, "seconds") || strings.Contains(normalizedKey, "secs") {
+		return parseResetSecondsValue(value, now)
+	}
+	return parseResetTimeValue(value, now)
+}
+
 func findRemainingPercentForWindowValue(value any) (float64, bool) {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -354,6 +587,22 @@ func findRemainingPercentForWindowValue(value any) (float64, bool) {
 		return 0, false
 	default:
 		return parseQuotaPercentValue(value)
+	}
+}
+
+func findResetAtForWindowValue(value any, now time.Time) (time.Time, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return findResetAtInMap(typed, now)
+	case []any:
+		for _, item := range typed {
+			if resetAt, ok := findResetAtForWindowValue(item, now); ok {
+				return resetAt, true
+			}
+		}
+		return time.Time{}, false
+	default:
+		return parseResetTimeValue(value, now)
 	}
 }
 
@@ -384,6 +633,23 @@ func findRemainingPercentInMap(node map[string]any, allowBarePercent bool) (floa
 		}
 	}
 	return 0, false
+}
+
+func findResetAtInMap(node map[string]any, now time.Time) (time.Time, bool) {
+	for key, rawValue := range node {
+		normalizedKey := normalizeQuotaKey(key)
+		switch {
+		case containsNormalizedQuotaKey(quotaResetTimeKeys, normalizedKey):
+			if value, ok := parseResetTimeValue(rawValue, now); ok {
+				return value, true
+			}
+		case containsNormalizedQuotaKey(quotaResetSecondsKeys, normalizedKey):
+			if value, ok := parseResetSecondsValue(rawValue, now); ok {
+				return value, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func extractPercentFromRemainingNode(node any) (float64, bool) {
@@ -451,6 +717,41 @@ func parseQuotaRatioValue(value any) (float64, bool) {
 	return parsed * 100, true
 }
 
+func parseResetTimeValue(value any, now time.Time) (time.Time, bool) {
+	if parsed, ok := parseTimeValue(value); ok && !parsed.IsZero() {
+		return parsed.UTC(), true
+	}
+	if parsed, ok := parseQuotaPercentValue(value); ok && parsed > 0 && parsed < 10_000_000 {
+		return now.Add(time.Duration(parsed) * time.Second).UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func parseResetSecondsValue(value any, now time.Time) (time.Time, bool) {
+	seconds, ok := parseQuotaPercentValue(value)
+	if !ok || seconds <= 0 {
+		return time.Time{}, false
+	}
+	return now.Add(time.Duration(seconds) * time.Second).UTC(), true
+}
+
+func quotaAutoCooldownUntil(metadata map[string]any) (time.Time, bool) {
+	if len(metadata) == 0 {
+		return time.Time{}, false
+	}
+	return parseTimeValue(metadata[quotaAutoCooldownUntilMetadataKey])
+}
+
+func quotaAutoCooldownReason(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if raw, ok := metadata[quotaAutoCooldownReasonMetadataKey].(string); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
 func normalizedQuotaKeySet(keys ...string) map[string]struct{} {
 	set := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
@@ -484,5 +785,9 @@ func formatQuotaPercent(value float64) string {
 }
 
 func float64Ptr(value float64) *float64 {
+	return &value
+}
+
+func timePtr(value time.Time) *time.Time {
 	return &value
 }

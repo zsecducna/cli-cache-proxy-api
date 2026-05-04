@@ -238,6 +238,96 @@ func TestFillFirstSelectorPick_PrefersHighestRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestFillFirstSelectorPick_SkipsExhaustedFiveHourOAuthUntilReset(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	resetAt := time.Now().Add(time.Hour).UTC()
+	auths := []*Auth{
+		{
+			ID:         "high-priority-exhausted",
+			Attributes: map[string]string{"priority": "10"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 0, "reset_at": resetAt.Format(time.RFC3339)},
+					"7days": map[string]any{"remaining_percent": 60},
+				},
+			},
+		},
+		{
+			ID:         "lower-priority-ready",
+			Attributes: map[string]string{"priority": "0"},
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 40},
+					"7days": map[string]any{"remaining_percent": 40},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Pick() auth = nil")
+	}
+	if got.ID != "lower-priority-ready" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "lower-priority-ready")
+	}
+}
+
+func TestSelectorQuotaCooldown_WeeklyOverridesFiveHourWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	fiveHourReset := now.Add(5 * time.Hour)
+	weeklyReset := now.Add(7 * 24 * time.Hour)
+	auth := &Auth{
+		ID: "weekly-exhausted",
+		Metadata: map[string]any{
+			"quota": map[string]any{
+				"5hrs":  map[string]any{"remaining_percent": 80, "reset_at": fiveHourReset.Format(time.RFC3339)},
+				"7days": map[string]any{"remaining_percent": 0, "reset_at": weeklyReset.Format(time.RFC3339)},
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5.5", now)
+	if !blocked || reason != blockReasonCooldown {
+		t.Fatalf("isAuthBlockedForModel() blocked=%v reason=%v, want cooldown", blocked, reason)
+	}
+	if !next.Equal(weeklyReset) {
+		t.Fatalf("isAuthBlockedForModel() next = %v, want weekly reset %v", next, weeklyReset)
+	}
+}
+
+func TestSelectorQuotaCooldown_ExpiresAtReset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	resetAt := now.Add(5 * time.Minute)
+	auth := &Auth{
+		ID: "five-hour-exhausted",
+		Metadata: map[string]any{
+			"quota": map[string]any{
+				"5hrs":  map[string]any{"remaining_percent": 0, "reset_at": resetAt.Format(time.RFC3339)},
+				"7days": map[string]any{"remaining_percent": 50},
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "", now)
+	if !blocked || reason != blockReasonCooldown || !next.Equal(resetAt) {
+		t.Fatalf("isAuthBlockedForModel() before reset = blocked %v reason %v next %v, want cooldown until %v", blocked, reason, next, resetAt)
+	}
+	blocked, reason, next = isAuthBlockedForModel(auth, "", resetAt.Add(time.Nanosecond))
+	if blocked || reason != blockReasonNone || !next.IsZero() {
+		t.Fatalf("isAuthBlockedForModel() after reset = blocked %v reason %v next %v, want ready", blocked, reason, next)
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 
