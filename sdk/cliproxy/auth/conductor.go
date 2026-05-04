@@ -58,7 +58,18 @@ const (
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
 	CloseAllExecutionSessionsID = "__all_execution_sessions__"
+
+	quotaSelectionRefreshStaleAfter = 15 * time.Minute
+	sessionQuotaRefreshTurnLimit    = 20
 )
+
+type sessionQuotaState struct {
+	authID   string
+	provider string
+	model    string
+	turns    int
+	rotate   bool
+}
 
 // RefreshEvaluator allows runtime state to override refresh decisions.
 type RefreshEvaluator interface {
@@ -148,13 +159,16 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store     Store
-	executors map[string]ProviderExecutor
-	selector  Selector
-	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	store             Store
+	executors         map[string]ProviderExecutor
+	selector          Selector
+	hook              Hook
+	mu                sync.RWMutex
+	auths             map[string]*Auth
+	scheduler         *authScheduler
+	sessionMu         sync.Mutex
+	sessionQuota      map[string]*sessionQuotaState
+	executionSessions map[string]map[string]struct{}
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -200,13 +214,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		providerOffsets:   make(map[string]int),
+		modelPoolOffsets:  make(map[string]int),
+		sessionQuota:      make(map[string]*sessionQuotaState),
+		executionSessions: make(map[string]map[string]struct{}),
 	}
 	manager.claudeMessagesSelectorTTL = time.Hour
 	manager.claudeMessagesSelector = newClaudeMessagesSessionAffinitySelector(manager.claudeMessagesSelectorTTL)
@@ -769,6 +785,16 @@ func selectorIncludesAllAvailabilityRanks(selector Selector) bool {
 	}
 }
 
+func (m *Manager) sessionQuotaSelectorForMixed(model string, opts cliproxyexecutor.Options) Selector {
+	if forceClaudeMessagesSessionAffinity(opts) {
+		return m.claudeMessagesAffinitySelector()
+	}
+	if m == nil {
+		return nil
+	}
+	return effectiveBuiltInSelector(m.selector, "", model)
+}
+
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
 	if registryRef == nil || auth == nil {
 		return true
@@ -879,7 +905,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, sessionSelector Selector, sessionProvider, sessionModel string, opts cliproxyexecutor.Options) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -923,12 +949,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed {
 			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.recordSessionTurnComplete(context.Background(), sessionSelector, sessionProvider, sessionModel, opts, auth.ID)
+			m.refreshStreamSessionQuotaOnEnd(context.Background(), sessionSelector, sessionProvider, sessionModel, opts)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool, sessionSelector Selector, sessionProvider, sessionModel string) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
@@ -1013,7 +1041,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, sessionSelector, sessionProvider, sessionModel, opts), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1464,6 +1492,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			m.recordSessionTurnComplete(context.Background(), m.sessionQuotaSelectorForMixed(routeModel, opts), "mixed", routeModel, opts, auth.ID)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1597,7 +1626,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
+		sessionSelector := m.sessionQuotaSelectorForMixed(routeModel, opts)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled, sessionSelector, "mixed", routeModel)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -2977,6 +3007,7 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	if m == nil || sessionID == "" {
 		return
 	}
+	m.refreshSessionQuotaOnClose(context.Background(), sessionID)
 
 	m.mu.RLock()
 	executors := make([]ProviderExecutor, 0, len(m.executors))
@@ -2989,6 +3020,30 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 		if closer, ok := executors[i].(ExecutionSessionCloser); ok && closer != nil {
 			closer.CloseExecutionSession(sessionID)
 		}
+	}
+}
+
+func (m *Manager) refreshSessionQuotaOnClose(ctx context.Context, executionSessionID string) {
+	if m == nil || executionSessionID == "" {
+		return
+	}
+	authIDs := make([]string, 0)
+	m.sessionMu.Lock()
+	keys := m.executionSessions[executionSessionID]
+	delete(m.executionSessions, executionSessionID)
+	for key := range keys {
+		state := m.sessionQuota[key]
+		if state == nil {
+			continue
+		}
+		if state.authID != "" && state.turns > 0 && state.turns < sessionQuotaRefreshTurnLimit {
+			authIDs = append(authIDs, state.authID)
+		}
+		delete(m.sessionQuota, key)
+	}
+	m.sessionMu.Unlock()
+	for _, authID := range authIDs {
+		m.refreshQuotaUsageByAuthID(ctx, authID)
 	}
 }
 
@@ -3011,6 +3066,131 @@ func selectorForPerRequestRetry(selector Selector, tried map[string]struct{}) Se
 		return &RoundRobinSelector{includeAllAvailabilityRanks: sessionSelector.includeAllAvailabilityRanks}
 	}
 	return selector
+}
+
+func selectorSessionAffinityKey(selector Selector, provider, model string, opts cliproxyexecutor.Options) string {
+	sessionSelector, ok := selector.(*SessionAffinitySelector)
+	if !ok || sessionSelector == nil {
+		return ""
+	}
+	primaryID, _ := extractSessionIDsWithConfig(opts.Headers, opts.OriginalRequest, opts.Metadata, !sessionSelector.disableMessageHashFallback)
+	if primaryID == "" {
+		return ""
+	}
+	return provider + "::" + primaryID + "::" + model
+}
+
+func (m *Manager) prepareSessionQuotaRotation(selector Selector, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) map[string]struct{} {
+	if m == nil || pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return tried
+	}
+	key := selectorSessionAffinityKey(selector, provider, model, opts)
+	if key == "" {
+		return tried
+	}
+	var authID string
+	m.sessionMu.Lock()
+	if state := m.sessionQuota[key]; state != nil && state.rotate && state.authID != "" {
+		authID = state.authID
+	}
+	m.sessionMu.Unlock()
+	if authID == "" {
+		return tried
+	}
+	if sessionSelector, ok := selector.(*SessionAffinitySelector); ok && sessionSelector != nil {
+		sessionSelector.cache.Invalidate(key)
+	}
+	if tried == nil {
+		tried = make(map[string]struct{})
+	}
+	tried[authID] = struct{}{}
+	return tried
+}
+
+func (m *Manager) recordSessionTurnComplete(ctx context.Context, selector Selector, provider, model string, opts cliproxyexecutor.Options, authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	auth, ok := m.GetByID(authID)
+	if !ok || !oauthQuotaFirstAuth(auth) {
+		return
+	}
+	key := selectorSessionAffinityKey(selector, provider, model, opts)
+	if key == "" {
+		return
+	}
+
+	var refreshAuthID string
+	m.sessionMu.Lock()
+	state := m.sessionQuota[key]
+	if state == nil || state.authID != authID {
+		state = &sessionQuotaState{authID: authID, provider: provider, model: model}
+		m.sessionQuota[key] = state
+	} else {
+		state.provider = provider
+		state.model = model
+	}
+	state.turns++
+	if executionSessionID := executionSessionIDFromMetadata(opts.Metadata); executionSessionID != "" {
+		keys := m.executionSessions[executionSessionID]
+		if keys == nil {
+			keys = make(map[string]struct{})
+			m.executionSessions[executionSessionID] = keys
+		}
+		keys[key] = struct{}{}
+	}
+	if state.turns >= sessionQuotaRefreshTurnLimit && !state.rotate {
+		state.rotate = true
+		refreshAuthID = state.authID
+	}
+	m.sessionMu.Unlock()
+
+	if refreshAuthID != "" {
+		m.refreshQuotaUsageByAuthID(ctx, refreshAuthID)
+		if sessionSelector, ok := selector.(*SessionAffinitySelector); ok && sessionSelector != nil {
+			sessionSelector.cache.Invalidate(key)
+		}
+	}
+}
+
+func (m *Manager) refreshStreamSessionQuotaOnEnd(ctx context.Context, selector Selector, provider, model string, opts cliproxyexecutor.Options) {
+	if m == nil || executionSessionIDFromMetadata(opts.Metadata) != "" {
+		return
+	}
+	key := selectorSessionAffinityKey(selector, provider, model, opts)
+	if key == "" {
+		return
+	}
+	var authID string
+	m.sessionMu.Lock()
+	state := m.sessionQuota[key]
+	if state != nil && state.authID != "" && state.turns > 0 && state.turns < sessionQuotaRefreshTurnLimit {
+		authID = state.authID
+		delete(m.sessionQuota, key)
+	}
+	m.sessionMu.Unlock()
+	if authID == "" {
+		return
+	}
+	m.refreshQuotaUsageByAuthID(ctx, authID)
+}
+
+func executionSessionIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.ExecutionSessionMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -3042,6 +3222,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, selectorOverride Selector) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	selector := selectorOverride
+	if selector == nil {
+		selector = effectiveBuiltInSelector(m.selector, provider, model)
+	}
+	tried = m.prepareSessionQuotaRotation(selector, provider, model, opts, tried)
 
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
@@ -3081,10 +3266,6 @@ func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, mode
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	selector := selectorOverride
-	if selector == nil {
-		selector = effectiveBuiltInSelector(m.selector, provider, model)
-	}
 	includeAllRanks := selectorIncludesAllAvailabilityRanks(selector)
 	available, errAvailable := m.availableAuthsForRouteModelWithOptions(candidates, provider, model, time.Now(), includeAllRanks)
 	if errAvailable != nil {
@@ -3115,6 +3296,7 @@ func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, mode
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	m.refreshStaleQuotaUsageBeforeSelection(ctx, []string{provider})
 	if forceClaudeMessagesSessionAffinity(opts) {
 		return m.pickNextLegacyWithSelector(ctx, provider, model, opts, tried, m.claudeMessagesAffinitySelector())
 	}
@@ -3181,6 +3363,11 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, selectorOverride Selector) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	selector := selectorOverride
+	if selector == nil {
+		selector = effectiveBuiltInSelector(m.selector, "", model)
+	}
+	tried = m.prepareSessionQuotaRotation(selector, "mixed", model, opts, tried)
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -3237,10 +3424,6 @@ func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	selector := selectorOverride
-	if selector == nil {
-		selector = effectiveBuiltInSelector(m.selector, "", model)
-	}
 	includeAllRanks := selectorIncludesAllAvailabilityRanks(selector)
 	available, errAvailable := m.availableAuthsForRouteModelWithOptions(candidates, "mixed", model, time.Now(), includeAllRanks)
 	if errAvailable != nil {
@@ -3277,6 +3460,7 @@ func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	m.refreshStaleQuotaUsageBeforeSelection(ctx, providers)
 	if forceClaudeMessagesSessionAffinity(opts) {
 		return m.pickNextMixedLegacyWithSelector(ctx, providers, model, opts, tried, m.claudeMessagesAffinitySelector())
 	}
@@ -3529,7 +3713,8 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if len(models) == 0 {
 			continue
 		}
-		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1)
+		sessionSelector := m.sessionQuotaSelectorForMixed(routeModel, creditsOpts)
+		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, models, len(models) > 1, sessionSelector, "mixed", routeModel)
 		if errStream != nil {
 			continue
 		}
@@ -3680,32 +3865,107 @@ func (m *Manager) refreshQuotaUsageOnce(ctx context.Context, now time.Time) {
 		if !quotaUsageRefreshDue(auth, now) {
 			continue
 		}
-		refreshCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			refreshCtx = context.WithValue(refreshCtx, roundTripperContextKey{}, rt)
-			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
-		}
-		executor, ok := m.Executor(auth.Provider)
-		if !ok || executor == nil {
+		m.refreshQuotaUsageAuth(ctx, auth, now)
+	}
+}
+
+func (m *Manager) refreshStaleQuotaUsageBeforeSelection(ctx context.Context, providers []string) {
+	if m == nil {
+		return
+	}
+	providerSet := quotaSelectionProviderSet(providers)
+	if len(providerSet) == 0 {
+		return
+	}
+	now := time.Now()
+	stale := make([]*Auth, 0)
+	for _, auth := range m.List() {
+		if !quotaUsageRefreshStaleForSelection(auth, providerSet, now) {
 			continue
 		}
-		refresher, ok := executor.(QuotaUsageRefresher)
-		if !ok || refresher == nil {
-			continue
+		stale = append(stale, auth)
+	}
+	for _, auth := range stale {
+		m.refreshQuotaUsageAuth(ctx, auth, now)
+	}
+}
+
+func quotaSelectionProviderSet(providers []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		switch providerKey {
+		case "codex", "antigravity":
+			out[providerKey] = struct{}{}
 		}
-		updated, err := refresher.RefreshQuotaUsage(refreshCtx, auth.Clone())
-		if err != nil {
-			log.WithError(err).Debugf("quota/usage refresh failed for %s auth %s", auth.Provider, auth.ID)
-			m.markQuotaUsageRefreshAttempt(ctx, auth, now, err)
-			continue
-		}
-		if updated == nil {
-			updated = auth.Clone()
-		}
-		ensureQuotaUsageRefreshMetadata(updated, now, nil)
-		if _, errUpdate := m.Update(ctx, updated); errUpdate != nil {
-			log.WithError(errUpdate).Debugf("quota/usage refresh update failed for %s auth %s", auth.Provider, auth.ID)
-		}
+	}
+	return out
+}
+
+func quotaUsageRefreshStaleForSelection(auth *Auth, providerSet map[string]struct{}, now time.Time) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if _, ok := providerSet[providerKey]; !ok {
+		return false
+	}
+	if auth.Metadata == nil {
+		return true
+	}
+	if ts, ok := parseTimeValue(auth.Metadata["quota_usage_refreshed_at"]); ok {
+		return !now.Before(ts.Add(quotaSelectionRefreshStaleAfter))
+	}
+	return true
+}
+
+func (m *Manager) refreshQuotaUsageByAuthID(ctx context.Context, authID string) {
+	authID = strings.TrimSpace(authID)
+	if m == nil || authID == "" {
+		return
+	}
+	auth, ok := m.GetByID(authID)
+	if !ok || auth == nil {
+		return
+	}
+	m.refreshQuotaUsageAuth(ctx, auth, time.Now())
+}
+
+func (m *Manager) refreshQuotaUsageAuth(ctx context.Context, auth *Auth, now time.Time) {
+	if m == nil || auth == nil {
+		return
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch providerKey {
+	case "codex", "antigravity", "claude":
+	default:
+		return
+	}
+	refreshCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		refreshCtx = context.WithValue(refreshCtx, roundTripperContextKey{}, rt)
+		refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+	}
+	executor, ok := m.Executor(auth.Provider)
+	if !ok || executor == nil {
+		return
+	}
+	refresher, ok := executor.(QuotaUsageRefresher)
+	if !ok || refresher == nil {
+		return
+	}
+	updated, err := refresher.RefreshQuotaUsage(refreshCtx, auth.Clone())
+	if err != nil {
+		log.WithError(err).Debugf("quota/usage refresh failed for %s auth %s", auth.Provider, auth.ID)
+		m.markQuotaUsageRefreshAttempt(ctx, auth, now, err)
+		return
+	}
+	if updated == nil {
+		updated = auth.Clone()
+	}
+	ensureQuotaUsageRefreshMetadata(updated, now, nil)
+	if _, errUpdate := m.Update(ctx, updated); errUpdate != nil {
+		log.WithError(errUpdate).Debugf("quota/usage refresh update failed for %s auth %s", auth.Provider, auth.ID)
 	}
 }
 

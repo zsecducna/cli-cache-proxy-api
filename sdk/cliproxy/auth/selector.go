@@ -138,12 +138,56 @@ type availabilityRank struct {
 
 func authAvailabilityRank(auth *Auth, model string) availabilityRank {
 	fiveHoursRemaining, sevenDaysRemaining := authQuotaRemainingScores(auth)
+	priority := authPriority(auth)
+	if oauthQuotaFirstAuth(auth) {
+		priority = 0
+	}
 	return availabilityRank{
 		quotaPenalty:       authQuotaPenalty(auth, model),
-		priority:           authPriority(auth),
+		priority:           priority,
 		fiveHoursRemaining: fiveHoursRemaining,
 		sevenDaysRemaining: sevenDaysRemaining,
 	}
+}
+
+func oauthQuotaFirstAuth(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return oauthQuotaFirstProvider(auth.Provider)
+}
+
+func oauthQuotaFirstProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "antigravity":
+		return true
+	default:
+		return false
+	}
+}
+
+func pickRandomOAuthQuotaAuth(provider, model string, auths []*Auth) (*Auth, bool) {
+	if len(auths) == 0 {
+		return nil, false
+	}
+	if !oauthQuotaFirstProvider(provider) && !strings.EqualFold(strings.TrimSpace(provider), "mixed") {
+		return nil, false
+	}
+	for _, auth := range auths {
+		if !oauthQuotaFirstAuth(auth) {
+			return nil, false
+		}
+	}
+	availableByRank, _, _ := collectAvailableByRank(auths, model, time.Now())
+	best, found := bestAvailabilityRank(availableByRank)
+	if !found {
+		return nil, false
+	}
+	group := availableByRank[best]
+	if len(group) == 0 {
+		return nil, false
+	}
+	return group[rand.IntN(len(group))], true
 }
 
 func betterAvailabilityRank(left, right availabilityRank) bool {
@@ -402,6 +446,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if picked, ok := pickRandomOAuthQuotaAuth(provider, model, available); ok {
+		return picked, nil
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {

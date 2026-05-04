@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -44,8 +45,8 @@ func isClaudeSelectionModel(model string) bool {
 }
 
 func prefersFillFirstSelection(provider, model string) bool {
-	if strings.EqualFold(strings.TrimSpace(provider), "antigravity") {
-		return true
+	if oauthQuotaFirstProvider(provider) {
+		return false
 	}
 	return isClaudeSelectionModel(model)
 }
@@ -842,6 +843,8 @@ func (m *modelScheduler) pickReadyAtRankLocked(preferWebsocket bool, rank availa
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyFillFirst {
 		picked = view.pickFirst(predicate)
+	} else if view.hasOAuthQuotaFirst(predicate) {
+		picked = view.pickRandom(predicate)
 	} else {
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -1050,6 +1053,35 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		return entry
 	}
 	return nil
+}
+
+func (v *readyView) hasOAuthQuotaFirst(predicate func(*scheduledAuth) bool) bool {
+	for _, entry := range v.flat {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry != nil && oauthQuotaFirstAuth(entry.auth) {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *readyView) pickRandom(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(v.flat) == 0 {
+		return nil
+	}
+	matches := make([]*scheduledAuth, 0, len(v.flat))
+	for _, entry := range v.flat {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		matches = append(matches, entry)
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	return matches[rand.IntN(len(matches))]
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.

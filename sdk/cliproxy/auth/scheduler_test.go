@@ -229,7 +229,7 @@ func TestSchedulerPick_SkipsExhaustedWeeklyOAuthUntilReset(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_PriorityWinsBeforeQuota(t *testing.T) {
+func TestSchedulerPick_CodexQuotaWinsBeforePriority(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -265,8 +265,8 @@ func TestSchedulerPick_PriorityWinsBeforeQuota(t *testing.T) {
 	if got == nil {
 		t.Fatal("pickSingle() auth = nil")
 	}
-	if got.ID != "high-priority-poorer" {
-		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "high-priority-poorer")
+	if got.ID != "low-priority-rich" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "low-priority-rich")
 	}
 }
 
@@ -358,15 +358,33 @@ func TestSchedulerPick_ClaudeModelUsesFillFirstUnderRoundRobin(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testing.T) {
+func TestSchedulerPick_AntigravityProviderUsesRichestQuotaUnderRoundRobin(t *testing.T) {
 	t.Parallel()
 
 	model := "gemini-2.5-flash"
 	registerSchedulerModels(t, "antigravity", model, "antigravity-scheduler-b", "antigravity-scheduler-a")
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "antigravity-scheduler-b", Provider: "antigravity"},
-		&Auth{ID: "antigravity-scheduler-a", Provider: "antigravity"},
+		&Auth{
+			ID:       "antigravity-scheduler-b",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 90},
+					"7days": map[string]any{"remaining_percent": 90},
+				},
+			},
+		},
+		&Auth{
+			ID:       "antigravity-scheduler-a",
+			Provider: "antigravity",
+			Metadata: map[string]any{
+				"quota": map[string]any{
+					"5hrs":  map[string]any{"remaining_percent": 20},
+					"7days": map[string]any{"remaining_percent": 20},
+				},
+			},
+		},
 	)
 
 	for index := 0; index < 2; index++ {
@@ -377,8 +395,8 @@ func TestSchedulerPick_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testin
 		if got == nil {
 			t.Fatalf("pickSingle() #%d auth = nil", index)
 		}
-		if got.ID != "antigravity-scheduler-a" {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-scheduler-a")
+		if got.ID != "antigravity-scheduler-b" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-scheduler-b")
 		}
 	}
 }
@@ -619,7 +637,7 @@ func TestManagerPickNextMixed_ClaudeMessagesSessionAffinitySticksAcrossQuotaRank
 	}
 }
 
-func TestManagerPickNext_OpenAISessionAffinityPriorityWinsBeforeQuota(t *testing.T) {
+func TestManagerPickNext_CodexSessionAffinityQuotaWinsBeforePriority(t *testing.T) {
 	model := "gpt-session-affinity-priority-test"
 	registerSchedulerModels(t, "codex", model, "low-priority-rich", "high-priority-poorer")
 
@@ -667,8 +685,8 @@ func TestManagerPickNext_OpenAISessionAffinityPriorityWinsBeforeQuota(t *testing
 	if first == nil {
 		t.Fatal("first pickNext() auth = nil")
 	}
-	if first.ID != "high-priority-poorer" {
-		t.Fatalf("first pickNext() auth.ID = %q, want %q", first.ID, "high-priority-poorer")
+	if first.ID != "low-priority-rich" {
+		t.Fatalf("first pickNext() auth.ID = %q, want %q", first.ID, "low-priority-rich")
 	}
 	second, _, errPick := manager.pickNext(context.Background(), "codex", model, opts, nil)
 	if errPick != nil {
@@ -929,8 +947,8 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	)
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
-	for index, wantID := range want {
+	seen := map[string]bool{}
+	for index := 0; index < 200; index++ {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
@@ -938,9 +956,13 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 		if got == nil {
 			t.Fatalf("pickSingle() #%d auth = nil", index)
 		}
-		if got.ID != wantID {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		if got.ID == "codex-http" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want websocket auth", index, got.ID)
 		}
+		seen[got.ID] = true
+	}
+	if !seen["codex-ws-a"] || !seen["codex-ws-b"] {
+		t.Fatalf("websocket random tie seen = %#v, want both websocket auths", seen)
 	}
 }
 
@@ -955,8 +977,8 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 	)
 
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
-	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
-	for index, wantID := range want {
+	seen := map[string]bool{}
+	for index := 0; index < 200; index++ {
 		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
@@ -964,9 +986,13 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 		if got == nil {
 			t.Fatalf("pickSingle() #%d auth = nil", index)
 		}
-		if got.ID != wantID {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		if got.ID == "codex-http" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want websocket auth", index, got.ID)
 		}
+		seen[got.ID] = true
+	}
+	if !seen["codex-ws-a"] || !seen["codex-ws-b"] {
+		t.Fatalf("websocket random tie seen = %#v, want both websocket auths", seen)
 	}
 }
 
@@ -1152,14 +1178,14 @@ func TestManager_PickNextLegacy_ClaudeModelUsesFillFirstUnderRoundRobin(t *testi
 	}
 }
 
-func TestManager_PickNextLegacy_AntigravityProviderUsesFillFirstUnderRoundRobin(t *testing.T) {
+func TestManager_PickNextLegacy_AntigravityProviderUsesRichestQuotaUnderRoundRobin(t *testing.T) {
 	t.Parallel()
 
 	registerSchedulerModels(t, "antigravity", "gemini-2.5-flash", "antigravity-legacy-b", "antigravity-legacy-a")
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["antigravity"] = schedulerTestExecutor{}
-	manager.auths["antigravity-legacy-b"] = &Auth{ID: "antigravity-legacy-b", Provider: "antigravity"}
-	manager.auths["antigravity-legacy-a"] = &Auth{ID: "antigravity-legacy-a", Provider: "antigravity"}
+	manager.auths["antigravity-legacy-b"] = &Auth{ID: "antigravity-legacy-b", Provider: "antigravity", Metadata: map[string]any{"quota": map[string]any{"5hrs": map[string]any{"remaining_percent": 90}, "7days": map[string]any{"remaining_percent": 90}}}}
+	manager.auths["antigravity-legacy-a"] = &Auth{ID: "antigravity-legacy-a", Provider: "antigravity", Metadata: map[string]any{"quota": map[string]any{"5hrs": map[string]any{"remaining_percent": 20}, "7days": map[string]any{"remaining_percent": 20}}}}
 
 	for index := 0; index < 2; index++ {
 		got, _, errPick := manager.pickNextLegacy(context.Background(), "antigravity", "gemini-2.5-flash", cliproxyexecutor.Options{}, map[string]struct{}{})
@@ -1169,8 +1195,8 @@ func TestManager_PickNextLegacy_AntigravityProviderUsesFillFirstUnderRoundRobin(
 		if got == nil {
 			t.Fatalf("pickNextLegacy() #%d auth = nil", index)
 		}
-		if got.ID != "antigravity-legacy-a" {
-			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-legacy-a")
+		if got.ID != "antigravity-legacy-b" {
+			t.Fatalf("pickNextLegacy() #%d auth.ID = %q, want %q", index, got.ID, "antigravity-legacy-b")
 		}
 	}
 }
