@@ -581,7 +581,7 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 	return string(out), nil
 }
 
-// removeOrphanedToolOutputs drops function_call_output / custom_tool_call_output
+// removeOrphanedToolOutputs drops unpaired function_call_output / custom_tool_call_output
 // items whose call_id has no matching function_call / custom_tool_call in the
 // same input array. This happens when an auth switch invalidates the upstream
 // session and a full transcript replay carries tool outputs whose originating
@@ -602,11 +602,9 @@ func removeOrphanedToolOutputs(rawArray string) (string, error) {
 			continue
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if isResponsesToolCallType(itemType) {
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-			if callID != "" {
-				toolCallIDs[callID] = struct{}{}
-			}
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		if callID != "" && isResponsesToolCallType(itemType) {
+			toolCallIDs[callID] = struct{}{}
 		}
 	}
 
@@ -1267,7 +1265,7 @@ func isReplayableResponsesWebsocketUpstreamError(errMsg *interfaces.ErrorMessage
 	if strings.Contains(errText, "previous_response_not_found") || strings.Contains(errText, "previous response with id") {
 		return true
 	}
-	return strings.Contains(errText, "no tool call found") && strings.Contains(errText, "call_id")
+	return (strings.Contains(errText, "no tool call found") || strings.Contains(errText, "no tool output found")) && strings.Contains(errText, "call_id")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {

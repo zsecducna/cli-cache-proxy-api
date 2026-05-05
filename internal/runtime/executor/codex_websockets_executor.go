@@ -708,26 +708,56 @@ func removeOrphanedToolOutputsFromBody(body []byte) []byte {
 	}
 
 	toolCallIDs := make(map[string]struct{}, len(items))
+	toolOutputIDs := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		itemType := strings.TrimSpace(item.Get("type").String())
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID == "" {
+			continue
+		}
+		switch itemType {
+		case "function_call", "custom_tool_call":
+			toolCallIDs[callID] = struct{}{}
+		case "function_call_output", "custom_tool_call_output":
+			toolOutputIDs[callID] = struct{}{}
+		}
+	}
+
+	// Find last index that is NOT a trailing unpaired function_call.
+	// Trailing function_calls without outputs are the "current turn" and must be kept.
+	trailingCallIDs := make(map[string]struct{})
+	for i := len(items) - 1; i >= 0; i-- {
+		itemType := strings.TrimSpace(items[i].Get("type").String())
 		if itemType == "function_call" || itemType == "custom_tool_call" {
-			callID := strings.TrimSpace(item.Get("call_id").String())
+			callID := strings.TrimSpace(items[i].Get("call_id").String())
 			if callID != "" {
-				toolCallIDs[callID] = struct{}{}
+				if _, hasOutput := toolOutputIDs[callID]; !hasOutput {
+					trailingCallIDs[callID] = struct{}{}
+					continue
+				}
 			}
 		}
+		break
 	}
 
 	var filtered []json.RawMessage
 	removed := 0
 	for _, item := range items {
 		itemType := strings.TrimSpace(item.Get("type").String())
-		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
-			callID := strings.TrimSpace(item.Get("call_id").String())
-			if callID != "" {
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID != "" {
+			switch itemType {
+			case "function_call_output", "custom_tool_call_output":
 				if _, ok := toolCallIDs[callID]; !ok {
 					removed++
 					continue
+				}
+			case "function_call", "custom_tool_call":
+				if _, ok := toolOutputIDs[callID]; !ok {
+					if _, trailing := trailingCallIDs[callID]; !trailing {
+						removed++
+						continue
+					}
 				}
 			}
 		}
@@ -738,7 +768,7 @@ func removeOrphanedToolOutputsFromBody(body []byte) []byte {
 		return body
 	}
 
-	log.Infof("codex websockets executor: removed %d orphaned tool output(s) from request", removed)
+	log.Infof("codex websockets executor: removed %d orphaned tool item(s) from request", removed)
 	out, errMarshal := json.Marshal(filtered)
 	if errMarshal != nil {
 		return body
