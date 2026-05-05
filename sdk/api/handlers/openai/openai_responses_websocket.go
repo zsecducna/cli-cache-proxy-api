@@ -282,6 +282,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				break
 			}
 			if !suppressForwardError && isReplayableResponsesWebsocketUpstreamError(forwardErrMsg) {
+				pinnedAuthID = ""
 				forceTranscriptReplayNextRequest = true
 				suppressNextReplayableError = true
 				lastRequest = previousLastRequest
@@ -1241,17 +1242,6 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	switch status {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
 		return true
-	case http.StatusBadRequest:
-		if errMsg.Error != nil {
-			errText := strings.ToLower(errMsg.Error.Error())
-			if strings.Contains(errText, "previous_response_not_found") || strings.Contains(errText, "previous response with id") {
-				return true
-			}
-			if strings.Contains(errText, "no tool call found") && strings.Contains(errText, "call_id") {
-				return true
-			}
-		}
-		return false
 	default:
 		return false
 	}
