@@ -816,3 +816,89 @@ func TestIsWSUpstreamFallbackEligible(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveOrphanedToolOutputsFromBodyDropsOrphanedOutput(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"function_call","call_id":"call-1","name":"tool"},
+		{"type":"function_call_output","call_id":"call-1","output":"ok"},
+		{"type":"function_call_output","call_id":"call-orphan","output":"stale"}
+	]}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	for _, item := range items {
+		if item.Get("call_id").String() == "call-orphan" {
+			t.Fatal("orphaned output not removed")
+		}
+	}
+}
+
+func TestRemoveOrphanedToolOutputsFromBodyKeepsTrailingCalls(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"function_call","call_id":"call-1","name":"tool"},
+		{"type":"function_call","call_id":"call-2","name":"tool2"}
+	]}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("trailing calls should be kept, got %d items", len(items))
+	}
+}
+
+func TestRemoveOrphanedToolOutputsFromBodyStripsNonTrailingOrphanCall(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"function_call","call_id":"call-orphan","name":"tool"},
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"function_call","call_id":"call-trailing","name":"tool2"}
+	]}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (orphan removed, trailing kept), got %d", len(items))
+	}
+	if items[0].Get("role").String() != "user" {
+		t.Fatalf("first item should be user message, got %s", items[0].Raw)
+	}
+	if items[1].Get("call_id").String() != "call-trailing" {
+		t.Fatalf("trailing call should be kept, got %s", items[1].Raw)
+	}
+}
+
+func TestRemoveOrphanedToolOutputsFromBodyInterleavedTrailing(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"function_call","call_id":"call-a","name":"tool"},
+		{"type":"message","role":"assistant","content":"thinking"},
+		{"type":"function_call","call_id":"call-b","name":"tool2"}
+	]}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	for _, item := range items {
+		if item.Get("call_id").String() == "call-a" {
+			t.Fatal("non-trailing orphan call-a should have been removed")
+		}
+	}
+}
+
+func TestRemoveOrphanedToolOutputsFromBodyEmptyInput(t *testing.T) {
+	body := []byte(`{"input":[],"model":"gpt-4"}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	if string(result) != string(body) {
+		t.Fatalf("empty input should return unchanged body")
+	}
+}
+
+func TestRemoveOrphanedToolOutputsFromBodyNoInput(t *testing.T) {
+	body := []byte(`{"model":"gpt-4"}`)
+	result := removeOrphanedToolOutputsFromBody(body)
+	if string(result) != string(body) {
+		t.Fatalf("missing input should return unchanged body")
+	}
+}

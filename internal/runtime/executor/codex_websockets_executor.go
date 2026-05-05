@@ -723,26 +723,21 @@ func removeOrphanedToolOutputsFromBody(body []byte) []byte {
 		}
 	}
 
-	// Find last index that is NOT a trailing unpaired function_call.
-	// Trailing function_calls without outputs are the "current turn" and must be kept.
-	trailingCallIDs := make(map[string]struct{})
+	// Unpaired function_calls after the last user/assistant message are the
+	// "current turn" awaiting output — keep them. Unpaired function_calls
+	// before the last message are orphaned historical items — remove them.
+	lastMsgIdx := -1
 	for i := len(items) - 1; i >= 0; i-- {
 		itemType := strings.TrimSpace(items[i].Get("type").String())
-		if itemType == "function_call" || itemType == "custom_tool_call" {
-			callID := strings.TrimSpace(items[i].Get("call_id").String())
-			if callID != "" {
-				if _, hasOutput := toolOutputIDs[callID]; !hasOutput {
-					trailingCallIDs[callID] = struct{}{}
-					continue
-				}
-			}
+		if itemType == "message" {
+			lastMsgIdx = i
+			break
 		}
-		break
 	}
 
 	var filtered []json.RawMessage
 	removed := 0
-	for _, item := range items {
+	for idx, item := range items {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID != "" {
@@ -754,7 +749,7 @@ func removeOrphanedToolOutputsFromBody(body []byte) []byte {
 				}
 			case "function_call", "custom_tool_call":
 				if _, ok := toolOutputIDs[callID]; !ok {
-					if _, trailing := trailingCallIDs[callID]; !trailing {
+					if idx <= lastMsgIdx {
 						removed++
 						continue
 					}
