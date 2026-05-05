@@ -238,6 +238,86 @@ func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamTranslatesOpenAIResponsesPayload(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("Upgrade() error = %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		}()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("ReadMessage() error = %v", errRead)
+			return
+		}
+		received <- payload
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-test","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("WriteMessage() error = %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"be exact"}]}],
+			"context_management":{"compaction":{"type":"auto"}},
+			"truncation":"disabled",
+			"temperature":0.2,
+			"top_p":0.8,
+			"stream":true,
+			"store":true
+		}`),
+	}
+
+	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-received:
+		if got := gjson.GetBytes(payload, "input.0.role").String(); got != "developer" {
+			t.Fatalf("input.0.role = %q, want developer; payload=%s", got, payload)
+		}
+		for _, field := range []string{"context_management", "truncation", "temperature", "top_p"} {
+			if gjson.GetBytes(payload, field).Exists() {
+				t.Fatalf("websocket request still has unsupported %s: %s", field, payload)
+			}
+		}
+		if got := gjson.GetBytes(payload, "store").Raw; got != "true" {
+			t.Fatalf("store = %s, want true in %s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket request")
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamStripsPrefixedPayloadModel(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	received := make(chan []byte, 1)
