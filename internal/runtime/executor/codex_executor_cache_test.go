@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -69,7 +70,20 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 }
 
 func TestCodexExecutorCacheHelper_ReusesPromptCacheKeyFromPreviousResponseID(t *testing.T) {
-	executor := &CodexExecutor{}
+	executor := NewCodexExecutor(&config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-5.4", Protocol: "openai-response"}},
+					Params: map[string]any{
+						"max_tokens":            4096,
+						"max_output_tokens":     8192,
+						"max_completion_tokens": 16384,
+					},
+				},
+			},
+		},
+	})
 	ctx := context.Background()
 	url := "https://example.com/responses"
 	firstReq := cliproxyexecutor.Request{
@@ -373,5 +387,82 @@ func TestCodexExecutorExecuteTranslatesPreviousResponseIDToPromptCacheKey(t *tes
 	}
 	if got := gjson.GetBytes(capturedBody, "prompt_cache_retention").String(); got != "24h" {
 		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+}
+
+func TestCodexExecutorExecuteStripsUnsupportedTokenLimitFields(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := &CodexExecutor{}
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"max_tokens":256,
+			"max_output_tokens":512,
+			"max_completion_tokens":1024,
+			"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]
+		}`),
+	}
+
+	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+		if gjson.GetBytes(capturedBody, field).Exists() {
+			t.Fatalf("%s should be stripped from Codex request: %s", field, capturedBody)
+		}
+	}
+}
+
+func TestCodexExecutorExecuteCompactStripsUnsupportedTokenLimitFields(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-compact","object":"response","status":"completed","model":"gpt-5.4","output":[]}`))
+	}))
+	defer server.Close()
+
+	executor := &CodexExecutor{}
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"max_tokens":256,
+			"max_output_tokens":512,
+			"max_completion_tokens":1024,
+			"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]
+		}`),
+	}
+
+	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+		if gjson.GetBytes(capturedBody, field).Exists() {
+			t.Fatalf("%s should be stripped from compact Codex request: %s", field, capturedBody)
+		}
 	}
 }

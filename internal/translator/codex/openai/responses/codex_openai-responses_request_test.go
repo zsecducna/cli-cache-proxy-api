@@ -219,6 +219,24 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_StripsUnsupportedTokenLimitFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4",
+		"max_tokens": 256,
+		"max_output_tokens": 512,
+		"max_completion_tokens": 1024,
+		"input": [{"role": "user", "content": "Hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, false)
+
+	for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+		if gjson.GetBytes(output, field).Exists() {
+			t.Fatalf("%s should be stripped from Codex request: %s", field, output)
+		}
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{

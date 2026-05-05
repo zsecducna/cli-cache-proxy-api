@@ -204,7 +204,7 @@ func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
 	}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.4-mini",
-		Payload: []byte(`{"model":"gpt-5.4-mini","input":[{"role":"user","content":[{"type":"input_text","text":"ok"}]}],"stream":true,"store":true,"max_output_tokens":32}`),
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":[{"role":"user","content":[{"type":"input_text","text":"ok"}]}],"stream":true,"store":true,"max_tokens":16,"max_output_tokens":32,"max_completion_tokens":64}`),
 	}
 
 	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
@@ -228,8 +228,10 @@ func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
 		if got := gjson.GetBytes(payload, "store").Raw; got != "true" {
 			t.Fatalf("store = %s, want true in %s", got, payload)
 		}
-		if gjson.GetBytes(payload, "max_output_tokens").Exists() {
-			t.Fatalf("websocket request still has unsupported max_output_tokens: %s", payload)
+		for _, field := range []string{"max_tokens", "max_output_tokens", "max_completion_tokens"} {
+			if gjson.GetBytes(payload, field).Exists() {
+				t.Fatalf("websocket request still has unsupported %s: %s", field, payload)
+			}
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for websocket request")
