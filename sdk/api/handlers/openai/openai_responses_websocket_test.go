@@ -867,6 +867,26 @@ func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesPreviousResponseNotFo
 	}
 }
 
+func TestShouldReleaseResponsesWebsocketPinnedAuthOnPreviousResponseNotFound(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: 400,
+		Error:      fmt.Errorf(`Previous response with id 'resp_01e01b62ed0553fe' not found.`),
+	}
+	if !shouldReleaseResponsesWebsocketPinnedAuth(errMsg) {
+		t.Fatal("expected previous_response_not_found to release pinned auth")
+	}
+}
+
+func TestShouldReleaseResponsesWebsocketPinnedAuthOnOrphanedToolCall(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: 400,
+		Error:      fmt.Errorf(`No tool call found for custom tool call output with call_id call_ABC123.`),
+	}
+	if !shouldReleaseResponsesWebsocketPinnedAuth(errMsg) {
+		t.Fatal("expected orphaned tool call error to release pinned auth")
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

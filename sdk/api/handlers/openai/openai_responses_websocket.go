@@ -536,6 +536,11 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if inputResult := gjson.GetBytes(normalized, "input"); inputResult.Exists() && inputResult.IsArray() {
+		if sanitized, err := removeOrphanedToolOutputs(inputResult.Raw); err == nil {
+			normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(sanitized))
+		}
+	}
 	return bytes.Clone(normalized)
 }
 
@@ -1236,6 +1241,17 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	switch status {
 	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
 		return true
+	case http.StatusBadRequest:
+		if errMsg.Error != nil {
+			errText := strings.ToLower(errMsg.Error.Error())
+			if strings.Contains(errText, "previous_response_not_found") || strings.Contains(errText, "previous response with id") {
+				return true
+			}
+			if strings.Contains(errText, "no tool call found") && strings.Contains(errText, "call_id") {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
