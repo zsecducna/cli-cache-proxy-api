@@ -787,6 +787,86 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 	}
 }
 
+func TestRemoveOrphanedToolOutputsDropsOrphans(t *testing.T) {
+	input := `[
+		{"type":"message","role":"user","content":"hello"},
+		{"type":"function_call","call_id":"call-1","name":"tool"},
+		{"type":"function_call_output","call_id":"call-1","output":"ok"},
+		{"type":"function_call_output","call_id":"call-orphan","output":"stale"}
+	]`
+	result, err := removeOrphanedToolOutputs(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	items := gjson.Parse(result).Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d: %s", len(items), result)
+	}
+	for _, item := range items {
+		if item.Get("call_id").String() == "call-orphan" {
+			t.Fatalf("orphaned tool output was not removed: %s", result)
+		}
+	}
+}
+
+func TestRemoveOrphanedToolOutputsDropsOrphanCustomToolCallOutput(t *testing.T) {
+	input := `[
+		{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch"},
+		{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"},
+		{"type":"custom_tool_call_output","call_id":"call-missing","output":"stale"}
+	]`
+	result, err := removeOrphanedToolOutputs(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	items := gjson.Parse(result).Array()
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d: %s", len(items), result)
+	}
+	for _, item := range items {
+		if item.Get("call_id").String() == "call-missing" {
+			t.Fatalf("orphaned custom tool output was not removed: %s", result)
+		}
+	}
+}
+
+func TestRemoveOrphanedToolOutputsKeepsMatchedPairs(t *testing.T) {
+	input := `[
+		{"type":"function_call","call_id":"call-1","name":"tool"},
+		{"type":"function_call_output","call_id":"call-1","output":"ok"},
+		{"type":"function_call","call_id":"call-2","name":"tool2"},
+		{"type":"function_call_output","call_id":"call-2","output":"ok2"}
+	]`
+	result, err := removeOrphanedToolOutputs(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	items := gjson.Parse(result).Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 items (all matched), got %d: %s", len(items), result)
+	}
+}
+
+func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesCustomToolCallOutput(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: 400,
+		Error:      fmt.Errorf(`No tool call found for custom tool call output with call_id call_31Q6UKBSXKai6Dt1BGzYLm34.`),
+	}
+	if !isReplayableResponsesWebsocketUpstreamError(errMsg) {
+		t.Fatal("expected custom tool call output error to be replayable")
+	}
+}
+
+func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesPreviousResponseNotFound(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: 400,
+		Error:      fmt.Errorf(`Previous response with id 'resp_01e01b62ed0553fe' not found.`),
+	}
+	if !isReplayableResponsesWebsocketUpstreamError(errMsg) {
+		t.Fatal("expected previous_response_not_found to be replayable")
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -822,6 +902,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			errCh,
 			&timelineLog,
 			"session-1",
+			false,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -908,6 +989,7 @@ func TestForwardResponsesWebsocketUsesStreamedOutputItemsWhenCompletedOutputEmpt
 			errCh,
 			&timelineLog,
 			"session-1",
+			false,
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -997,6 +1079,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			errCh,
 			&timelineLog,
 			"session-1",
+			false,
 		)
 		if err == nil {
 			serverErrCh <- errors.New("expected websocket write failure")

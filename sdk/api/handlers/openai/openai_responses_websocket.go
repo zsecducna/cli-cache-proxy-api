@@ -90,17 +90,34 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
 	forceTranscriptReplayNextRequest := false
+	var retryPayload []byte
+	suppressNextReplayableError := false
 
 	for {
-		msgType, payload, errReadMessage := conn.ReadMessage()
-		if errReadMessage != nil {
-			wsTerminateErr = errReadMessage
-			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
-			} else {
-				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
+		var msgType int
+		var payload []byte
+		if len(retryPayload) > 0 {
+			msgType = websocket.TextMessage
+			payload = bytes.Clone(retryPayload)
+			retryPayload = nil
+		} else {
+			var errReadMessage error
+			msgType, payload, errReadMessage = conn.ReadMessage()
+			if errReadMessage != nil {
+				wsTerminateErr = errReadMessage
+				if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
+					log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
+				} else {
+					// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
+				}
+				return
 			}
-			return
+			if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+				continue
+			}
+			if suppressNextReplayableError {
+				suppressNextReplayableError = false
+			}
 		}
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
@@ -114,130 +131,168 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// )
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
 
-		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+		for {
+			allowIncrementalInputWithPreviousResponseID := false
+			if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
+				if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+					allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+				}
+			} else {
+				requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+				if requestModelName == "" {
+					requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+				}
+				allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 			}
-		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+			if forceTranscriptReplayNextRequest {
+				allowIncrementalInputWithPreviousResponseID = false
 			}
-			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
-		}
-		if forceTranscriptReplayNextRequest {
-			allowIncrementalInputWithPreviousResponseID = false
-		}
 
-		allowCompactionReplayBypass := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
+			allowCompactionReplayBypass := false
+			if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
+				if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+					allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
+				}
+			} else {
+				requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+				if requestModelName == "" {
+					requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+				}
+				allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
 			}
-		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
-			}
-			allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
-		}
 
-		var requestJSON []byte
-		var updatedLastRequest []byte
-		var errMsg *interfaces.ErrorMessage
-		requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithMode(
-			payload,
-			lastRequest,
-			lastResponseOutput,
-			allowIncrementalInputWithPreviousResponseID,
-			allowCompactionReplayBypass,
-		)
-		if errMsg != nil {
-			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-			markAPIResponseTimestamp(c)
-			errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, errMsg)
-			log.Infof(
-				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-				passthroughSessionID,
-				websocket.TextMessage,
-				websocketPayloadEventType(errorPayload),
-				websocketPayloadPreview(errorPayload),
+			var requestJSON []byte
+			var updatedLastRequest []byte
+			var errMsg *interfaces.ErrorMessage
+			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithMode(
+				payload,
+				lastRequest,
+				lastResponseOutput,
+				allowIncrementalInputWithPreviousResponseID,
+				allowCompactionReplayBypass,
 			)
-			if errWrite != nil {
-				log.Warnf(
-					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+			if errMsg != nil {
+				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+				markAPIResponseTimestamp(c)
+				errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, errMsg)
+				log.Infof(
+					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
 					passthroughSessionID,
+					websocket.TextMessage,
 					websocketPayloadEventType(errorPayload),
-					errWrite,
+					websocketPayloadPreview(errorPayload),
 				)
-				return
+				if errWrite != nil {
+					log.Warnf(
+						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+						passthroughSessionID,
+						websocketPayloadEventType(errorPayload),
+						errWrite,
+					)
+					return
+				}
+				break
 			}
-			continue
-		}
-		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
-			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
-				requestJSON = updated
+			if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
+				if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
+					requestJSON = updated
+				}
+				if updated, errDelete := sjson.DeleteBytes(updatedLastRequest, "generate"); errDelete == nil {
+					updatedLastRequest = updated
+				}
+				lastRequest = updatedLastRequest
+				lastResponseOutput = []byte("[]")
+				if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, &wsTimelineLog, passthroughSessionID); errWrite != nil {
+					wsTerminateErr = errWrite
+					return
+				}
+				break
 			}
-			if updated, errDelete := sjson.DeleteBytes(updatedLastRequest, "generate"); errDelete == nil {
-				updatedLastRequest = updated
-			}
+
+			requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+			updatedLastRequest = bytes.Clone(requestJSON)
+			previousLastRequest := bytes.Clone(lastRequest)
+			previousLastResponseOutput := bytes.Clone(lastResponseOutput)
+			forcedTranscriptReplay := forceTranscriptReplayNextRequest
 			lastRequest = updatedLastRequest
-			lastResponseOutput = []byte("[]")
-			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, &wsTimelineLog, passthroughSessionID); errWrite != nil {
-				wsTerminateErr = errWrite
+			if forcedTranscriptReplay {
+				forceTranscriptReplayNextRequest = false
+			}
+
+			modelName := gjson.GetBytes(requestJSON, "model").String()
+			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
+			if pinnedAuthID != "" {
+				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+			} else {
+				cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+					authID = strings.TrimSpace(authID)
+					if authID == "" || h == nil || h.AuthManager == nil {
+						return
+					}
+					selectedAuth, ok := h.AuthManager.GetByID(authID)
+					if !ok || selectedAuth == nil {
+						return
+					}
+					if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
+						pinnedAuthID = authID
+					}
+				})
+			}
+			dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+
+			suppressForwardError := suppressNextReplayableError
+			completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID, suppressForwardError)
+			if errForward != nil {
+				wsTerminateErr = errForward
+				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 				return
 			}
-			continue
-		}
-
-		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
-		updatedLastRequest = bytes.Clone(requestJSON)
-		previousLastRequest := bytes.Clone(lastRequest)
-		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
-		forcedTranscriptReplay := forceTranscriptReplayNextRequest
-		lastRequest = updatedLastRequest
-		if forcedTranscriptReplay {
-			forceTranscriptReplayNextRequest = false
-		}
-
-		modelName := gjson.GetBytes(requestJSON, "model").String()
-		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
-		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
-		if pinnedAuthID != "" {
-			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
-		} else {
-			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
-				authID = strings.TrimSpace(authID)
-				if authID == "" || h == nil || h.AuthManager == nil {
+			if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
+				pinnedAuthID = ""
+				forceTranscriptReplayNextRequest = true
+				lastRequest = previousLastRequest
+				lastResponseOutput = previousLastResponseOutput
+				break
+			}
+			if suppressForwardError && isReplayableResponsesWebsocketUpstreamError(forwardErrMsg) {
+				suppressNextReplayableError = false
+				lastRequest = previousLastRequest
+				lastResponseOutput = previousLastResponseOutput
+				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), forwardErrMsg)
+				markAPIResponseTimestamp(c)
+				errorPayload, errWrite := writeResponsesWebsocketError(conn, &wsTimelineLog, forwardErrMsg)
+				log.Infof(
+					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+					passthroughSessionID,
+					websocket.TextMessage,
+					websocketPayloadEventType(errorPayload),
+					websocketPayloadPreview(errorPayload),
+				)
+				if errWrite != nil {
+					log.Warnf(
+						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+						passthroughSessionID,
+						websocketPayloadEventType(errorPayload),
+						errWrite,
+					)
 					return
 				}
-				selectedAuth, ok := h.AuthManager.GetByID(authID)
-				if !ok || selectedAuth == nil {
-					return
-				}
-				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					pinnedAuthID = authID
-				}
-			})
+				break
+			}
+			if !suppressForwardError && isReplayableResponsesWebsocketUpstreamError(forwardErrMsg) {
+				forceTranscriptReplayNextRequest = true
+				suppressNextReplayableError = true
+				lastRequest = previousLastRequest
+				lastResponseOutput = previousLastResponseOutput
+				retryPayload = bytes.Clone(payload)
+				break
+			}
+			suppressNextReplayableError = false
+			lastResponseOutput = completedOutput
+			break
 		}
-		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
-
-		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
-		if errForward != nil {
-			wsTerminateErr = errForward
-			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
-			return
-		}
-		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
-			pinnedAuthID = ""
-			forceTranscriptReplayNextRequest = true
-			lastRequest = previousLastRequest
-			lastResponseOutput = previousLastResponseOutput
-			continue
-		}
-		lastResponseOutput = completedOutput
 	}
 }
 
@@ -401,6 +456,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	if errDedupeFunctionCalls == nil {
 		mergedInput = dedupedInput
 	}
+	sanitizedInput, errSanitize := removeOrphanedToolOutputs(mergedInput)
+	if errSanitize == nil {
+		mergedInput = sanitizedInput
+	}
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -507,6 +566,65 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 			}
 		}
 		filtered = append(filtered, item)
+	}
+
+	out, errMarshal := json.Marshal(filtered)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	return string(out), nil
+}
+
+// removeOrphanedToolOutputs drops function_call_output / custom_tool_call_output
+// items whose call_id has no matching function_call / custom_tool_call in the
+// same input array. This happens when an auth switch invalidates the upstream
+// session and a full transcript replay carries tool outputs whose originating
+// tool calls lived in a now-unreachable previous_response_id.
+func removeOrphanedToolOutputs(rawArray string) (string, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", nil
+	}
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	toolCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				toolCallIDs[callID] = struct{}{}
+			}
+		}
+	}
+
+	filtered := make([]json.RawMessage, 0, len(items))
+	removed := 0
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				if _, ok := toolCallIDs[callID]; !ok {
+					removed++
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, item)
+	}
+
+	if removed > 0 {
+		log.Infof("responses websocket: removed %d orphaned tool output(s) from transcript replay", removed)
 	}
 
 	out, errMarshal := json.Marshal(filtered)
@@ -920,6 +1038,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
+	suppressReplayableError bool,
 ) ([]byte, *interfaces.ErrorMessage, error) {
 	completed := false
 	completedOutput := []byte("[]")
@@ -941,6 +1060,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
+				if suppressReplayableError && isReplayableResponsesWebsocketUpstreamError(errMsg) {
+					cancel(errMsg.Error)
+					return completedOutput, errMsg, nil
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
@@ -974,6 +1097,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
+					}
+					if suppressReplayableError && isReplayableResponsesWebsocketUpstreamError(errMsg) {
+						cancel(errMsg.Error)
+						return completedOutput, errMsg, nil
 					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
@@ -1112,6 +1239,29 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 	default:
 		return false
 	}
+}
+
+func isReplayableResponsesWebsocketUpstreamError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return false
+	}
+	status := errMsg.StatusCode
+	if status <= 0 && errMsg.Error != nil {
+		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
+			status = se.StatusCode()
+		}
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	errText := ""
+	if errMsg.Error != nil {
+		errText = strings.ToLower(errMsg.Error.Error())
+	}
+	if strings.Contains(errText, "previous_response_not_found") || strings.Contains(errText, "previous response with id") {
+		return true
+	}
+	return strings.Contains(errText, "no tool call found") && strings.Contains(errText, "call_id")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
