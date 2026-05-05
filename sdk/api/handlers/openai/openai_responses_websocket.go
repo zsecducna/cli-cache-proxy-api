@@ -1064,7 +1064,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				if suppressReplayableError && isReplayableResponsesWebsocketUpstreamError(errMsg) {
+				if isReplayableResponsesWebsocketUpstreamError(errMsg) {
 					cancel(errMsg.Error)
 					return completedOutput, errMsg, nil
 				}
