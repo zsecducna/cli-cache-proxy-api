@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -190,6 +191,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
+	body = removeOrphanedToolOutputsFromBody(body)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -397,6 +399,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
+	body = removeOrphanedToolOutputsFromBody(body)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -692,6 +695,59 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 		return fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func removeOrphanedToolOutputsFromBody(body []byte) []byte {
+	inputResult := gjson.GetBytes(body, "input")
+	if !inputResult.Exists() || !inputResult.IsArray() {
+		return body
+	}
+	items := inputResult.Array()
+	if len(items) == 0 {
+		return body
+	}
+
+	toolCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType == "function_call" || itemType == "custom_tool_call" {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID != "" {
+				toolCallIDs[callID] = struct{}{}
+			}
+		}
+	}
+
+	var filtered []json.RawMessage
+	removed := 0
+	for _, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID != "" {
+				if _, ok := toolCallIDs[callID]; !ok {
+					removed++
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, json.RawMessage(item.Raw))
+	}
+
+	if removed == 0 {
+		return body
+	}
+
+	log.Infof("codex websockets executor: removed %d orphaned tool output(s) from request", removed)
+	out, errMarshal := json.Marshal(filtered)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", out)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 func buildCodexWebsocketRequestBody(body []byte) []byte {
