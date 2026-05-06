@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -50,6 +51,92 @@ func TestCodexExecutorExecuteNormalizesNullInstructions(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "instructions").String() != "" {
 		t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
+	}
+}
+
+func TestCodexExecutorExecuteStreamShortensLongClaudeToolUseIDs(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null}}\n\n"))
+	}))
+	defer server.Close()
+
+	longCallID := "toolu_" + strings.Repeat("a", 72)
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"` + longCallID + `","name":"tool","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + longCallID + `","content":"ok"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	callID := gjson.GetBytes(gotBody, "input.0.call_id").String()
+	outputCallID := gjson.GetBytes(gotBody, "input.1.call_id").String()
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longCallID {
+		t.Fatal("call_id was not shortened")
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
+	}
+}
+
+func TestCodexExecutorExecuteStreamShortensLongCallIDs(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null}}\n\n"))
+	}))
+	defer server.Close()
+
+	longCallID := "call_" + strings.Repeat("a", 73)
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"function_call","call_id":"` + longCallID + `","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	callID := gjson.GetBytes(gotBody, "input.0.call_id").String()
+	outputCallID := gjson.GetBytes(gotBody, "input.1.call_id").String()
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longCallID {
+		t.Fatal("call_id was not shortened")
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
 	}
 }
 
