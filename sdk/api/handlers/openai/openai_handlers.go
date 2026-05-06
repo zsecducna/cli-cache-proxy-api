@@ -60,19 +60,35 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
-	if body, err := h.FetchChatGPTModelsUpstream(c.Request.Context(), c.GetHeader("User-Agent")); err == nil {
-		data, errMap := handlers.MapUpstreamChatGPTModelsToOpenAIList(body)
-		if errMap == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"object": "list",
-				"data":   data,
-			})
-			return
+	ctx := c.Request.Context()
+	ua := c.GetHeader("User-Agent")
+
+	// Try Codex models endpoint first (works from VPS IPs where chatgpt.com is Cloudflare-blocked).
+	// Fall back to ChatGPT models endpoint, then to local registry.
+	for _, fetch := range []struct {
+		name string
+		fn   func(context.Context, string) ([]byte, error)
+	}{
+		{"codex", h.FetchCodexModelsUpstream},
+		{"chatgpt", h.FetchChatGPTModelsUpstream},
+	} {
+		body, err := fetch.fn(ctx, ua)
+		if err != nil {
+			log.WithError(err).Debugf("openai models: %s upstream fetch failed", fetch.name)
+			continue
 		}
-		log.WithError(errMap).Debug("openai models: upstream payload parse failed, falling back to local registry")
-	} else {
-		log.WithError(err).Debug("openai models: falling back to local registry catalog")
+		data, errMap := handlers.MapUpstreamChatGPTModelsToOpenAIList(body)
+		if errMap != nil {
+			log.WithError(errMap).Debugf("openai models: %s upstream payload parse failed", fetch.name)
+			continue
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   data,
+		})
+		return
 	}
+	log.Debug("openai models: all upstream fetches failed, falling back to local registry catalog")
 
 	// Get all available models
 	allModels := h.Models()

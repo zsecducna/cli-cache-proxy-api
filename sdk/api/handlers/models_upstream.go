@@ -19,7 +19,7 @@ import (
 const (
 	chatGPTModelsURL               = "https://chatgpt.com/backend-api/models"
 	codexModelsURL                 = "https://chatgpt.com/backend-api/codex/models"
-	defaultCodexModelsClientVerion = "0.118.0"
+	defaultCodexModelsClientVerion = "0.128.0"
 )
 
 var codexClientVersionPattern = regexp.MustCompile(`(?i)\bcodex(?:[_-](?:cli[_-]?rs|tui))?/([0-9]+(?:\.[0-9]+){1,2})`)

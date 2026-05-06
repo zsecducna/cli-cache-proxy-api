@@ -118,7 +118,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "codex-tui/0.118.0")
+	httpReq.Header.Set("User-Agent", "codex-tui/0.128.0")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -213,7 +213,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "codex-tui/0.118.0")
+	httpReq.Header.Set("User-Agent", "codex-tui/0.128.0")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
