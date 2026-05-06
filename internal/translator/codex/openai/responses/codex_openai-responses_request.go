@@ -1,7 +1,10 @@
 package responses
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -42,8 +45,45 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	rawJSON = normalizeLongCodexCallIDs(rawJSON)
 
 	return rawJSON
+}
+
+func normalizeLongCodexCallIDs(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	idMap := make(map[string]string)
+	result := rawJSON
+	inputArray := inputResult.Array()
+	for i := 0; i < len(inputArray); i++ {
+		path := fmt.Sprintf("input.%d.call_id", i)
+		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
+		if callID == "" {
+			continue
+		}
+		normalized := idMap[callID]
+		if normalized == "" {
+			normalized = shortenCodexCallID(callID)
+			idMap[callID] = normalized
+		}
+		if normalized != callID {
+			result, _ = sjson.SetBytes(result, path, normalized)
+		}
+	}
+	return result
+}
+
+func shortenCodexCallID(callID string) string {
+	callID = strings.TrimSpace(callID)
+	if len(callID) <= 64 {
+		return callID
+	}
+	sum := sha256.Sum256([]byte(callID))
+	return "call_" + hex.EncodeToString(sum[:])[:40]
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction

@@ -5,6 +5,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -192,6 +194,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
 	body = removeOrphanedToolOutputsFromBody(body)
+	body = normalizeLongCodexCallIDsInBody(body)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -400,6 +403,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
 	body = removeOrphanedToolOutputsFromBody(body)
+	body = normalizeLongCodexCallIDsInBody(body)
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -695,6 +699,42 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 		return fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func normalizeLongCodexCallIDsInBody(body []byte) []byte {
+	inputResult := gjson.GetBytes(body, "input")
+	if !inputResult.Exists() || !inputResult.IsArray() {
+		return body
+	}
+
+	idMap := make(map[string]string)
+	result := body
+	items := inputResult.Array()
+	for i := 0; i < len(items); i++ {
+		path := fmt.Sprintf("input.%d.call_id", i)
+		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
+		if callID == "" {
+			continue
+		}
+		normalized := idMap[callID]
+		if normalized == "" {
+			normalized = shortenCodexCallID(callID)
+			idMap[callID] = normalized
+		}
+		if normalized != callID {
+			result, _ = sjson.SetBytes(result, path, normalized)
+		}
+	}
+	return result
+}
+
+func shortenCodexCallID(callID string) string {
+	callID = strings.TrimSpace(callID)
+	if len(callID) <= 64 {
+		return callID
+	}
+	sum := sha256.Sum256([]byte(callID))
+	return "call_" + hex.EncodeToString(sum[:])[:40]
 }
 
 func removeOrphanedToolOutputsFromBody(body []byte) []byte {

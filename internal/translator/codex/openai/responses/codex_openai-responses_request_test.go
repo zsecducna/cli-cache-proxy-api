@@ -1,12 +1,32 @@
 package responses
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
 
 // TestConvertSystemRoleToDeveloper_BasicConversion tests the basic system -> developer role conversion
+func TestConvertOpenAIResponsesRequestToCodexShortensLongCallIDs(t *testing.T) {
+	longCallID := "call_" + strings.Repeat("a", 73)
+	inputJSON := []byte(`{"input":[{"type":"function_call","call_id":"` + longCallID + `","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}]}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	callID := gjson.GetBytes(output, "input.0.call_id").String()
+	outputCallID := gjson.GetBytes(output, "input.1.call_id").String()
+
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longCallID {
+		t.Fatal("call_id was not shortened")
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
+	}
+}
+
 func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",

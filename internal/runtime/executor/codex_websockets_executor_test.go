@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +233,78 @@ func TestCodexWebsocketsExecuteStreamAddsEmptyInstructions(t *testing.T) {
 			if gjson.GetBytes(payload, field).Exists() {
 				t.Fatalf("websocket request still has unsupported %s: %s", field, payload)
 			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket request")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamShortensLongCallIDs(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("Upgrade() error = %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		}()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("ReadMessage() error = %v", errRead)
+			return
+		}
+		received <- payload
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-test","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("WriteMessage() error = %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	longCallID := "call_" + strings.Repeat("a", 73)
+	exec := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"function_call","call_id":"` + longCallID + `","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}],"stream":true,"store":true}`),
+	}
+
+	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-received:
+		callID := gjson.GetBytes(payload, "input.0.call_id").String()
+		outputCallID := gjson.GetBytes(payload, "input.1.call_id").String()
+		if len(callID) > 64 {
+			t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+		}
+		if callID == longCallID {
+			t.Fatal("call_id was not shortened")
+		}
+		if outputCallID != callID {
+			t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for websocket request")
@@ -814,6 +887,25 @@ func TestIsWSUpstreamFallbackEligible(t *testing.T) {
 				t.Fatalf("isWSUpstreamFallbackEligible() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeLongCodexCallIDsInBodyShortensAndPreservesPairs(t *testing.T) {
+	longCallID := "call_" + strings.Repeat("a", 73)
+	body := []byte(`{"input":[{"type":"function_call","call_id":"` + longCallID + `","name":"tool","arguments":"{}"},{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}]}`)
+
+	result := normalizeLongCodexCallIDsInBody(body)
+	callID := gjson.GetBytes(result, "input.0.call_id").String()
+	outputCallID := gjson.GetBytes(result, "input.1.call_id").String()
+
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longCallID {
+		t.Fatal("call_id was not shortened")
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
 	}
 }
 

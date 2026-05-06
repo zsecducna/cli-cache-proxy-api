@@ -857,6 +857,16 @@ func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesCustomToolCallOutput(
 	}
 }
 
+func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesFunctionCallMissingOutput(t *testing.T) {
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: 400,
+		Error:      fmt.Errorf(`No tool output found for function call call_eckibUmvacom9fELIe6By1l1.`),
+	}
+	if !isReplayableResponsesWebsocketUpstreamError(errMsg) {
+		t.Fatal("expected function call missing output error to be replayable")
+	}
+}
+
 func TestIsReplayableResponsesWebsocketUpstreamErrorMatchesPreviousResponseNotFound(t *testing.T) {
 	errMsg := &interfaces.ErrorMessage{
 		StatusCode: 400,

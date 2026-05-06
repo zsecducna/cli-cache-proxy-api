@@ -1265,7 +1265,10 @@ func isReplayableResponsesWebsocketUpstreamError(errMsg *interfaces.ErrorMessage
 	if strings.Contains(errText, "previous_response_not_found") || strings.Contains(errText, "previous response with id") {
 		return true
 	}
-	return (strings.Contains(errText, "no tool call found") || strings.Contains(errText, "no tool output found")) && strings.Contains(errText, "call_id")
+	if !(strings.Contains(errText, "no tool call found") || strings.Contains(errText, "no tool output found")) {
+		return false
+	}
+	return strings.Contains(errText, "call_id") || strings.Contains(errText, "function call") || strings.Contains(errText, "tool call")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
