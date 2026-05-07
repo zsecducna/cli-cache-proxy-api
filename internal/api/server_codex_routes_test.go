@@ -157,7 +157,7 @@ func TestCodexModelsAliasUsesOfficialCatalogForOldCodexUserAgent(t *testing.T) {
 	assertOfficialCodexModelsResponse(t, resp.Body.Bytes())
 }
 
-func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.T) {
+func TestV1ModelsFetchesCodexCatalogAndKeepsLocalClaudeCapableModels(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 
@@ -171,6 +171,7 @@ func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.
 
 	server := newTestServer(t)
 	registerCodexModelsFetchTestAuth(t, server, upstream.URL)
+	registerV1ModelsClaudeCapableProviderModel(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -182,8 +183,8 @@ func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if gotPath != "/backend-api/models" {
-		t.Fatalf("upstream path = %q, want %q", gotPath, "/backend-api/models")
+	if gotPath != "/backend-api/codex/models" {
+		t.Fatalf("upstream path = %q, want %q", gotPath, "/backend-api/codex/models")
 	}
 	if gotAuth != "Bearer test-token" {
 		t.Fatalf("upstream authorization = %q, want %q", gotAuth, "Bearer test-token")
@@ -199,8 +200,8 @@ func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.
 	if payload.Object != "list" {
 		t.Fatalf("object = %q, want %q", payload.Object, "list")
 	}
-	if len(payload.Data) != 2 {
-		t.Fatalf("data len = %d, want 2 body=%s", len(payload.Data), resp.Body.String())
+	if len(payload.Data) != 3 {
+		t.Fatalf("data len = %d, want 3 body=%s", len(payload.Data), resp.Body.String())
 	}
 	if got := payload.Data[0]["id"]; got != "gpt-5.5" {
 		t.Fatalf("data[0].id = %v, want %q", got, "gpt-5.5")
@@ -213,6 +214,10 @@ func TestV1ModelsFetchesUpstreamChatGPTCatalogWhenCodexAuthAvailable(t *testing.
 	}
 	if _, ok := payload.Data[0]["display_name"]; ok {
 		t.Fatalf("normal OpenAI model list unexpectedly exposed display_name: %+v", payload.Data[0])
+	}
+	claudeModel := findModelByID(t, payload.Data, "claude-sonnet-4-6")
+	if got := claudeModel["owned_by"]; got != "anthropic" {
+		t.Fatalf("claude owned_by = %v, want anthropic", got)
 	}
 }
 
@@ -338,6 +343,22 @@ func registerCodexCatalogOtherProviderModel(t *testing.T) {
 	})
 	t.Cleanup(func() {
 		reg.UnregisterClient("test-codex-catalog-routes-gemini")
+	})
+}
+
+func registerV1ModelsClaudeCapableProviderModel(t *testing.T) {
+	t.Helper()
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-v1-models-antigravity", "antigravity", []*registry.ModelInfo{
+		{
+			ID:      "claude-sonnet-4-6",
+			OwnedBy: "anthropic",
+			Type:    "antigravity",
+		},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient("test-v1-models-antigravity")
 	})
 }
 

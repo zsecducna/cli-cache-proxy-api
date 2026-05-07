@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -82,6 +83,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			log.WithError(errMap).Debugf("openai models: %s upstream payload parse failed", fetch.name)
 			continue
 		}
+		data = mergeOpenAIModelLists(data, filteredOpenAIModels(h.Models()))
 		c.JSON(http.StatusOK, gin.H{
 			"object": "list",
 			"data":   data,
@@ -90,10 +92,15 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	}
 	log.Debug("openai models: all upstream fetches failed, falling back to local registry catalog")
 
-	// Get all available models
-	allModels := h.Models()
+	filteredModels := filteredOpenAIModels(h.Models())
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   filteredModels,
+	})
+}
+
+func filteredOpenAIModels(allModels []map[string]any) []map[string]any {
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -113,11 +120,30 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 		filteredModels[i] = filteredModel
 	}
+	return filteredModels
+}
 
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   filteredModels,
-	})
+func mergeOpenAIModelLists(primary, additional []map[string]any) []map[string]any {
+	merged := make([]map[string]any, 0, len(primary)+len(additional))
+	seen := make(map[string]struct{}, len(primary)+len(additional))
+	appendUnique := func(models []map[string]any) {
+		for _, model := range models {
+			id, _ := model["id"].(string)
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			key := strings.ToLower(id)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, model)
+		}
+	}
+	appendUnique(primary)
+	appendUnique(additional)
+	return merged
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
