@@ -547,20 +547,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err := prepareCodexCountTokensBody(baseModel, req.Model, req.Payload, from, e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = stripCodexUnsupportedRequestFields(body)
-	body, _ = sjson.SetBytes(body, "stream", false)
-	body = normalizeCodexInstructions(body)
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -575,6 +568,23 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+func prepareCodexCountTokensBody(baseModel string, model string, payload []byte, from sdktranslator.Format, executorID string) ([]byte, error) {
+	to := sdktranslator.FromString("codex")
+	body := sdktranslator.TranslateRequest(from, to, baseModel, payload, false)
+
+	body, err := thinking.ApplyThinking(body, model, from.String(), to.String(), executorID)
+	if err != nil {
+		return nil, err
+	}
+
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = stripCodexUnsupportedRequestFields(body)
+	body = normalizeLongCodexCallIDsInBody(body)
+	body, _ = sjson.SetBytes(body, "stream", false)
+	body = normalizeCodexInstructions(body)
+	return body, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

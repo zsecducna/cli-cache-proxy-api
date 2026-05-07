@@ -181,6 +181,26 @@ func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 	}
 }
 
+func TestPrepareCodexCountTokensBodyShortensLongClaudeToolUseIDs(t *testing.T) {
+	longCallID := "toolu_" + strings.Repeat("a", 72)
+	body, err := prepareCodexCountTokensBody("gpt-5.4", "gpt-5.4", []byte(`{"model":"gpt-5.4","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"`+longCallID+`","name":"tool","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"`+longCallID+`","content":"ok"}]}]}`), sdktranslator.FromString("claude"), "codex")
+	if err != nil {
+		t.Fatalf("prepareCodexCountTokensBody error: %v", err)
+	}
+
+	callID := gjson.GetBytes(body, "input.0.call_id").String()
+	outputCallID := gjson.GetBytes(body, "input.1.call_id").String()
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if callID == longCallID {
+		t.Fatal("call_id was not shortened")
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
+	}
+}
+
 func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{})
 
