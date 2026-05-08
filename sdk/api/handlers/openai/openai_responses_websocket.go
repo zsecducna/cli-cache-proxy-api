@@ -34,6 +34,7 @@ const (
 	wsDoneMarker         = "[DONE]"
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+	maxTimelineLogSize   = 4 << 20 // 4 MiB cap to prevent unbounded growth on long-lived connections
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -1450,6 +1451,12 @@ func appendWebsocketTimelineDisconnect(builder *strings.Builder, err error, time
 
 func appendWebsocketTimelineEvent(builder *strings.Builder, eventType string, payload []byte, timestamp time.Time) {
 	if builder == nil {
+		return
+	}
+	if builder.Len() > maxTimelineLogSize {
+		if builder.Len() <= maxTimelineLogSize+256 {
+			builder.WriteString("\n...truncated...\n")
+		}
 		return
 	}
 	trimmedPayload := bytes.TrimSpace(payload)
