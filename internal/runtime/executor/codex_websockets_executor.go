@@ -206,7 +206,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body)
+	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body, httpURL)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -415,7 +415,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body)
+	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body, httpURL)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -964,8 +964,8 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header, codexPromptCacheSelection) {
-	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Conversation_id", false, false)
+func applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, httpURL string) ([]byte, http.Header, codexPromptCacheSelection) {
+	selection := prepareCodexPromptCache(ctx, from, req, rawJSON, "Conversation_id", codexUpstreamSupportsPromptCacheRetention(httpURL), false)
 	selection.Body = helps.EnsureSchemaAdditionalProperties(selection.Body)
 	return selection.Body, selection.Hdrs, selection
 }

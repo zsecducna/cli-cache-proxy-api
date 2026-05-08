@@ -26,7 +26,7 @@ func TestApplyCodexPromptCacheHeadersReusesPreviousResponsePromptCacheKey(t *tes
 		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-1"}`),
 	}
 
-	body, headers, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload)
+	body, headers, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload, "https://api.openai.com/v1/responses")
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "session-cache" {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, "session-cache")
 	}
@@ -41,13 +41,28 @@ func TestApplyCodexPromptCacheHeadersReusesPreviousResponsePromptCacheKey(t *tes
 	}
 }
 
-func TestApplyCodexPromptCacheHeadersStripsPromptCacheRetentionForWebsocketRequests(t *testing.T) {
+func TestApplyCodexPromptCacheHeadersPreservesPromptCacheRetentionForNonBackendAPIURL(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.4",
 		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"24h"}`),
 	}
 
-	body, _, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload)
+	body, _, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload, "https://api.openai.com/v1/responses")
+	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "24h")
+	}
+	if selection.TTL != codexPromptCache24hTTL {
+		t.Fatalf("selection.TTL = %s, want %s", selection.TTL, codexPromptCache24hTTL)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersStripsPromptCacheRetentionForBackendWebsocketURL(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","prompt_cache_retention":"24h"}`),
+	}
+
+	body, _, selection := applyCodexPromptCacheHeaders(context.Background(), sdktranslator.FromString("openai-response"), req, req.Payload, "https://chatgpt.com/backend-api/codex/responses")
 	if got := gjson.GetBytes(body, "prompt_cache_retention").String(); got != "" {
 		t.Fatalf("prompt_cache_retention = %q, want empty", got)
 	}

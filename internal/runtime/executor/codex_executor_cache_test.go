@@ -69,6 +69,43 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	}
 }
 
+func TestCodexExecutorCacheHelper_UsesCodexTurnMetadataSessionIDBeforeAPIKey(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"codex-session-1"}`)
+	ginCtx.Set("apiKey", "test-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.4","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4"}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, selection, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, req, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+
+	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:session:X-Codex-Turn-Metadata.session_id:codex-session-1")).String()
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if selection.Key != expectedKey {
+		t.Fatalf("selection.Key = %q, want %q", selection.Key, expectedKey)
+	}
+	if got := httpReq.Header.Get("Session_id"); got != expectedKey {
+		t.Fatalf("Session_id = %q, want %q", got, expectedKey)
+	}
+}
+
 func TestCodexExecutorCacheHelper_ReusesPromptCacheKeyFromPreviousResponseID(t *testing.T) {
 	executor := NewCodexExecutor(&config.Config{
 		Payload: config.PayloadConfig{

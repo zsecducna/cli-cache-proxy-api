@@ -202,6 +202,11 @@ func codexPromptCacheSessionHint(ctx context.Context, primary, secondary []byte)
 	}
 
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if raw := strings.TrimSpace(ginCtx.Request.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
+			if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
+				return "X-Codex-Turn-Metadata.session_id:" + sessionID
+			}
+		}
 		for _, header := range []string{"Conversation_id", "Session_id"} {
 			if value := strings.TrimSpace(ginCtx.Request.Header.Get(header)); value != "" {
 				return header + ":" + value
