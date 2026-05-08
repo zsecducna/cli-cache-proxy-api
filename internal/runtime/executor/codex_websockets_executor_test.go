@@ -651,6 +651,101 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
+	if got := headers.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %s, want empty", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+	}
+}
+
+func TestBuildCodexResponsesWebsocketURLRequiresHTTPURL(t *testing.T) {
+	if got, err := buildCodexResponsesWebsocketURL("https://example.com/backend/responses"); err != nil || got != "wss://example.com/backend/responses" {
+		t.Fatalf("https URL = %q, %v; want wss URL", got, err)
+	}
+	if _, err := buildCodexResponsesWebsocketURL("ftp://example.com/responses"); err == nil {
+		t.Fatalf("expected unsupported scheme error")
+	}
+	if _, err := buildCodexResponsesWebsocketURL("https:///responses"); err == nil {
+		t.Fatalf("expected empty host error")
+	}
+}
+
+func TestParseCodexWebsocketErrorMarksConnectionLimitRetryable(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"},"headers":{"retry-after":"1"}}`))
+	if !ok {
+		t.Fatalf("expected websocket error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %#v, want 429", err)
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected retryable websocket connection limit error")
+	}
+	if got := *retryable.RetryAfter(); got != 0 {
+		t.Fatalf("retryAfter = %v, want connection-limit fallback 0", got)
+	}
+	withHeaders, ok := err.(interface{ Headers() http.Header })
+	if !ok || withHeaders.Headers().Get("retry-after") != "1" {
+		t.Fatalf("headers = %#v, want retry-after", err)
+	}
+}
+
+func TestParseCodexWebsocketErrorUsesUsageLimitRetryMetadata(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":7}}}`))
+	if !ok {
+		t.Fatalf("expected websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected retryable usage limit websocket error")
+	}
+	if got := *retryable.RetryAfter(); got != 7*time.Second {
+		t.Fatalf("retryAfter = %v, want 7s", got)
+	}
+}
+
+func TestParseCodexWebsocketErrorPreservesWrappedBodyAndHeaders(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"body":{"error":{"code":"websocket_connection_limit_reached","type":"server_error","message":"too many websocket connections"}},"headers":{"x-request-id":"req-1"}}`))
+	if !ok {
+		t.Fatalf("expected websocket error")
+	}
+
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("status").Int(); got != http.StatusTooManyRequests {
+		t.Fatalf("wrapped status = %d, want 429; payload=%s", got, err.Error())
+	}
+	if got := parsed.Get("body.error.code").String(); got != "websocket_connection_limit_reached" {
+		t.Fatalf("wrapped body error code = %s, want websocket_connection_limit_reached; payload=%s", got, err.Error())
+	}
+	if got := parsed.Get("error.code").String(); got != "websocket_connection_limit_reached" {
+		t.Fatalf("surface error code = %s, want websocket_connection_limit_reached; payload=%s", got, err.Error())
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected body.error.code websocket connection limit to be retryable")
+	}
+	withHeaders, ok := err.(interface{ Headers() http.Header })
+	if !ok || withHeaders.Headers().Get("x-request-id") != "req-1" {
+		t.Fatalf("headers = %#v, want x-request-id", err)
+	}
 }
 
 func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {

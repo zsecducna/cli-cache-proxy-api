@@ -914,12 +914,14 @@ attemptLoop:
 						}
 					}
 
-					out <- cliproxyexecutor.StreamChunk{Payload: payload}
+					if !helps.SendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: payload}) {
+						return
+					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					helps.SendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
@@ -1413,17 +1415,21 @@ attemptLoop:
 
 					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
 					for i := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+						if !helps.SendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+							return
+						}
 					}
 				}
 				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
 				for i := range tail {
-					out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}
+					if !helps.SendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: tail[i]}) {
+						return
+					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					helps.SendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 				} else {
 					reporter.EnsurePublished(ctx)
 				}

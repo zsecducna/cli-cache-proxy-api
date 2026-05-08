@@ -955,6 +955,11 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 		parsed.Scheme = "ws"
 	case "https":
 		parsed.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("codex websockets executor: unsupported responses websocket URL scheme %q", parsed.Scheme)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("codex websockets executor: responses websocket URL host is empty")
 	}
 	return parsed.String(), nil
 }
@@ -1014,7 +1019,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					headers.Set("Chatgpt-Account-Id", trimmed)
+					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
 				}
 			}
 		}
@@ -1027,6 +1032,70 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 
 	return headers
+}
+
+func ensureHeaderCasePreserved(target http.Header, source http.Header, key, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(headerValueCaseInsensitive(target, key)) != "" {
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(headerValueCaseInsensitive(source, key)); val != "" {
+			setHeaderCasePreserved(target, key, val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		setHeaderCasePreserved(target, key, val)
+		return
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		setHeaderCasePreserved(target, key, val)
+	}
+}
+
+func setHeaderCasePreserved(headers http.Header, key string, value string) {
+	if headers == nil {
+		return
+	}
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" {
+		return
+	}
+	deleteHeaderCaseInsensitive(headers, key)
+	headers[key] = []string{value}
+}
+
+func headerValueCaseInsensitive(headers http.Header, key string) string {
+	key = strings.TrimSpace(key)
+	if headers == nil || key == "" {
+		return ""
+	}
+	if val := strings.TrimSpace(headers.Get(key)); val != "" {
+		return val
+	}
+	for existingKey, values := range headers {
+		if !strings.EqualFold(existingKey, key) {
+			continue
+		}
+		for _, value := range values {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func deleteHeaderCaseInsensitive(headers http.Header, key string) {
+	for existingKey := range headers {
+		if strings.EqualFold(existingKey, key) {
+			delete(headers, existingKey)
+		}
+	}
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
@@ -1112,23 +1181,53 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		return nil, false
 	}
 
-	out := []byte(`{}`)
-	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
-		raw := errNode.Raw
-		if errNode.Type == gjson.String {
-			raw = errNode.Raw
-		}
-		out, _ = sjson.SetRawBytes(out, "error", []byte(raw))
-	} else {
-		out, _ = sjson.SetBytes(out, "error.type", "server_error")
-		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
-	}
-
+	out := buildCodexWebsocketErrorPayload(payload, status)
 	headers := parseCodexWebsocketErrorHeaders(payload)
+	statusError := statusErr{code: status, msg: string(out)}
+	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+		statusError.retryAfter = retryAfter
+	} else if isCodexWebsocketConnectionLimitError(payload) {
+		retryAfter := time.Duration(0)
+		statusError.retryAfter = &retryAfter
+	}
 	return statusErrWithHeaders{
-		statusErr: statusErr{code: status, msg: string(out)},
+		statusErr: statusError,
 		headers:   headers,
 	}, true
+}
+
+func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
+	out := []byte(`{}`)
+	out, _ = sjson.SetBytes(out, "status", status)
+
+	if bodyNode := gjson.GetBytes(payload, "body"); bodyNode.Exists() {
+		out, _ = sjson.SetRawBytes(out, "body", []byte(bodyNode.Raw))
+		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(bodyErrorNode.Raw))
+			return out
+		}
+	}
+
+	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
+		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+		return out
+	}
+
+	out, _ = sjson.SetBytes(out, "error.type", "server_error")
+	out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
+	return out
+}
+
+func isCodexWebsocketConnectionLimitError(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, path := range []string{"error.code", "error.type", "body.error.code", "body.error.type", "code", "error"} {
+		if strings.TrimSpace(gjson.GetBytes(payload, path).String()) == "websocket_connection_limit_reached" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
