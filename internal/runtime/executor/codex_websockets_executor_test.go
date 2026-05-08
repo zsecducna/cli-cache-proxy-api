@@ -326,6 +326,73 @@ func TestCodexWebsocketsExecuteStreamShortensLongCallIDs(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamPreservesIncrementalOutputOnlyCallID(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("Upgrade() error = %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		}()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("ReadMessage() error = %v", errRead)
+			return
+		}
+		received <- payload
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-test","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("WriteMessage() error = %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	longCallID := "call_" + strings.Repeat("b", 73)
+	exec := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-prev","input":[{"type":"function_call_output","call_id":"` + longCallID + `","output":"ok"}],"stream":true,"store":true}`),
+	}
+
+	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-received:
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-prev" {
+			t.Fatalf("previous_response_id = %q, want resp-prev", got)
+		}
+		if got := gjson.GetBytes(payload, "input.0.call_id").String(); got != longCallID {
+			t.Fatalf("incremental output call_id = %q, want original %q in %s", got, longCallID, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket request")
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamTranslatesOpenAIResponsesPayload(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	received := make(chan []byte, 1)
@@ -1019,14 +1086,14 @@ func TestNormalizeLongCodexCallIDsInBodyShortensAndPreservesPairs(t *testing.T) 
 	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyDropsOrphanedOutput(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsDropsOrphanedOutput(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"message","role":"user","content":"hi"},
 		{"type":"function_call","call_id":"call-1","name":"tool"},
 		{"type":"function_call_output","call_id":"call-1","output":"ok"},
 		{"type":"function_call_output","call_id":"call-orphan","output":"stale"}
 	]}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	items := gjson.GetBytes(result, "input").Array()
 	if len(items) != 3 {
 		t.Fatalf("expected 3 items, got %d", len(items))
@@ -1038,68 +1105,101 @@ func TestRemoveOrphanedToolOutputsFromBodyDropsOrphanedOutput(t *testing.T) {
 	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyKeepsTrailingCalls(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsPreservesIncrementalToolOutput(t *testing.T) {
+	body := []byte(`{"previous_response_id":"resp-1","input":[
+		{"type":"function_call_output","call_id":"call-prev","output":"ok"},
+		{"type":"custom_tool_call_output","call_id":"call-custom-prev","output":"ok"}
+	]}`)
+	result := sanitizeCodexWebsocketToolPairs(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("incremental output-only payload should be preserved, got %d items", len(items))
+	}
+	if got := items[0].Get("call_id").String(); got != "call-prev" {
+		t.Fatalf("first output call_id = %q", got)
+	}
+	if got := items[1].Get("call_id").String(); got != "call-custom-prev" {
+		t.Fatalf("second output call_id = %q", got)
+	}
+}
+
+func TestSanitizeCodexWebsocketToolPairsStripsTrailingCalls(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"message","role":"user","content":"hi"},
 		{"type":"function_call","call_id":"call-1","name":"tool"},
 		{"type":"function_call","call_id":"call-2","name":"tool2"}
 	]}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	items := gjson.GetBytes(result, "input").Array()
-	if len(items) != 3 {
-		t.Fatalf("trailing calls should be kept, got %d items", len(items))
+	if len(items) != 1 {
+		t.Fatalf("orphaned trailing calls should be stripped, got %d items", len(items))
+	}
+	if items[0].Get("role").String() != "user" {
+		t.Fatalf("remaining item should be user message, got %s", items[0].Raw)
 	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyStripsNonTrailingOrphanCall(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsStripsTrailingCustomCalls(t *testing.T) {
+	body := []byte(`{"input":[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"custom_tool_call","call_id":"call-custom","name":"tool"}
+	]}`)
+	result := sanitizeCodexWebsocketToolPairs(body)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("orphaned custom call should be stripped, got %d items", len(items))
+	}
+	if items[0].Get("role").String() != "user" {
+		t.Fatalf("remaining item should be user message, got %s", items[0].Raw)
+	}
+}
+
+func TestSanitizeCodexWebsocketToolPairsStripsNonTrailingOrphanCall(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"function_call","call_id":"call-orphan","name":"tool"},
 		{"type":"message","role":"user","content":"hi"},
 		{"type":"function_call","call_id":"call-trailing","name":"tool2"}
 	]}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	items := gjson.GetBytes(result, "input").Array()
-	if len(items) != 2 {
-		t.Fatalf("expected 2 items (orphan removed, trailing kept), got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (orphans removed), got %d", len(items))
 	}
 	if items[0].Get("role").String() != "user" {
 		t.Fatalf("first item should be user message, got %s", items[0].Raw)
 	}
-	if items[1].Get("call_id").String() != "call-trailing" {
-		t.Fatalf("trailing call should be kept, got %s", items[1].Raw)
-	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyInterleavedTrailing(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsStripsInterleavedTrailing(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"message","role":"user","content":"hi"},
 		{"type":"function_call","call_id":"call-a","name":"tool"},
 		{"type":"message","role":"assistant","content":"thinking"},
 		{"type":"function_call","call_id":"call-b","name":"tool2"}
 	]}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	items := gjson.GetBytes(result, "input").Array()
-	if len(items) != 3 {
-		t.Fatalf("expected 3 items, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 message items, got %d", len(items))
 	}
 	for _, item := range items {
-		if item.Get("call_id").String() == "call-a" {
-			t.Fatal("non-trailing orphan call-a should have been removed")
+		if callID := item.Get("call_id").String(); callID != "" {
+			t.Fatalf("orphan call should have been removed: %s", item.Raw)
 		}
 	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyEmptyInput(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsEmptyInput(t *testing.T) {
 	body := []byte(`{"input":[],"model":"gpt-4"}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	if string(result) != string(body) {
 		t.Fatalf("empty input should return unchanged body")
 	}
 }
 
-func TestRemoveOrphanedToolOutputsFromBodyNoInput(t *testing.T) {
+func TestSanitizeCodexWebsocketToolPairsNoInput(t *testing.T) {
 	body := []byte(`{"model":"gpt-4"}`)
-	result := removeOrphanedToolOutputsFromBody(body)
+	result := sanitizeCodexWebsocketToolPairs(body)
 	if string(result) != string(body) {
 		t.Fatalf("missing input should return unchanged body")
 	}

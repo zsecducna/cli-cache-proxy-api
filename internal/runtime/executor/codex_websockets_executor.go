@@ -193,8 +193,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
-	body = removeOrphanedToolOutputsFromBody(body)
-	body = normalizeLongCodexCallIDsInBody(body)
+	body = sanitizeCodexWebsocketToolPairs(body)
+	body = normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body, codexBodyHasPreviousResponseID(body, originalPayload))
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -207,6 +207,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body, httpURL)
+	body = preserveCodexIncrementalOutputOnlyCallIDs(body, originalPayload)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -402,8 +403,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = applyCodexWebsocketClientStore(body, originalPayload)
 	body = stripCodexUnsupportedRequestFields(body)
-	body = removeOrphanedToolOutputsFromBody(body)
-	body = normalizeLongCodexCallIDsInBody(body)
+	body = sanitizeCodexWebsocketToolPairs(body)
+	body = normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body, codexBodyHasPreviousResponseID(body, originalPayload))
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
@@ -416,6 +417,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	body, wsHeaders, cacheSelection := applyCodexPromptCacheHeaders(ctx, from, req, body, httpURL)
+	body = preserveCodexIncrementalOutputOnlyCallIDs(body, originalPayload)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -702,9 +704,36 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 }
 
 func normalizeLongCodexCallIDsInBody(body []byte) []byte {
+	return normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body, codexBodyHasPreviousResponseID(body, nil))
+}
+
+func normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body []byte, hasPreviousResponseID bool) []byte {
 	inputResult := gjson.GetBytes(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
+	}
+
+	pairedCallIDs := map[string]struct{}{}
+	if hasPreviousResponseID {
+		callIDs := make(map[string]struct{}, len(inputResult.Array()))
+		outputIDs := make(map[string]struct{}, len(inputResult.Array()))
+		for _, item := range inputResult.Array() {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				continue
+			}
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "function_call", "custom_tool_call":
+				callIDs[callID] = struct{}{}
+			case "function_call_output", "custom_tool_call_output":
+				outputIDs[callID] = struct{}{}
+			}
+		}
+		for callID := range callIDs {
+			if _, ok := outputIDs[callID]; ok {
+				pairedCallIDs[callID] = struct{}{}
+			}
+		}
 	}
 
 	idMap := make(map[string]string)
@@ -716,6 +745,11 @@ func normalizeLongCodexCallIDsInBody(body []byte) []byte {
 		if callID == "" {
 			continue
 		}
+		if hasPreviousResponseID {
+			if _, ok := pairedCallIDs[callID]; !ok {
+				continue
+			}
+		}
 		normalized := idMap[callID]
 		if normalized == "" {
 			normalized = shortenCodexCallID(callID)
@@ -723,6 +757,68 @@ func normalizeLongCodexCallIDsInBody(body []byte) []byte {
 		}
 		if normalized != callID {
 			result, _ = sjson.SetBytes(result, path, normalized)
+		}
+	}
+	return result
+}
+
+func codexBodyHasPreviousResponseID(body []byte, originalPayload []byte) bool {
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
+		return true
+	}
+	return strings.TrimSpace(gjson.GetBytes(originalPayload, "previous_response_id").String()) != ""
+}
+
+func preserveCodexIncrementalOutputOnlyCallIDs(body []byte, originalPayload []byte) []byte {
+	if !codexBodyHasPreviousResponseID(body, originalPayload) {
+		return body
+	}
+	originalInput := gjson.GetBytes(originalPayload, "input")
+	if !originalInput.Exists() || !originalInput.IsArray() {
+		return body
+	}
+
+	originalCalls := make(map[string]struct{}, len(originalInput.Array()))
+	for _, item := range originalInput.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "function_call" && itemType != "custom_tool_call" {
+			continue
+		}
+		if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+			originalCalls[callID] = struct{}{}
+		}
+	}
+
+	restoreByShortID := make(map[string]string)
+	for _, item := range originalInput.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+			continue
+		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID == "" {
+			continue
+		}
+		if _, pairedInOriginal := originalCalls[callID]; pairedInOriginal {
+			continue
+		}
+		restoreByShortID[shortenCodexCallID(callID)] = callID
+	}
+	if len(restoreByShortID) == 0 {
+		return body
+	}
+
+	result := body
+	bodyInput := gjson.GetBytes(result, "input")
+	for i, item := range bodyInput.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
+			continue
+		}
+		path := fmt.Sprintf("input.%d.call_id", i)
+		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
+		if originalCallID := restoreByShortID[callID]; originalCallID != "" && originalCallID != callID {
+			result, _ = sjson.SetBytes(result, path, originalCallID)
 		}
 	}
 	return result
@@ -737,7 +833,7 @@ func shortenCodexCallID(callID string) string {
 	return "call_" + hex.EncodeToString(sum[:])[:40]
 }
 
-func removeOrphanedToolOutputsFromBody(body []byte) []byte {
+func sanitizeCodexWebsocketToolPairs(body []byte) []byte {
 	inputResult := gjson.GetBytes(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -763,36 +859,29 @@ func removeOrphanedToolOutputsFromBody(body []byte) []byte {
 		}
 	}
 
-	// Unpaired function_calls after the last user/assistant message are the
-	// "current turn" awaiting output — keep them. Unpaired function_calls
-	// before the last message are orphaned historical items — remove them.
-	lastMsgIdx := -1
-	for i := len(items) - 1; i >= 0; i-- {
-		itemType := strings.TrimSpace(items[i].Get("type").String())
-		if itemType == "message" {
-			lastMsgIdx = i
-			break
-		}
-	}
-
+	// With previous_response_id, tool outputs may legitimately refer to calls
+	// stored in upstream session state instead of the current input array.
+	allowIncrementalToolOutputs := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != ""
 	var filtered []json.RawMessage
 	removed := 0
-	for idx, item := range items {
+	for _, item := range items {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID != "" {
 			switch itemType {
 			case "function_call_output", "custom_tool_call_output":
 				if _, ok := toolCallIDs[callID]; !ok {
+					if allowIncrementalToolOutputs {
+						filtered = append(filtered, json.RawMessage(item.Raw))
+						continue
+					}
 					removed++
 					continue
 				}
 			case "function_call", "custom_tool_call":
 				if _, ok := toolOutputIDs[callID]; !ok {
-					if idx <= lastMsgIdx {
-						removed++
-						continue
-					}
+					removed++
+					continue
 				}
 			}
 		}
