@@ -1155,6 +1155,46 @@ func TestNormalizeLongCodexCallIDsInBodyShortensAndPreservesPairs(t *testing.T) 
 	}
 }
 
+var benchmarkCodexExecutorNormalizedBody []byte
+
+func BenchmarkNormalizeLongCodexCallIDsInBodyLargeInput(b *testing.B) {
+	body := largeCodexExecutorInputBody(1000)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkCodexExecutorNormalizedBody = normalizeLongCodexCallIDsInBody(body)
+	}
+}
+
+func largeCodexExecutorInputBody(items int) []byte {
+	longCallID := "call_" + strings.Repeat("b", 73)
+	var builder strings.Builder
+	builder.Grow(items * 120)
+	builder.WriteString(`{"input":[`)
+	for i := 0; i < items; i++ {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		switch i % 4 {
+		case 0:
+			builder.WriteString(`{"type":"message","role":"user","content":"hello"}`)
+		case 1:
+			builder.WriteString(`{"type":"function_call","call_id":"`)
+			builder.WriteString(longCallID)
+			builder.WriteString(`","name":"tool","arguments":"{}"}`)
+		case 2:
+			builder.WriteString(`{"type":"function_call_output","call_id":"`)
+			builder.WriteString(longCallID)
+			builder.WriteString(`","output":"ok"}`)
+		default:
+			builder.WriteString(`{"type":"message","role":"assistant","content":"ok"}`)
+		}
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
+}
+
 func TestSanitizeCodexWebsocketToolPairsDropsOrphanedOutput(t *testing.T) {
 	body := []byte(`{"input":[
 		{"type":"message","role":"user","content":"hi"},

@@ -257,6 +257,30 @@ func TestConvertOpenAIResponsesRequestToCodex_StripsUnsupportedTokenLimitFields(
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_LargeInputNormalization(t *testing.T) {
+	inputJSON := largeResponsesRequestForBenchmark(64)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, true)
+
+	if got := gjson.GetBytes(output, "input.0.role").String(); got != "developer" {
+		t.Fatalf("input.0.role = %q, want developer", got)
+	}
+	if got := gjson.GetBytes(output, "input.1.role").String(); got != "user" {
+		t.Fatalf("input.1.role = %q, want user", got)
+	}
+	callID := gjson.GetBytes(output, "input.2.call_id").String()
+	outputCallID := gjson.GetBytes(output, "input.3.call_id").String()
+	if len(callID) > 64 {
+		t.Fatalf("call_id length = %d, want <= 64: %q", len(callID), callID)
+	}
+	if outputCallID != callID {
+		t.Fatalf("function_call_output call_id = %q, want %q", outputCallID, callID)
+	}
+	if gjson.GetBytes(output, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should be stripped: %s", output)
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{
@@ -401,4 +425,44 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
+}
+
+var benchmarkCodexResponsesOutput []byte
+
+func BenchmarkConvertOpenAIResponsesRequestToCodexLargeInput(b *testing.B) {
+	inputJSON := largeResponsesRequestForBenchmark(1000)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(inputJSON)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkCodexResponsesOutput = ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, true)
+	}
+}
+
+func largeResponsesRequestForBenchmark(items int) []byte {
+	longCallID := "call_" + strings.Repeat("a", 73)
+	var builder strings.Builder
+	builder.Grow(items * 160)
+	builder.WriteString(`{"model":"gpt-5.4","stream":false,"max_tokens":128,"tools":[{"type":"web_search_preview_2025_03_11"}],"input":[`)
+	for i := 0; i < items; i++ {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		switch i % 4 {
+		case 0:
+			builder.WriteString(`{"type":"message","role":"system","content":[{"type":"input_text","text":"system"}]}`)
+		case 1:
+			builder.WriteString(`{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}`)
+		case 2:
+			builder.WriteString(`{"type":"function_call","call_id":"`)
+			builder.WriteString(longCallID)
+			builder.WriteString(`","name":"tool","arguments":"{}"}`)
+		default:
+			builder.WriteString(`{"type":"function_call_output","call_id":"`)
+			builder.WriteString(longCallID)
+			builder.WriteString(`","output":"ok"}`)
+		}
+	}
+	builder.WriteString(`]}`)
+	return []byte(builder.String())
 }

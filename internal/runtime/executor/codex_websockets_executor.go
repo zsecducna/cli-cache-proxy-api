@@ -722,12 +722,14 @@ func normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body []byte, hasPrevi
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
 	}
+	items := inputResult.Array()
 
-	pairedCallIDs := map[string]struct{}{}
+	var pairedCallIDs map[string]struct{}
 	if hasPreviousResponseID {
-		callIDs := make(map[string]struct{}, len(inputResult.Array()))
-		outputIDs := make(map[string]struct{}, len(inputResult.Array()))
-		for _, item := range inputResult.Array() {
+		pairedCallIDs = make(map[string]struct{})
+		callIDs := make(map[string]struct{}, len(items))
+		outputIDs := make(map[string]struct{}, len(items))
+		for _, item := range items {
 			callID := strings.TrimSpace(item.Get("call_id").String())
 			if callID == "" {
 				continue
@@ -746,12 +748,12 @@ func normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body []byte, hasPrevi
 		}
 	}
 
-	idMap := make(map[string]string)
-	result := body
-	items := inputResult.Array()
+	var idMap map[string]string
+	var replacements [][]byte
+	changed := false
 	for i := 0; i < len(items); i++ {
-		path := fmt.Sprintf("input.%d.call_id", i)
-		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
+		item := items[i]
+		callID := strings.TrimSpace(item.Get("call_id").String())
 		if callID == "" {
 			continue
 		}
@@ -760,16 +762,32 @@ func normalizeLongCodexCallIDsInBodyWithPreviousResponseID(body []byte, hasPrevi
 				continue
 			}
 		}
+		if idMap == nil {
+			idMap = make(map[string]string)
+		}
 		normalized := idMap[callID]
 		if normalized == "" {
 			normalized = shortenCodexCallID(callID)
 			idMap[callID] = normalized
 		}
 		if normalized != callID {
-			result, _ = sjson.SetBytes(result, path, normalized)
+			if updated, err := sjson.SetBytes([]byte(item.Raw), "call_id", normalized); err == nil {
+				if replacements == nil {
+					replacements = make([][]byte, len(items))
+				}
+				replacements[i] = updated
+				changed = true
+			}
 		}
 	}
-	return result
+	if !changed {
+		return body
+	}
+	inputRaw := buildCodexInputArray(items, replacements)
+	if updated, err := sjson.SetRawBytes(body, "input", inputRaw); err == nil {
+		return updated
+	}
+	return body
 }
 
 func codexBodyHasPreviousResponseID(body []byte, originalPayload []byte) bool {
@@ -818,20 +836,63 @@ func preserveCodexIncrementalOutputOnlyCallIDs(body []byte, originalPayload []by
 		return body
 	}
 
-	result := body
-	bodyInput := gjson.GetBytes(result, "input")
-	for i, item := range bodyInput.Array() {
+	bodyInput := gjson.GetBytes(body, "input")
+	bodyItems := bodyInput.Array()
+	var replacements [][]byte
+	changed := false
+	for i, item := range bodyItems {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
 			continue
 		}
-		path := fmt.Sprintf("input.%d.call_id", i)
-		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
+		callID := strings.TrimSpace(item.Get("call_id").String())
 		if originalCallID := restoreByShortID[callID]; originalCallID != "" && originalCallID != callID {
-			result, _ = sjson.SetBytes(result, path, originalCallID)
+			if updated, err := sjson.SetBytes([]byte(item.Raw), "call_id", originalCallID); err == nil {
+				if replacements == nil {
+					replacements = make([][]byte, len(bodyItems))
+				}
+				replacements[i] = updated
+				changed = true
+			}
 		}
 	}
-	return result
+	if !changed {
+		return body
+	}
+	inputRaw := buildCodexInputArray(bodyItems, replacements)
+	if updated, err := sjson.SetRawBytes(body, "input", inputRaw); err == nil {
+		return updated
+	}
+	return body
+}
+
+func buildCodexInputArray(items []gjson.Result, replacements [][]byte) []byte {
+	totalLen := 2
+	if len(items) > 1 {
+		totalLen += len(items) - 1
+	}
+	for i, item := range items {
+		if i < len(replacements) && len(replacements[i]) > 0 {
+			totalLen += len(replacements[i])
+			continue
+		}
+		totalLen += len(item.Raw)
+	}
+
+	out := make([]byte, 0, totalLen)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		if i < len(replacements) && len(replacements[i]) > 0 {
+			out = append(out, replacements[i]...)
+			continue
+		}
+		out = append(out, item.Raw...)
+	}
+	out = append(out, ']')
+	return out
 }
 
 func shortenCodexCallID(callID string) string {

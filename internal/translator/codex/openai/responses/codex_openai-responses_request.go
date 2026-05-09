@@ -3,7 +3,7 @@ package responses
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -42,39 +42,65 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
 
-	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloper(rawJSON)
+	rawJSON = normalizeCodexInputItems(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
-	rawJSON = normalizeLongCodexCallIDs(rawJSON)
 
 	return rawJSON
 }
 
-func normalizeLongCodexCallIDs(rawJSON []byte) []byte {
+func normalizeCodexInputItems(rawJSON []byte) []byte {
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if !inputResult.IsArray() {
 		return rawJSON
 	}
 
-	idMap := make(map[string]string)
 	result := rawJSON
 	inputArray := inputResult.Array()
+	var idMap map[string]string
+	var replacements [][]byte
+	changed := false
 	for i := 0; i < len(inputArray); i++ {
-		path := fmt.Sprintf("input.%d.call_id", i)
-		callID := strings.TrimSpace(gjson.GetBytes(result, path).String())
-		if callID == "" {
-			continue
+		item := inputArray[i]
+		var itemRaw []byte
+		itemChanged := false
+		if item.Get("role").String() == "system" {
+			var ok bool
+			itemRaw, ok = setCodexItemString(itemRaw, item, "role", "developer")
+			itemChanged = itemChanged || ok
 		}
-		normalized := idMap[callID]
-		if normalized == "" {
-			normalized = shortenCodexCallID(callID)
-			idMap[callID] = normalized
+
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID != "" {
+			if idMap == nil {
+				idMap = make(map[string]string)
+			}
+			normalized := idMap[callID]
+			if normalized == "" {
+				normalized = shortenCodexCallID(callID)
+				idMap[callID] = normalized
+			}
+			if normalized != callID {
+				var ok bool
+				itemRaw, ok = setCodexItemString(itemRaw, item, "call_id", normalized)
+				itemChanged = itemChanged || ok
+			}
 		}
-		if normalized != callID {
-			result, _ = sjson.SetBytes(result, path, normalized)
+		if itemChanged {
+			if replacements == nil {
+				replacements = make([][]byte, len(inputArray))
+			}
+			replacements[i] = itemRaw
+			changed = true
 		}
 	}
-	return result
+	if !changed {
+		return rawJSON
+	}
+	inputRaw := buildCodexJSONArray(inputArray, replacements)
+	if updated, err := sjson.SetRawBytes(result, "input", inputRaw); err == nil {
+		return updated
+	}
+	return rawJSON
 }
 
 func shortenCodexCallID(callID string) string {
@@ -103,29 +129,6 @@ func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 	return rawJSON
 }
 
-// convertSystemRoleToDeveloper traverses the input array and converts any message items
-// with role "system" to role "developer". This is necessary because Codex API does not
-// accept "system" role in the input array.
-func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
-	inputResult := gjson.GetBytes(rawJSON, "input")
-	if !inputResult.IsArray() {
-		return rawJSON
-	}
-
-	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
-		}
-	}
-
-	return result
-}
-
 // normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
 // stable names expected by the current Codex upstream.
 func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
@@ -135,7 +138,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 	if tools.IsArray() {
 		toolArray := tools.Array()
 		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tools.%d.type", i)
+			typePath := codexArrayFieldPath("tools", i, "type")
 			result = normalizeCodexBuiltinToolAtPath(result, typePath)
 		}
 	}
@@ -146,12 +149,56 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 	if toolChoiceTools.IsArray() {
 		toolArray := toolChoiceTools.Array()
 		for i := 0; i < len(toolArray); i++ {
-			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
+			typePath := codexArrayFieldPath("tool_choice.tools", i, "type")
 			result = normalizeCodexBuiltinToolAtPath(result, typePath)
 		}
 	}
 
 	return result
+}
+
+func codexArrayFieldPath(arrayPath string, index int, field string) string {
+	return arrayPath + "." + strconv.Itoa(index) + "." + field
+}
+
+func setCodexItemString(current []byte, item gjson.Result, field string, value string) ([]byte, bool) {
+	if current == nil {
+		current = []byte(item.Raw)
+	}
+	updated, err := sjson.SetBytes(current, field, value)
+	if err != nil {
+		return current, false
+	}
+	return updated, true
+}
+
+func buildCodexJSONArray(items []gjson.Result, replacements [][]byte) []byte {
+	totalLen := 2
+	if len(items) > 1 {
+		totalLen += len(items) - 1
+	}
+	for i, item := range items {
+		if i < len(replacements) && len(replacements[i]) > 0 {
+			totalLen += len(replacements[i])
+			continue
+		}
+		totalLen += len(item.Raw)
+	}
+
+	out := make([]byte, 0, totalLen)
+	out = append(out, '[')
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		if i < len(replacements) && len(replacements[i]) > 0 {
+			out = append(out, replacements[i]...)
+			continue
+		}
+		out = append(out, item.Raw...)
+	}
+	out = append(out, ']')
+	return out
 }
 
 func normalizeCodexBuiltinToolAtPath(rawJSON []byte, path string) []byte {
