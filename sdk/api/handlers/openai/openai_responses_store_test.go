@@ -54,7 +54,7 @@ func TestDefaultStoreForWebsocketPreviousResponseID(t *testing.T) {
 		{
 			name:      "defaults missing store",
 			raw:       `{"model":"test-model","previous_response_id":"resp-1","input":[]}`,
-			wantStore: "true",
+			wantStore: "false",
 			wantExist: true,
 		},
 		{

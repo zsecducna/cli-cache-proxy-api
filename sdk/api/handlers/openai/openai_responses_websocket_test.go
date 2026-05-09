@@ -340,8 +340,8 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDIncremental(t *
 	if gjson.GetBytes(normalized, "previous_response_id").String() != "resp-1" {
 		t.Fatalf("previous_response_id must be preserved in incremental mode")
 	}
-	if gjson.GetBytes(normalized, "store").Raw != "true" {
-		t.Fatalf("store must default to true with previous_response_id: %s", normalized)
+	if gjson.GetBytes(normalized, "store").Raw != "false" {
+		t.Fatalf("store must default to false with previous_response_id: %s", normalized)
 	}
 	input := gjson.GetBytes(normalized, "input").Array()
 	if len(input) != 1 {

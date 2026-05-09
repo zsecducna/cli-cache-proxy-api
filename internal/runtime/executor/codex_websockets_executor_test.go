@@ -473,6 +473,75 @@ func TestCodexWebsocketsExecuteStreamTranslatesOpenAIResponsesPayload(t *testing
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamTranslatesOpenAIChatPayload(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("Upgrade() error = %v", errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		}()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("ReadMessage() error = %v", errRead)
+			return
+		}
+		received <- payload
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-test","model":"gpt-5.4-mini","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("WriteMessage() error = %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","messages":[{"role":"user","content":"Reply with OK only."}],"stream":true}`),
+	}
+
+	stream, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case payload := <-received:
+		if gjson.GetBytes(payload, "messages").Exists() {
+			t.Fatalf("websocket request still has chat messages: %s", payload)
+		}
+		if got := gjson.GetBytes(payload, "input.0.role").String(); got != "user" {
+			t.Fatalf("input.0.role = %q, want user; payload=%s", got, payload)
+		}
+		if got := gjson.GetBytes(payload, "input.0.content.0.text").String(); got != "Reply with OK only." {
+			t.Fatalf("input.0.content.0.text = %q, want prompt; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket request")
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamStripsPrefixedPayloadModel(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	received := make(chan []byte, 1)
@@ -1120,6 +1189,64 @@ func TestSanitizeCodexWebsocketToolPairsPreservesIncrementalToolOutput(t *testin
 	}
 	if got := items[1].Get("call_id").String(); got != "call-custom-prev" {
 		t.Fatalf("second output call_id = %q", got)
+	}
+}
+
+func TestResetCodexWebsocketContinuationForAuthSwitchClearsPreviousResponseAndStaleToolOutputs(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(nil)
+	sess := &codexWebsocketSession{sessionID: "session-1", authID: "auth-a"}
+	body := []byte(`{"previous_response_id":"resp-old","prompt_cache_key":"old-cache","input":[
+		{"type":"function_call_output","call_id":"call-prev","output":"stale"},
+		{"type":"custom_tool_call_output","call_id":"custom-prev","output":"stale"},
+		{"type":"function_call","call_id":"call-local","name":"tool","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call-local","output":"ok"}
+	]}`)
+
+	result, reset := exec.resetCodexWebsocketContinuationForAuthSwitch(sess, "auth-b", body)
+
+	if !reset {
+		t.Fatal("reset = false, want true")
+	}
+	if got := gjson.GetBytes(result, "previous_response_id").Raw; got != "null" {
+		t.Fatalf("previous_response_id = %s, want null in %s", got, result)
+	}
+	if gjson.GetBytes(result, "prompt_cache_key").Exists() {
+		t.Fatalf("prompt_cache_key should be removed on auth switch: %s", result)
+	}
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("expected stale output-only item to be removed, got %d items in %s", len(items), result)
+	}
+	for _, item := range items {
+		if got := item.Get("call_id").String(); got == "call-prev" || got == "custom-prev" {
+			t.Fatalf("stale tool output was preserved: %s", result)
+		}
+	}
+	if got := items[0].Get("type").String(); got != "function_call" {
+		t.Fatalf("first remaining item type = %q, want function_call", got)
+	}
+	if got := items[1].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("second remaining item type = %q, want function_call_output", got)
+	}
+}
+
+func TestResetCodexWebsocketContinuationForSameAuthPreservesIncrementalToolOutput(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(nil)
+	sess := &codexWebsocketSession{sessionID: "session-1", authID: "auth-a"}
+	body := []byte(`{"previous_response_id":"resp-old","input":[
+		{"type":"function_call_output","call_id":"call-prev","output":"ok"}
+	]}`)
+
+	result, reset := exec.resetCodexWebsocketContinuationForAuthSwitch(sess, "auth-a", body)
+
+	if reset {
+		t.Fatal("reset = true, want false")
+	}
+	if got := gjson.GetBytes(result, "previous_response_id").String(); got != "resp-old" {
+		t.Fatalf("previous_response_id = %q, want resp-old", got)
+	}
+	if got := gjson.GetBytes(result, "input.0.call_id").String(); got != "call-prev" {
+		t.Fatalf("tool output call_id = %q, want call-prev", got)
 	}
 }
 

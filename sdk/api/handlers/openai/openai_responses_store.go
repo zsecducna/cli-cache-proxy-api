@@ -14,7 +14,7 @@ func defaultStoreForWebsocketPreviousResponseID(rawJSON []byte) []byte {
 	if gjson.GetBytes(rawJSON, "store").Exists() {
 		return rawJSON
 	}
-	updated, err := sjson.SetBytes(rawJSON, "store", true)
+	updated, err := sjson.SetBytes(rawJSON, "store", false)
 	if err != nil {
 		return rawJSON
 	}

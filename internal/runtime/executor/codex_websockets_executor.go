@@ -224,6 +224,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		sess.reqMu.Lock()
 		defer sess.reqMu.Unlock()
 	}
+	body, resetContinuation := e.resetCodexWebsocketContinuationForAuthSwitch(sess, authID, body)
+	if resetContinuation {
+		wsHeaders.Del("Conversation_id")
+		cacheSelection = codexPromptCacheSelection{}
+	}
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	wsReqLog := helps.UpstreamRequestLog{
@@ -432,6 +437,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		if sess != nil {
 			sess.reqMu.Lock()
 		}
+	}
+	body, resetContinuation := e.resetCodexWebsocketContinuationForAuthSwitch(sess, authID, body)
+	if resetContinuation {
+		wsHeaders.Del("Conversation_id")
+		cacheSelection = codexPromptCacheSelection{}
 	}
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
@@ -1503,6 +1513,32 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	go e.readUpstreamLoop(sess, conn)
 	logCodexWebsocketConnected(sess.sessionID, authID, wsURL)
 	return conn, resp, nil
+}
+
+func (e *CodexWebsocketsExecutor) resetCodexWebsocketContinuationForAuthSwitch(sess *codexWebsocketSession, authID string, body []byte) ([]byte, bool) {
+	if sess == nil || len(body) == 0 {
+		return body, false
+	}
+
+	nextAuthID := strings.TrimSpace(authID)
+	sess.connMu.Lock()
+	previousAuthID := strings.TrimSpace(sess.authID)
+	conn := sess.conn
+	switched := previousAuthID != "" && previousAuthID != nextAuthID
+	sess.connMu.Unlock()
+	if !switched {
+		return body, false
+	}
+
+	updated, errSet := sjson.SetRawBytes(body, "previous_response_id", []byte("null"))
+	if errSet != nil {
+		return body, false
+	}
+	updated, _ = sjson.DeleteBytes(updated, "prompt_cache_key")
+	if conn != nil {
+		e.invalidateUpstreamConn(sess, conn, "auth_switch", nil)
+	}
+	return sanitizeCodexWebsocketToolPairs(updated), true
 }
 
 func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, conn *websocket.Conn) {
