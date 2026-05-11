@@ -1901,6 +1901,13 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
+	// Claude /v1/messages requests routed to GPT/Codex must use HTTP SSE upstream.
+	// The Anthropic-compatible downstream contract is SSE, and Codex websocket
+	// upstream has been unstable for this translated flow even when ws_upstream
+	// is enabled on the selected auth.
+	if isClaudeViaOpenAICompatRoute(opts) {
+		return e.httpExec.ExecuteStream(ctx, auth, req, opts)
+	}
 	if codexWebsocketsEnabled(auth) && codexPreferWSUpstream(auth) {
 		wsReq := req
 		if from := opts.SourceFormat; from != sdktranslator.FromString("codex") {
@@ -2009,6 +2016,27 @@ func codexPreferWSUpstream(auth *cliproxyauth.Auth) bool {
 		}
 	}
 	return false
+}
+
+// isClaudeViaOpenAICompatRoute detects Anthropic Messages traffic mapped onto
+// GPT/Codex/OpenAI-compatible providers so streaming stays on HTTP SSE instead
+// of the optional websocket upstream path.
+func isClaudeViaOpenAICompatRoute(opts cliproxyexecutor.Options) bool {
+	if len(opts.Metadata) == 0 {
+		return false
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.RequestRouteMetadataKey]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v) == openAICompatClaudeViaGPTRouteClass
+	case []byte:
+		return strings.TrimSpace(string(v)) == openAICompatClaudeViaGPTRouteClass
+	default:
+		return strings.TrimSpace(fmt.Sprint(v)) == openAICompatClaudeViaGPTRouteClass
+	}
 }
 
 func isWSUpstreamFallbackEligible(err error) bool {

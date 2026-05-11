@@ -578,7 +578,12 @@ func (e *OpenAICompatExecutor) selectedProvider(auth *cliproxyauth.Auth) string 
 }
 
 func (e *OpenAICompatExecutor) claudeViaGPTCapabilities(auth *cliproxyauth.Auth) openaiclaude.BackendCapabilities {
+	// Claude-to-GPT routing defaults to the Responses API because tool turns and
+	// Codex-compatible streaming map there without losing Anthropic message
+	// semantics. Operators can still opt a backend out with
+	// supports_openai_responses=false.
 	caps := openaiclaude.BackendCapabilities{
+		SupportsOpenAIResponses: true,
 		SupportsChatCompletions: true,
 		SupportsTools:           true,
 		SupportsStreaming:       true,

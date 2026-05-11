@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,6 +94,115 @@ func TestOpenAICompatExecutorClaudeViaGPTPrefersResponsesSurface(t *testing.T) {
 	events := parseAnthropicSSEEvents(t, translated)
 	if got := findAnthropicMessageDeltaStopReason(t, events); got != "end_turn" {
 		t.Fatalf("message_delta stop_reason = %q, want %q", got, "end_turn")
+	}
+}
+
+// TestOpenAICompatExecutorClaudeViaGPTDefaultsToResponsesSurface locks the
+// default Claude-to-GPT surface to Responses when the backend has not opted out.
+func TestOpenAICompatExecutorClaudeViaGPTDefaultsToResponsesSurface(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\",\"stop_reason\":\"stop\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openrouter", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":     server.URL + "/v1",
+		"api_key":      "test",
+		"provider_key": "openrouter",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	_ = collectOpenAICompatStreamChunks(t, result)
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+	if got := gjson.GetBytes(gotBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input[0].type = %q, want %q", got, "message")
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("unexpected chat-completions messages payload: %s", string(gotBody))
+	}
+}
+
+// TestOpenAICompatAutoExecutorClaudeViaGPTBypassesWSUpstream verifies the
+// auto executor ignores ws_upstream for translated Claude Messages streaming.
+func TestOpenAICompatAutoExecutorClaudeViaGPTBypassesWSUpstream(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	var wsAttempts int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" {
+			atomic.AddInt32(&wsAttempts, 1)
+			http.Error(w, "websocket disabled in test", http.StatusBadGateway)
+			return
+		}
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\",\"stop_reason\":\"stop\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatAutoExecutor("openrouter", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":     server.URL + "/v1",
+		"api_key":      "test",
+		"provider_key": "openrouter",
+		"ws_upstream":  "true",
+	}}
+
+	payload := []byte(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	_ = collectOpenAICompatStreamChunks(t, result)
+	if got := atomic.LoadInt32(&wsAttempts); got != 0 {
+		t.Fatalf("websocket attempts = %d, want 0", got)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses")
+	}
+	if gjson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("unexpected chat-completions messages payload: %s", string(gotBody))
 	}
 }
 

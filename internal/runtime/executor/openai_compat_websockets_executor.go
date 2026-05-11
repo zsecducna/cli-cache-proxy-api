@@ -265,6 +265,13 @@ func (e *OpenAICompatAutoExecutor) ExecuteStream(ctx context.Context, auth *clip
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("openai compat auto executor: executor is nil")
 	}
+	// Claude /v1/messages translated onto GPT/OpenAI-compatible providers must
+	// default to the HTTP SSE path. That path lets OpenAICompatExecutor choose
+	// the Responses surface and translate the upstream SSE stream back to
+	// Anthropic SSE without depending on the unstable websocket upstream.
+	if isClaudeViaOpenAICompatRoute(opts) {
+		return e.httpExec.ExecuteStream(ctx, auth, req, opts)
+	}
 	if codexPreferWSUpstream(auth) {
 		result, err := e.wsExec.ExecuteStream(ctx, auth, req, opts)
 		if err == nil || !isWSUpstreamFallbackEligible(err) {

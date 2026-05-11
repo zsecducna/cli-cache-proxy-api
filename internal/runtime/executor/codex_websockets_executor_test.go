@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1067,6 +1068,64 @@ func TestCodexPreferWSUpstream(t *testing.T) {
 				t.Fatalf("codexPreferWSUpstream() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCodexAutoExecutorClaudeViaGPTBypassesWSUpstream verifies translated
+// Claude Messages streaming uses Codex HTTP /responses SSE even when the auth
+// entry normally prefers websocket upstream for streaming.
+func TestCodexAutoExecutorClaudeViaGPTBypassesWSUpstream(t *testing.T) {
+	var gotPath string
+	var wsAttempts int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" {
+			atomic.AddInt32(&wsAttempts, 1)
+			http.Error(w, "websocket disabled in test", http.StatusBadGateway)
+			return
+		}
+		gotPath = r.URL.Path
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4\",\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"total_tokens\":12}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":    server.URL,
+		"api_key":     "test",
+		"websockets":  "true",
+		"ws_upstream": "true",
+	}}
+	payload := []byte(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		Stream:          true,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestRouteMetadataKey: "claude_via_openai_compat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&wsAttempts); got != 0 {
+		t.Fatalf("websocket attempts = %d, want 0", got)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want %q", gotPath, "/responses")
 	}
 }
 
