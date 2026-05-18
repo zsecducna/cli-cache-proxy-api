@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	gin "github.com/gin-gonic/gin"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
 
 func TestInternalCustomerMiddlewareRejectsRemoteCaller(t *testing.T) {

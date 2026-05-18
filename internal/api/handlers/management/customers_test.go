@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	gin "github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/customerstate"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/customerstate"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func setupCustomerHandlerTest(t *testing.T) *gin.Engine {

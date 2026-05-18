@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -46,7 +47,8 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out = preserveClaudeThinkingMetadata(out, root)
 
 	messagesJSON := []byte(`[]`)
-	messagesJSON = appendTextMessage(messagesJSON, "system", extractClaudeTextParts(root.Get("system")))
+	// Claude Code injects an attribution-only system block that must not become OpenAI-visible prompt text.
+	messagesJSON = appendTextMessage(messagesJSON, "system", extractClaudeSystemTextParts(root.Get("system")))
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
@@ -109,7 +111,8 @@ func ConvertClaudeRequestToOpenAIWithTools(modelName string, inputRawJSON []byte
 	}
 
 	messagesJSON := []byte(`[]`)
-	messagesJSON = appendTextMessage(messagesJSON, "system", extractClaudeTextParts(root.Get("system")))
+	// Claude Code injects an attribution-only system block that must not become OpenAI-visible prompt text.
+	messagesJSON = appendTextMessage(messagesJSON, "system", extractClaudeSystemTextParts(root.Get("system")))
 
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(_, message gjson.Result) bool {
@@ -217,6 +220,24 @@ func extractClaudeTextParts(content gjson.Result) []string {
 		return true
 	})
 	return parts
+}
+
+// extractClaudeSystemTextParts keeps real Claude system prompt text while dropping
+// Claude Code's synthetic billing attribution block before OpenAI translation.
+func extractClaudeSystemTextParts(content gjson.Result) []string {
+	parts := extractClaudeTextParts(content)
+	if len(parts) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(parts))
+	for _, text := range parts {
+		// The attribution helper owns prefix/whitespace rules so all Claude translators strip the same marker.
+		if util.IsClaudeCodeAttributionSystemText(text) {
+			continue
+		}
+		filtered = append(filtered, text)
+	}
+	return filtered
 }
 
 func appendTextMessage(messagesJSON []byte, role string, parts []string) []byte {

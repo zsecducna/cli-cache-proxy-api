@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type openAICompatPoolExecutor struct {
@@ -359,7 +359,7 @@ func TestManager_ExhaustedModelCooldownErrorReturns429ForRealClaudeOAuth(t *test
 			"claude-opus-4-6": {
 				Unavailable:    true,
 				NextRetryAfter: now.Add(2 * time.Minute),
-				LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
+				LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
 			},
 		},
 	}); err != nil {
@@ -373,7 +373,7 @@ func TestManager_ExhaustedModelCooldownErrorReturns429ForRealClaudeOAuth(t *test
 			"claude-opus-4-6": {
 				Unavailable:    true,
 				NextRetryAfter: now.Add(3 * time.Minute),
-				LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
+				LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "Extra usage is required for long context requests."},
 			},
 		},
 	}); err != nil {

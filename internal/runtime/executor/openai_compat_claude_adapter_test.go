@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	responsefmt "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	responsefmt "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/tidwall/gjson"
 )
 

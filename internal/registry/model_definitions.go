@@ -6,7 +6,12 @@ import (
 	"strings"
 )
 
-const codexBuiltinImageModelID = "gpt-image-2"
+const (
+	codexBuiltinImageModelID      = "gpt-image-2"
+	xaiBuiltinImageModelID        = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID        = "grok-imagine-video"
+)
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -21,6 +26,7 @@ type staticModelsJSON struct {
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	XAI         []*ModelInfo `json:"xai"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -50,7 +56,8 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexFree))
+	// Keep GPT-5.5 off free-tier Codex auths even if upstream metadata includes it.
+	return WithCodexBuiltins(excludeModelInfosByID(cloneModelInfos(getModels().CodexFree), "gpt-5.5"))
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
@@ -78,11 +85,22 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetXAIModels returns the standard xAI Grok model definitions.
+func GetXAIModels() []*ModelInfo {
+	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+}
+
+// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
+// not depend on remote models.json updates.
+func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo())
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -94,6 +112,45 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func xaiBuiltinImageModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImageModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image",
+		Name:        xaiBuiltinImageModelID,
+		Description: "xAI Grok image generation model.",
+	}
+}
+
+func xaiBuiltinImageQualityModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinImageQualityModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Image Quality",
+		Name:        xaiBuiltinImageQualityModelID,
+		Description: "xAI Grok higher-fidelity image generation model.",
+	}
+}
+
+func xaiBuiltinVideoModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinVideoModelID,
+		Object:      "model",
+		Created:     1735689600, // 2025-01-01
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Video",
+		Name:        xaiBuiltinVideoModelID,
+		Description: "xAI Grok video generation model.",
 	}
 }
 
@@ -143,6 +200,33 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	return filtered
 }
 
+// excludeModelInfosByID removes exact model IDs while preserving input order and cloned metadata.
+func excludeModelInfosByID(models []*ModelInfo, ids ...string) []*ModelInfo {
+	if len(models) == 0 || len(ids) == 0 {
+		return models
+	}
+	blocked := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if key := strings.ToLower(strings.TrimSpace(id)); key != "" {
+			blocked[key] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return models
+	}
+	out := models[:0]
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, ok := blocked[strings.ToLower(strings.TrimSpace(model.ID))]; ok {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -167,6 +251,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - codex
 //   - kimi
 //   - antigravity
+//   - xai
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -186,6 +271,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "xai", "x-ai", "grok":
+		return GetXAIModels()
 	default:
 		return nil
 	}
@@ -208,6 +295,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		data.XAI,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

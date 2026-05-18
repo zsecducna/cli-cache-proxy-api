@@ -3,7 +3,7 @@ package responses
 import (
 	"testing"
 
-	openaiclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/claude"
+	openaiclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
 	"github.com/tidwall/gjson"
 )
 

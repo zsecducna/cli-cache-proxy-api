@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,11 +98,47 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	if geminiIndex == altBaseIndex {
 		t.Fatalf("same provider/key with different base_url produced duplicate auth_index %q", geminiIndex)
 	}
-	if geminiIndex == duplicateIndex {
-		t.Fatalf("duplicate config entries should be separated by source-derived seed, got %q", geminiIndex)
+	if geminiIndex != duplicateIndex {
+		t.Fatalf("same provider/key with different source should share auth_index, got %q vs %q", geminiIndex, duplicateIndex)
 	}
 }
 
+// TestEnsureIndexUsesOAuthTypeAndAbsolutePath verifies OAuth-backed credentials
+// derive their stable auth index from the credential type and absolute file path.
+func TestEnsureIndexUsesOAuthTypeAndAbsolutePath(t *testing.T) {
+	t.Parallel()
+
+	wd, errWd := os.Getwd()
+	if errWd != nil {
+		t.Fatalf("os.Getwd returned error: %v", errWd)
+	}
+
+	relPath := "test-oauth.json"
+	absPath := filepath.Join(wd, relPath)
+	expectedSeed := "gemini:" + filepath.Clean(absPath)
+	expectedIndex := stableAuthIndex(expectedSeed)
+
+	a := &Auth{
+		Provider: "gemini-cli",
+		Attributes: map[string]string{
+			"path": relPath,
+		},
+		Metadata: map[string]any{
+			"type": "gemini",
+		},
+	}
+
+	got := a.EnsureIndex()
+	if got == "" {
+		t.Fatal("auth index should not be empty")
+	}
+	if got != expectedIndex {
+		t.Fatalf("auth index = %q, want %q", got, expectedIndex)
+	}
+}
+
+// TestRecentRequestsSnapshotEmptyReturnsTwentyBuckets verifies empty request
+// history still renders the fixed rolling window with deterministic time labels.
 func TestRecentRequestsSnapshotEmptyReturnsTwentyBuckets(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).In(time.Local)
 	a := &Auth{}
@@ -129,6 +167,8 @@ func TestRecentRequestsSnapshotEmptyReturnsTwentyBuckets(t *testing.T) {
 	}
 }
 
+// TestRecentRequestsSnapshotIncludesCounts verifies success and failure records
+// in the current bucket are exposed by the snapshot without changing counts.
 func TestRecentRequestsSnapshotIncludesCounts(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).In(time.Local)
 	a := &Auth{}
@@ -147,6 +187,8 @@ func TestRecentRequestsSnapshotIncludesCounts(t *testing.T) {
 	}
 }
 
+// TestRecentRequestsSnapshotBucketAdvanceMovesCounts verifies records stay in
+// their original ten-minute bucket when the snapshot window advances.
 func TestRecentRequestsSnapshotBucketAdvanceMovesCounts(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).In(time.Local)
 	next := now.Add(10 * time.Minute)

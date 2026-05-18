@@ -3,8 +3,8 @@ package management
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 )
 
 func providerNamesForUsageFilter(cfg *config.Config, provider string) []string {

@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-CLI向けのOpenAI/Gemini/Claude/Codex互換APIインターフェースを提供するプロキシサーバーです。
+CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインターフェースを提供するプロキシサーバーです。
 
 OAuth経由でOpenAI Codex（GPTモデル）およびClaude Codeもサポートしています。
 
@@ -10,22 +10,18 @@ OAuth経由でOpenAI Codex（GPTモデル）およびClaude Codeもサポート�
 
 ## スポンサー
 
-[![z.ai](https://assets.router-for.me/english-5-0.jpg)](https://z.ai/subscribe?ic=8JVLJQFSKB)
+[![https://www.packyapi.com/register?aff=cliproxyapi](./assets/packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
 
-本プロジェクトはZ.aiにスポンサーされており、GLM CODING PLANの提供を受けています。
+PackyCodeのスポンサーシップに感謝します！
 
-GLM CODING PLANはAIコーディング向けに設計されたサブスクリプションサービスで、月額わずか$10から利用可能です。フラッグシップのGLM-4.7および（GLM-5はProユーザーのみ利用可能）モデルを10以上の人気AIコーディングツール（Claude Code、Cline、Roo Codeなど）で利用でき、開発者にトップクラスの高速かつ安定したコーディング体験を提供します。
+PackyCodeは信頼性が高く効率的なAPIリレーサービスプロバイダーで、Claude Code、Codex、Geminiなどのリレーサービスを提供しています。
 
-GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
+PackyCodeは当ソフトウェアのユーザーに特別割引を提供しています：<a href="https://www.packyapi.com/register?aff=cliproxyapi">こちらのリンク</a>から登録し、チャージ時にプロモーションコード「cliproxyapi」を入力すると10%割引になります。
 
 ---
 
 <table>
 <tbody>
-<tr>
-<td width="180"><a href="https://www.packyapi.com/register?aff=cliproxyapi"><img src="./assets/packycode.png" alt="PackyCode" width="150"></a></td>
-<td>PackyCodeのスポンサーシップに感謝します！PackyCodeは信頼性が高く効率的なAPIリレーサービスプロバイダーで、Claude Code、Codex、Geminiなどのリレーサービスを提供しています。PackyCodeは当ソフトウェアのユーザーに特別割引を提供しています：<a href="https://www.packyapi.com/register?aff=cliproxyapi">こちらのリンク</a>から登録し、チャージ時にプロモーションコード「cliproxyapi」を入力すると10%割引になります。</td>
-</tr>
 <tr>
 <td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
 <td>AICodeMirrorのスポンサーシップに感謝します！AICodeMirrorはClaude Code / Codex / Gemini CLI向けの公式高安定性リレーサービスを提供しており、エンタープライズグレードの同時接続、迅速な請求書発行、24時間365日の専任技術サポートを備えています。Claude Code / Codex / Geminiの公式チャネルが元の価格の38% / 2% / 9%で利用でき、チャージ時にはさらに割引があります！CLIProxyAPIユーザー向けの特別特典：<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">こちらのリンク</a>から登録すると、初回チャージが20%割引になり、エンタープライズのお客様は最大25%割引を受けられます！</td>
@@ -47,20 +43,22 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 ## 概要
 
-- CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
+- CLIモデル向けのOpenAI/Gemini/Claude/Grok互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
+- OAuthログインによるGrok Buildサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
-- ストリーミングおよび非ストリーミングレスポンス
+- ストリーミング、非ストリーミング、および対応環境でのWebSocketレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）
+- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
 - Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
+- Grok Buildのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 

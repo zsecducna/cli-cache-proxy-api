@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/claude"
-	responsefmt "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
+	responsefmt "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

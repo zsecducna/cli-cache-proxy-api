@@ -3,8 +3,8 @@ package handlers
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const OpenAICompatibilityProvider = "openai-compatibility"

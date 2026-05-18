@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -33,6 +34,7 @@ var creditsExhaustedTextIndicators = []string{
 type UsageReporter struct {
 	provider        string
 	model           string
+	alias           string
 	reasoningEffort string
 	customerID      string
 	customerEmail   string
@@ -47,9 +49,14 @@ type UsageReporter struct {
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	alias := usage.RequestedModelAliasFromContext(ctx)
+	if alias == "" {
+		alias = model
+	}
 	reporter := &UsageReporter{
 		provider:        provider,
 		model:           model,
+		alias:           strings.TrimSpace(alias),
 		reasoningEffort: UsageReasoningEffortFromContext(ctx),
 		customerID:      CustomerIDFromContext(ctx),
 		customerEmail:   CustomerEmailFromContext(ctx),
@@ -66,7 +73,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
@@ -74,7 +81,7 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	if !ok {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	r.publishRecord(ctx, record)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -89,14 +96,15 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false), true
+	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	if !shouldPublishFailure(ctx, nil) {
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	errFailure := firstNonNilError(errs...)
+	if !shouldPublishFailure(ctx, errFailure) {
 		return
 	}
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -104,8 +112,17 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil && shouldPublishFailure(ctx, *errPtr) {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
+}
+
+func firstNonNilError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func shouldPublishFailure(ctx context.Context, err error) bool {
@@ -118,13 +135,13 @@ func shouldPublishFailure(ctx context.Context, err error) bool {
 	return ctx == nil || !errors.Is(ctx.Err(), context.Canceled)
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, fail usage.Failure) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
 
@@ -143,6 +160,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.OutputTokens != 0 ||
 		detail.ReasoningTokens != 0 ||
 		detail.CachedTokens != 0 ||
+		detail.CacheReadTokens != 0 ||
+		detail.CacheCreationTokens != 0 ||
 		detail.TotalTokens != 0
 }
 
@@ -155,24 +174,34 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		r.publishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
-	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
-	}
-	return r.buildRecordForModel(r.model, detail, failed)
+func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
+	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+	var fail usage.Failure
+	if len(failures) > 0 {
+		fail = failures[0]
+	}
 	if r == nil {
-		return usage.Record{Model: model, Detail: detail, Failed: failed}
+		return usage.Record{Detail: detail, Failed: failed, Fail: fail}
+	}
+	return r.buildRecordForModel(r.model, detail, failed, fail)
+}
+
+func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
+	if r == nil {
+		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
 		Provider:        r.provider,
 		Model:           model,
+		Alias:           r.modelAliasForRecord(model),
 		ReasoningEffort: r.reasoningEffort,
 		Source:          r.source,
 		APIKey:          r.apiKey,
@@ -184,8 +213,38 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestedAt:     r.requestedAt,
 		Latency:         r.latency(),
 		Failed:          failed,
+		Fail:            fail,
 		Detail:          detail,
 	}
+}
+
+// modelAliasForRecord keeps the client-requested alias on the primary usage
+// record while avoiding false alias attribution for extra model records.
+func (r *UsageReporter) modelAliasForRecord(model string) string {
+	if r == nil {
+		return ""
+	}
+	if strings.TrimSpace(model) != strings.TrimSpace(r.model) {
+		return ""
+	}
+	return r.alias
+}
+
+func failFromErrors(errs ...error) usage.Failure {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fail := usage.Failure{
+			Body: strings.TrimSpace(err.Error()),
+		}
+		var se interface{ StatusCode() int }
+		if errors.As(err, &se) && se != nil {
+			fail.StatusCode = se.StatusCode()
+		}
+		return fail
+	}
+	return usage.Failure{}
 }
 
 func (r *UsageReporter) latency() time.Duration {
@@ -207,14 +266,16 @@ func APIKeyFromContext(ctx context.Context) string {
 	if !ok || ginCtx == nil {
 		return ""
 	}
-	if v, exists := ginCtx.Get("apiKey"); exists {
-		switch value := v.(type) {
-		case string:
-			return value
-		case fmt.Stringer:
-			return value.String()
-		default:
-			return fmt.Sprintf("%v", value)
+	for _, key := range []string{"userApiKey", "apiKey"} {
+		if v, exists := ginCtx.Get(key); exists {
+			switch value := v.(type) {
+			case string:
+				return value
+			case fmt.Stringer:
+				return value.String()
+			default:
+				return fmt.Sprintf("%v", value)
+			}
 		}
 	}
 	return ""
@@ -410,7 +471,7 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -418,7 +479,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
-	if !usageNode.Exists() || !usageNode.IsObject() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -434,6 +495,21 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 		return usage.Detail{}
 	}
 	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -509,13 +585,21 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
+	return parseClaudeUsageNode(usageNode), true
+}
+
+func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
+	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
 	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
+		InputTokens:         usageNode.Get("input_tokens").Int(),
+		OutputTokens:        usageNode.Get("output_tokens").Int(),
+		CachedTokens:        cacheReadTokens,
+		CacheReadTokens:     cacheReadTokens,
+		CacheCreationTokens: cacheCreationTokens,
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	return detail, true
+	return detail
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
