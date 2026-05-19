@@ -148,6 +148,14 @@ var (
 		"label",
 		"bucket",
 	)
+	quotaRateLimitPayloadKeys = normalizedQuotaKeySet(
+		"rate_limit",
+		"rateLimit",
+	)
+	quotaUsagePayloadKeys = normalizedQuotaKeySet(
+		"quota_usage",
+		"quotaUsage",
+	)
 )
 
 type quotaAutomationSnapshot struct {
@@ -451,9 +459,19 @@ func readQuotaAutomationSnapshot(metadata map[string]any) quotaAutomationSnapsho
 }
 
 func readQuotaAutomationSnapshotAt(metadata map[string]any, now time.Time) quotaAutomationSnapshot {
-	fiveHoursRemaining := findQuotaWindowRemainingPercent(metadata, fiveHourQuotaWindowAliases)
-	fiveHoursReset := findQuotaWindowResetAt(metadata, fiveHourQuotaWindowAliases, now)
-	if remaining, resetAt := findQuotaWindowByDuration(metadata, fiveHourQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
+	if payload := defaultQuotaRateLimitPayload(metadata); payload != nil {
+		return readQuotaAutomationSnapshotFromNodeAt(payload, now)
+	}
+	return readQuotaAutomationSnapshotFromNodeAt(metadata, now)
+}
+
+// readQuotaAutomationSnapshotFromNodeAt parses one already-selected quota node.
+// The caller chooses the default source first so duration scans cannot
+// accidentally cross from top-level quota into additional quota buckets.
+func readQuotaAutomationSnapshotFromNodeAt(node any, now time.Time) quotaAutomationSnapshot {
+	fiveHoursRemaining := findQuotaWindowRemainingPercent(node, fiveHourQuotaWindowAliases)
+	fiveHoursReset := findQuotaWindowResetAt(node, fiveHourQuotaWindowAliases, now)
+	if remaining, resetAt := findQuotaWindowByDuration(node, fiveHourQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
 		if remaining != nil {
 			fiveHoursRemaining = remaining
 		}
@@ -462,9 +480,9 @@ func readQuotaAutomationSnapshotAt(metadata map[string]any, now time.Time) quota
 		}
 	}
 
-	sevenDaysRemaining := findQuotaWindowRemainingPercent(metadata, sevenDayQuotaWindowAliases)
-	sevenDaysReset := findQuotaWindowResetAt(metadata, sevenDayQuotaWindowAliases, now)
-	if remaining, resetAt := findQuotaWindowByDuration(metadata, sevenDayQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
+	sevenDaysRemaining := findQuotaWindowRemainingPercent(node, sevenDayQuotaWindowAliases)
+	sevenDaysReset := findQuotaWindowResetAt(node, sevenDayQuotaWindowAliases, now)
+	if remaining, resetAt := findQuotaWindowByDuration(node, sevenDayQuotaWindowSeconds, now); remaining != nil || resetAt != nil {
 		if remaining != nil {
 			sevenDaysRemaining = remaining
 		}
@@ -479,6 +497,44 @@ func readQuotaAutomationSnapshotAt(metadata map[string]any, now time.Time) quota
 		fiveHoursResetAt:          fiveHoursReset,
 		sevenDaysResetAt:          sevenDaysReset,
 	}
+}
+
+// defaultQuotaRateLimitPayload extracts the provider default rate_limit payload
+// from quota_usage without descending into additional_rate_limits, preserving
+// default-bucket semantics for unmatched models.
+func defaultQuotaRateLimitPayload(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	if payload := quotaRateLimitPayload(metadata); payload != nil {
+		return payload
+	}
+	for key, rawValue := range metadata {
+		if !containsNormalizedQuotaKey(quotaUsagePayloadKeys, normalizeQuotaKey(key)) {
+			continue
+		}
+		quotaUsage, ok := rawValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		return quotaRateLimitPayload(quotaUsage)
+	}
+	return nil
+}
+
+// quotaRateLimitPayload extracts the nested rate_limit object from a quota
+// metadata node so window parsing can stay scoped to that selected payload.
+func quotaRateLimitPayload(limit map[string]any) map[string]any {
+	for key, rawValue := range limit {
+		if !containsNormalizedQuotaKey(quotaRateLimitPayloadKeys, normalizeQuotaKey(key)) {
+			continue
+		}
+		payload, ok := rawValue.(map[string]any)
+		if ok {
+			return payload
+		}
+	}
+	return nil
 }
 
 func findQuotaWindowByDuration(node any, targetSeconds int64, now time.Time) (*float64, *time.Time) {

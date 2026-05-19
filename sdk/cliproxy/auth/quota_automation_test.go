@@ -183,6 +183,54 @@ func TestManager_Register_UsesTemporaryCooldownForCodexWhamFiveHourWindow(t *tes
 	}
 }
 
+func TestQuotaAutomationSnapshot_PrefersDefaultRateLimitBeforeAdditionalLimits(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	defaultWeeklyReset := now.Add(7 * 24 * time.Hour)
+
+	metadata := map[string]any{
+		"quota_usage": map[string]any{
+			"rate_limit": map[string]any{
+				"allowed":       false,
+				"limit_reached": true,
+				"primary_window": map[string]any{
+					"limit_window_seconds": 18000,
+					"used_percent":         20,
+				},
+				"secondary_window": map[string]any{
+					"limit_window_seconds": 604800,
+					"used_percent":         100,
+					"reset_at":             defaultWeeklyReset.Unix(),
+				},
+			},
+			"additional_rate_limits": []any{
+				map[string]any{
+					"limit_name": "GPT-5.3-Codex-Spark",
+					"rate_limit": map[string]any{
+						"allowed": true,
+						"primary_window": map[string]any{
+							"limit_window_seconds": 18000,
+							"used_percent":         8,
+						},
+						"secondary_window": map[string]any{
+							"limit_window_seconds": 604800,
+							"used_percent":         60,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	snapshot := readQuotaAutomationSnapshotAt(metadata, now)
+	reason, resetAt, ok := quotaExhaustionCooldown(snapshot, now)
+	if !ok {
+		t.Fatal("expected default rate_limit weekly cooldown")
+	}
+	if !resetAt.Equal(defaultWeeklyReset) || !strings.Contains(reason, "7days quota exhausted") {
+		t.Fatalf("expected default weekly cooldown until %v, got reason=%q reset=%v", defaultWeeklyReset, reason, resetAt)
+	}
+}
+
 func TestManager_Register_DoesNotCooldownAfterKnownResetPassed(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	resetAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
