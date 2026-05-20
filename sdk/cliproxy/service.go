@@ -1558,6 +1558,43 @@ type modelEntry interface {
 	GetAlias() string
 }
 
+func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
+	if compat == nil || len(compat.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	models := make([]*ModelInfo, 0, len(compat.Models))
+	for i := range compat.Models {
+		model := compat.Models[i]
+		modelID := strings.TrimSpace(model.Alias)
+		if modelID == "" {
+			modelID = strings.TrimSpace(model.Name)
+		}
+		if modelID == "" {
+			continue
+		}
+		modelType := "openai-compatibility"
+		if model.Image {
+			modelType = registry.OpenAIImageModelType
+		}
+		thinking := model.Thinking
+		if thinking == nil && !model.Image {
+			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		}
+		models = append(models, &ModelInfo{
+			ID:          modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     compat.Name,
+			Type:        modelType,
+			DisplayName: modelID,
+			UserDefined: false,
+			Thinking:    thinking,
+		})
+	}
+	return models
+}
+
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
 	if len(models) == 0 {
 		return nil

@@ -63,6 +63,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
+	}
 
 	tokens := tokenStats{
 		InputTokens:         record.Detail.InputTokens,

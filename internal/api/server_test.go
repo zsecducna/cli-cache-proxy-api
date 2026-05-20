@@ -1288,6 +1288,27 @@ func TestUpdateClients_TogglesRequestLoggerWhenOnlyDebugChanges(t *testing.T) {
 	}
 }
 
+func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
+	t.Helper()
+
+	rawLevels, ok := model["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("expected supported_reasoning_levels, got %#v", model["supported_reasoning_levels"])
+	}
+	if len(rawLevels) != len(want) {
+		t.Fatalf("supported_reasoning_levels length = %d, want %d: %#v", len(rawLevels), len(want), rawLevels)
+	}
+	for index, rawLevel := range rawLevels {
+		levelEntry, ok := rawLevel.(map[string]any)
+		if !ok {
+			t.Fatalf("supported_reasoning_levels[%d] = %#v, want object", index, rawLevel)
+		}
+		if got, _ := levelEntry["effort"].(string); got != want[index] {
+			t.Fatalf("supported_reasoning_levels[%d].effort = %q, want %q", index, got, want[index])
+		}
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

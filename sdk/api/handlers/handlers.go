@@ -244,6 +244,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+}
+
 // headersFromContext extracts the original HTTP request headers from the gin context
 // embedded in the provided context. This allows session affinity selectors to read
 // client headers like X-Amp-Thread-Id.
@@ -949,7 +960,7 @@ func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (reque
 	if strings.EqualFold(baseModel, "gpt-image-2") {
 		return requestDetails{}, &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
-			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
 		}
 	}
 
@@ -975,6 +986,14 @@ func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (reque
 		RequestedModel:  strings.TrimSpace(modelName),
 		Route:           route.Route,
 	}, nil
+}
+
+func routeModelBaseName(model string) string {
+	model = strings.TrimSpace(model)
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
+		return strings.TrimSpace(model[idx+1:])
+	}
+	return model
 }
 
 func cloneBytes(src []byte) []byte {
