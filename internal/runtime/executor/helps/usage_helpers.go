@@ -53,11 +53,17 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	// Preserve both the executor-local reasoning context and the shared usage
+	// context so older callers and newer handler metadata produce the same record.
+	reasoningEffort := UsageReasoningEffortFromContext(ctx)
+	if reasoningEffort == "" {
+		reasoningEffort = usage.ReasoningEffortFromContext(ctx)
+	}
 	reporter := &UsageReporter{
 		provider:        provider,
 		model:           model,
 		alias:           strings.TrimSpace(alias),
-		reasoningEffort: UsageReasoningEffortFromContext(ctx),
+		reasoningEffort: reasoningEffort,
 		customerID:      CustomerIDFromContext(ctx),
 		customerEmail:   CustomerEmailFromContext(ctx),
 		requestedAt:     time.Now(),

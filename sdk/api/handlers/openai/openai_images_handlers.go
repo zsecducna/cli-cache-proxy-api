@@ -121,7 +121,24 @@ func isSupportedImagesModel(model string) bool {
 	if baseModel == defaultImagesToolModel {
 		return true
 	}
-	return isXAIImagesModel(model)
+	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
+}
+
+// isDefaultImagesToolModel identifies the built-in routed image tool model that
+// should stay on the proxy-managed image path.
+func isDefaultImagesToolModel(model string) bool {
+	return imagesModelBase(model) == defaultImagesToolModel
+}
+
+// isOpenAICompatImagesModel detects provider-registered OpenAI-compatible image
+// models that should bypass the built-in routed image tool flow.
+func isOpenAICompatImagesModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	info := registry.LookupModelInfo(model)
+	return info != nil && info.Type == registry.OpenAIImageModelType
 }
 
 func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {

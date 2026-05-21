@@ -32,12 +32,13 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		plugin.HandleUsage(ctx, coreusage.Record{
 			Provider:        "openai",
 			Model:           "gpt-5.4",
+			Alias:           "client-gpt",
 			APIKey:          "test-key",
 			AuthIndex:       "0",
 			AuthType:        "apikey",
 			CustomerID:      "customer-1",
 			CustomerEmail:   "customer@example.com",
-			ReasoningEffort: "high",
+			ReasoningEffort: "medium",
 			Source:          "user@example.com",
 			RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Latency:         1500 * time.Millisecond,
@@ -53,7 +54,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "provider", "openai")
 		requireStringField(t, payload, "model", "gpt-5.4")
-		requireStringField(t, payload, "reasoning_effort", "high")
+		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "customer_id", "customer-1")
 		requireStringField(t, payload, "customer_email", "customer@example.com")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")

@@ -45,6 +45,14 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// RequestAuthPreparer lets executors fill auth metadata that may be missing
+// until request time, while allowing Manager to serialize persistence for the
+// same auth across concurrent requests.
+type RequestAuthPreparer interface {
+	ShouldPrepareRequestAuth(auth *Auth) bool
+	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
+}
+
 // QuotaUsageRefresher is optionally implemented by OAuth executors that can
 // refresh quota/usage metadata outside the request path.
 type QuotaUsageRefresher interface {
@@ -209,6 +217,10 @@ type Manager struct {
 	refreshCancel         context.CancelFunc
 	refreshLoop           *authAutoRefreshLoop
 	quotaUsageRefreshStop context.CancelFunc
+
+	// requestPrepareLocks serializes request-time auth preparation per auth ID so
+	// concurrent requests do not race while refreshing and persisting metadata.
+	requestPrepareLocks sync.Map
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -1936,6 +1948,67 @@ func lookupModelState(auth *Auth, model string) *ModelState {
 		return nil
 	}
 	return auth.ModelStates[baseModel]
+}
+
+// requestAuthPrepareLock guards one auth ID while an executor fills request-time
+// metadata and Manager persists the refreshed auth back into the store.
+type requestAuthPrepareLock struct {
+	mu sync.Mutex
+}
+
+// prepareRequestAuth lets an executor patch missing auth metadata at request
+// time, then persists the refreshed auth once so concurrent callers share the
+// same updated state.
+func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+	if m == nil || executor == nil || auth == nil {
+		return auth, nil
+	}
+	preparer, ok := executor.(RequestAuthPreparer)
+	if !ok || preparer == nil || !preparer.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+
+	id := strings.TrimSpace(auth.ID)
+	if id == "" {
+		return preparer.PrepareRequestAuth(ctx, auth.Clone())
+	}
+
+	lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
+	lock, ok := lockValue.(*requestAuthPrepareLock)
+	if !ok || lock == nil {
+		return preparer.PrepareRequestAuth(ctx, auth.Clone())
+	}
+
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+
+	target := auth.Clone()
+	m.mu.RLock()
+	if current := m.auths[id]; current != nil {
+		target = current.Clone()
+	}
+	m.mu.RUnlock()
+
+	if !preparer.ShouldPrepareRequestAuth(target) {
+		return target, nil
+	}
+
+	updated, errPrepare := preparer.PrepareRequestAuth(ctx, target)
+	if errPrepare != nil {
+		return auth, errPrepare
+	}
+	if updated == nil {
+		return target, nil
+	}
+
+	saved, errUpdate := m.Update(ctx, updated)
+	if errUpdate != nil {
+		return updated, errUpdate
+	}
+	if saved != nil {
+		return saved, nil
+	}
+	return updated, nil
 }
 
 // contextWithRequestedModelAlias preserves the client-requested model alias in

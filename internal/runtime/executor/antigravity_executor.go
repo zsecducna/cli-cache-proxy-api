@@ -1977,8 +1977,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "*/*")
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	httpReq.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
+	// Reuse the resolved user agent so control-plane refresh requests keep the
+	// same Antigravity identity metadata as the surrounding request path.
+	httpReq.Header.Set("User-Agent", userAgent)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)

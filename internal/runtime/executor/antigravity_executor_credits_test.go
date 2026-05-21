@@ -400,7 +400,7 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 		},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
 		return &http.Response{
@@ -444,18 +444,18 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
 	exec := NewAntigravityExecutor(&config.Config{})
-	const userAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
-	const expectedUA = "antigravity/1.23.2 windows/amd64"
+	const configuredUserAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	const loadCodeAssistUserAgent = "antigravity/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
 		ID:         "auth-load-code-assist-ua",
 		Attributes: map[string]string{"user_agent": configuredUserAgent},
 	}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request url %s", req.URL.String())
 		}
-		if got := req.Header.Get("User-Agent"); got != expectedUA {
-			t.Fatalf("User-Agent = %q, want %q", got, expectedUA)
+		if got := req.Header.Get("User-Agent"); got != loadCodeAssistUserAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, loadCodeAssistUserAgent)
 		}
 		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
 			t.Fatalf("X-Goog-Api-Client = %q, want empty", got)

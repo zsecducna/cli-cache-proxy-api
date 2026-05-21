@@ -1689,9 +1689,22 @@ func buildOpenAICompatConfigModels(ownedBy string, models []config.OpenAICompati
 		info.Object = "model"
 		info.Created = now
 		info.OwnedBy = ownedBy
+		// Preserve image-only compat models as image type so they stay routable
+		// through image endpoints instead of being flattened to chat type.
 		info.Type = "openai-compatibility"
+		if model.Image {
+			info.Type = registry.OpenAIImageModelType
+		}
 		info.DisplayName = alias
 		info.UserDefined = true
+		// Image-only compat models do not expose thinking controls through image
+		// endpoints, so keep their thinking metadata empty even if static defaults
+		// or shared compat defaults would normally populate it.
+		if model.Image {
+			info.Thinking = nil
+			out = append(out, info)
+			continue
+		}
 		if model.Thinking != nil {
 			thinking := *model.Thinking
 			if len(model.Thinking.Levels) > 0 {

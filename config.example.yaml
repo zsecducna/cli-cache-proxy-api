@@ -66,12 +66,9 @@ error-logs-max-files: 10
 # Enabled by default. Set to false to disable in-memory usage statistics aggregation
 usage-statistics-enabled: true
 
-# How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
-# Default: 60. Max: 3600.
-redis-usage-queue-retention-seconds: 60
-
-# How long (in seconds) usage queue items are retained in memory for the Management API.
-# The local Redis RESP usage output is disabled.
+# How long (in seconds) usage queue items are retained in memory for the
+# management-gated Redis usage queue. The same retention also applies to the
+# RESP usage output when that surface is enabled.
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
 

@@ -360,34 +360,105 @@ type claudeErrorResponse struct {
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
 	status := http.StatusInternalServerError
-	if msg != nil && msg.StatusCode > 0 {
-		status = msg.StatusCode
+	errText := http.StatusText(status)
+	if msg != nil {
+		if msg.StatusCode > 0 {
+			status = msg.StatusCode
+			errText = http.StatusText(status)
+		}
+		if msg.Error != nil {
+			if v := strings.TrimSpace(msg.Error.Error()); v != "" {
+				errText = v
+			}
+		}
 	}
-	message := http.StatusText(status)
-	if msg != nil && msg.Error != nil && msg.Error.Error() != "" {
-		message = msg.Error.Error()
-	}
+	errType, message := claudeErrorDetailFromText(status, errText)
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
-			Type:    claudeErrorType(status),
+			Type:    errType,
 			Message: message,
 		},
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) writeClaudeErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+// WriteErrorResponse preserves Claude's error envelope even when the upstream
+// returned an OpenAI-style JSON error body or addon headers.
+func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
+	if msg != nil && h != nil && h.BaseAPIHandler != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
+		for key, values := range msg.Addon {
+			if len(values) == 0 {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+
 	body, err := json.Marshal(h.toClaudeError(msg))
 	if err != nil {
-		body = []byte(`{"type":"error","error":{"type":"api_error","message":"internal error"}}`)
+		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}
 	c.Header("Content-Type", "application/json")
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// writeClaudeErrorResponse keeps older local call sites routed through the
+// Claude-specific public error writer.
+func (h *ClaudeCodeAPIHandler) writeClaudeErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	h.WriteErrorResponse(c, msg)
+}
+
+// pendingClaudeStreamError drains one already-buffered stream error after the
+// data channel closes so the handler can still return the upstream failure.
+func pendingClaudeStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
+	if errs == nil {
+		return nil, false
+	}
+	select {
+	case errMsg, ok := <-errs:
+		if !ok {
+			return nil, false
+		}
+		return errMsg, true
+	default:
+		return nil, false
+	}
+}
+
+// claudeErrorDetailFromText extracts a Claude-compatible error type/message
+// even when the upstream error text is itself a JSON envelope from another API.
+func claudeErrorDetailFromText(status int, errText string) (string, string) {
+	message := strings.TrimSpace(errText)
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	errType := claudeErrorType(status)
+
+	var payload map[string]any
+	if json.Valid([]byte(message)) {
+		if err := json.Unmarshal([]byte(message), &payload); err == nil {
+			if e, ok := payload["error"].(map[string]any); ok {
+				if t, okType := e["type"].(string); okType && strings.TrimSpace(t) != "" {
+					errType = strings.TrimSpace(t)
+				}
+				if m, okMsg := e["message"].(string); okMsg && strings.TrimSpace(m) != "" {
+					message = strings.TrimSpace(m)
+				} else if code, okCode := e["code"].(string); okCode && strings.TrimSpace(code) != "" {
+					message = strings.TrimSpace(code)
+				}
+			}
+		}
+	}
+
+	return errType, message
 }
 
 func claudeErrorType(status int) string {

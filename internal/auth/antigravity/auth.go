@@ -56,6 +56,12 @@ func (o *AntigravityAuth) nodeUserAgent() string {
 	return misc.AntigravityLoadCodeAssistUserAgent("")
 }
 
+// loadCodeAssistUserAgent keeps upstream loadCodeAssist call sites compatible
+// with the local helper naming used by the Antigravity auth flow.
+func (o *AntigravityAuth) loadCodeAssistUserAgent() string {
+	return o.nodeUserAgent()
+}
+
 func antigravityLoadCodeAssistMetadata() map[string]string {
 	return map[string]string{
 		"ideType": "ANTIGRAVITY",

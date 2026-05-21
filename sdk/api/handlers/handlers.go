@@ -451,6 +451,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
+	// Install a response-headers holder alongside the status holder so usage
+	// publication and Redis queue payloads can snapshot upstream headers on the
+	// normal request path.
+	newCtx = logging.WithResponseHeadersHolder(newCtx)
 
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
@@ -597,7 +601,19 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	details, errMsg := h.getRequestDetails(handlerType, modelName)
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// ExecuteImageWithAuthManager executes an OpenAI-compatible image request via
+// the core auth manager while allowing image-only models on the routed path.
+func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+}
+
+// executeWithAuthManager keeps the existing route metadata and reasoning-effort
+// propagation logic while optionally allowing image-only models.
+func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	details, errMsg := h.getRequestDetailsWithOptions(handlerType, modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -700,7 +716,19 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	details, errMsg := h.getRequestDetails(handlerType, modelName)
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible
+// image request while allowing image-only models on the routed path.
+func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
+}
+
+// executeStreamWithAuthManager keeps the existing route metadata and
+// bootstrap-retry behavior while optionally allowing image-only models.
+func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	details, errMsg := h.getRequestDetailsWithOptions(handlerType, modelName, allowImageModel)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -918,7 +946,15 @@ func statusFromError(err error) int {
 	return 0
 }
 
+// getRequestDetails preserves the default request classification rules used by
+// non-image routes.
 func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (requestDetails, *interfaces.ErrorMessage) {
+	return h.getRequestDetailsWithOptions(handlerType, modelName, false)
+}
+
+// getRequestDetailsWithOptions resolves providers and normalized model names
+// while allowing image-only models for image-specific handler surfaces.
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(handlerType, modelName string, allowImageModel bool) (requestDetails, *interfaces.ErrorMessage) {
 	route := classifyRequestRoute(handlerType, modelName)
 	if route.Route == RequestRouteClaudeViaOpenAICompat {
 		providers := util.GetProviderName(route.RequestedModel)
@@ -957,7 +993,7 @@ func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (reque
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	if !allowImageModel && strings.EqualFold(baseModel, "gpt-image-2") {
 		return requestDetails{}, &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),

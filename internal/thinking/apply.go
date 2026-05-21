@@ -339,6 +339,60 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
 }
 
+// ExtractReasoningEffort returns the request's thinking setting as a canonical
+// reasoning_effort label for usage logging. Model suffixes have the same
+// priority as ApplyThinking: a valid suffix overrides body fields.
+func ExtractReasoningEffort(body []byte, provider, model string) string {
+	if effort := reasoningEffortFromSuffix(ParseSuffix(model)); effort != "" {
+		return effort
+	}
+
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	config := extractThinkingConfig(body, provider)
+	if !hasThinkingConfig(config) {
+		switch provider {
+		case "openai-response":
+			config = extractOpenAIResponsesConfig(body)
+		case "openai":
+			config = extractOpenAIResponsesConfig(body)
+		}
+	}
+	return reasoningEffortFromConfig(config)
+}
+
+// reasoningEffortFromSuffix converts a parsed model suffix into the canonical
+// reasoning_effort value used by usage and reporting sinks.
+func reasoningEffortFromSuffix(suffix SuffixResult) string {
+	if !suffix.HasSuffix {
+		return ""
+	}
+	return reasoningEffortFromConfig(parseSuffixToConfig(suffix.RawSuffix, "", suffix.ModelName))
+}
+
+// reasoningEffortFromConfig maps the canonical thinking config into the string
+// label expected by downstream usage metadata.
+func reasoningEffortFromConfig(config ThinkingConfig) string {
+	if !hasThinkingConfig(config) {
+		return ""
+	}
+	switch config.Mode {
+	case ModeNone:
+		return string(LevelNone)
+	case ModeAuto:
+		return string(LevelAuto)
+	case ModeLevel:
+		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+	case ModeBudget:
+		level, ok := ConvertBudgetToLevel(config.Budget)
+		if !ok {
+			return ""
+		}
+		return level
+	default:
+		return ""
+	}
+}
+
 func extractThinkingConfigForFormats(body []byte, fromFormat, toFormat string) ThinkingConfig {
 	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
 	toFormat = strings.ToLower(strings.TrimSpace(toFormat))

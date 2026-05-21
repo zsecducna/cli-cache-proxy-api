@@ -111,7 +111,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RequestDetail:   detail,
 		Provider:        provider,
 		Model:           modelName,
-		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
+		Alias:           aliasName,
+		ReasoningEffort: reasoningEffort,
 		Endpoint:        resolveEndpoint(ctx),
 		AuthType:        authType,
 		APIKey:          apiKey,
@@ -129,6 +130,7 @@ type queuedUsageDetail struct {
 	internalusage.RequestDetail
 	Provider        string      `json:"provider"`
 	Model           string      `json:"model"`
+	Alias           string      `json:"alias"`
 	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
 	Endpoint        string      `json:"endpoint"`
 	AuthType        string      `json:"auth_type"`
