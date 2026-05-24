@@ -160,34 +160,62 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	}
 }
 
-func TestCodexWebsocketsEnabledAcceptsSingularAuthMetadata(t *testing.T) {
+// TestCodexWebsocketsEnabledDefaultAndOverrides locks the executor contract:
+// websocket-capable Codex auths do not need an opt-in flag, but either
+// singular or plural websocket metadata can explicitly disable a bad auth.
+func TestCodexWebsocketsEnabledDefaultAndOverrides(t *testing.T) {
 	cases := []struct {
 		name string
 		auth *cliproxyauth.Auth
+		want bool
 	}{
+		{
+			name: "missing flags default enabled",
+			auth: &cliproxyauth.Auth{},
+			want: true,
+		},
 		{
 			name: "singular metadata bool",
 			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket": true}},
+			want: true,
 		},
 		{
 			name: "singular metadata string",
 			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket": "true"}},
+			want: true,
 		},
 		{
 			name: "singular attribute",
 			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websocket": "true"}},
+			want: true,
 		},
 		{
 			name: "plural attribute",
 			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "true"}},
+			want: true,
+		},
+		{
+			name: "plural attribute false disables",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websockets": "false"}},
+			want: false,
+		},
+		{
+			name: "singular metadata false disables",
+			auth: &cliproxyauth.Auth{Metadata: map[string]any{"websocket": false}},
+			want: false,
+		},
+		{
+			name: "invalid attribute defaults enabled",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"websocket": "maybe"}},
+			want: true,
 		},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if !codexWebsocketsEnabled(tc.auth) {
-				t.Fatalf("codexWebsocketsEnabled() = false, want true")
+			if got := codexWebsocketsEnabled(tc.auth); got != tc.want {
+				t.Fatalf("codexWebsocketsEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}

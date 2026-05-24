@@ -941,7 +941,9 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "codex-http", Provider: "codex"},
+		// Explicit false is the opt-out contract; missing websocket metadata now
+		// participates in websocket downstream selection.
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"websocket": "false"}},
 		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
 		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
 	)
@@ -971,7 +973,9 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		// Explicit false is the opt-out contract; priority alone must not make a
+		// Codex auth non-websocket-capable.
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10", "websocket": "false"}},
 		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
 		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
 	)

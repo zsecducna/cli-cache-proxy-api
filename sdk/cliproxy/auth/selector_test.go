@@ -36,28 +36,56 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 }
 
-func TestAuthWebsocketsEnabledAcceptsSingularAuthMetadata(t *testing.T) {
+// TestAuthWebsocketsEnabledDefaultAndOverrides locks the selector contract:
+// websocket-capable auths do not need an opt-in flag, but either singular or
+// plural websocket metadata can explicitly disable a bad auth.
+func TestAuthWebsocketsEnabledDefaultAndOverrides(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name string
 		auth *Auth
+		want bool
 	}{
+		{
+			name: "missing flags default enabled",
+			auth: &Auth{},
+			want: true,
+		},
 		{
 			name: "singular metadata bool",
 			auth: &Auth{Metadata: map[string]any{"websocket": true}},
+			want: true,
 		},
 		{
 			name: "singular metadata string",
 			auth: &Auth{Metadata: map[string]any{"websocket": "true"}},
+			want: true,
 		},
 		{
 			name: "singular attribute",
 			auth: &Auth{Attributes: map[string]string{"websocket": "true"}},
+			want: true,
 		},
 		{
 			name: "plural attribute",
 			auth: &Auth{Attributes: map[string]string{"websockets": "true"}},
+			want: true,
+		},
+		{
+			name: "plural attribute false disables",
+			auth: &Auth{Attributes: map[string]string{"websockets": "false"}},
+			want: false,
+		},
+		{
+			name: "singular metadata false disables",
+			auth: &Auth{Metadata: map[string]any{"websocket": false}},
+			want: false,
+		},
+		{
+			name: "invalid attribute defaults enabled",
+			auth: &Auth{Attributes: map[string]string{"websocket": "maybe"}},
+			want: true,
 		},
 	}
 
@@ -65,8 +93,8 @@ func TestAuthWebsocketsEnabledAcceptsSingularAuthMetadata(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if !authWebsocketsEnabled(tc.auth) {
-				t.Fatalf("authWebsocketsEnabled() = false, want true")
+			if got := authWebsocketsEnabled(tc.auth); got != tc.want {
+				t.Fatalf("authWebsocketsEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -322,6 +322,9 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+// authWebsocketsEnabled treats Codex websocket support as default-on because
+// auth files historically omit the flag; explicit boolean websocket(s)=false is
+// the only supported per-auth opt-out.
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -336,26 +339,25 @@ func authWebsocketsEnabled(auth *Auth) bool {
 			}
 		}
 	}
-	if len(auth.Metadata) == 0 {
-		return false
-	}
-	for _, key := range []string{"websockets", "websocket"} {
-		raw, ok := auth.Metadata[key]
-		if !ok || raw == nil {
-			continue
-		}
-		switch v := raw.(type) {
-		case bool:
-			return v
-		case string:
-			parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
-			if errParse == nil {
-				return parsed
+	if len(auth.Metadata) > 0 {
+		for _, key := range []string{"websockets", "websocket"} {
+			raw, ok := auth.Metadata[key]
+			if !ok || raw == nil {
+				continue
 			}
-		default:
+			switch v := raw.(type) {
+			case bool:
+				return v
+			case string:
+				parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
+				if errParse == nil {
+					return parsed
+				}
+			default:
+			}
 		}
 	}
-	return false
+	return true
 }
 
 func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {

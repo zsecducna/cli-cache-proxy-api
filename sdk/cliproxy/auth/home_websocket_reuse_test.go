@@ -195,6 +195,9 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 			ID:       "home-auth-1",
 			Provider: "test",
 			Status:   StatusActive,
+			// Explicit false is the opt-out contract; missing websocket metadata
+			// now means the auth can use websocket reuse.
+			Attributes: map[string]string{"websocket": "false"},
 		},
 	}
 	manager.mu.Unlock()
