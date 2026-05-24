@@ -32,9 +32,12 @@ type requestDetails struct {
 
 var claudeViaGPTProviders = []string{CodexProvider, OpenAICompatibilityProvider}
 
+// classifyRequestRoute must recognize provider-prefixed GPT models on Claude
+// endpoints because the Claude-via-GPT translators key off the route metadata,
+// not just the eventual provider selection.
 func classifyRequestRoute(handlerType, modelName string) requestRoute {
 	trimmedModel := strings.TrimSpace(modelName)
-	if strings.TrimSpace(handlerType) == constant.Claude && strings.HasPrefix(trimmedModel, "gpt-") {
+	if strings.TrimSpace(handlerType) == constant.Claude && strings.HasPrefix(routeModelBaseName(trimmedModel), "gpt-") {
 		return requestRoute{
 			Route:          RequestRouteClaudeViaOpenAICompat,
 			RequestedModel: trimmedModel,

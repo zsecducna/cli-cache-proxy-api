@@ -116,6 +116,46 @@ func TestExecuteWithAuthManager_ThreadsRouteAndRequestIDMetadata(t *testing.T) {
 	}
 }
 
+// TestExecuteWithAuthManager_MarksPrefixedGPTClaudeCompatRouteMetadata keeps
+// provider-prefixed GPT models on the Claude-via-GPT execution path instead of
+// falling back to the generic Claude Messages route.
+func TestExecuteWithAuthManager_MarksPrefixedGPTClaudeCompatRouteMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &routeMetadataCaptureExecutor{identifier: CodexProvider}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	model := "codex/gpt-5.4-custom"
+	auth := &coreauth.Auth{ID: "codex-prefixed-gpt-auth", Provider: CodexProvider, Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	for _, path := range []string{"/v1/messages", "/v1/messages?beta=true"} {
+		recorder := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(recorder)
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"`+model+`"}`))
+		ginCtx.Request = req
+
+		cliCtx, cliCancel := base.GetContextWithCancel(routeMetadataTestHandler{}, ginCtx, context.Background())
+		_, _, errMsg := base.ExecuteWithAuthManager(cliCtx, "claude", model, []byte(`{"model":"`+model+`"}`), "")
+		cliCancel()
+		if errMsg != nil {
+			t.Fatalf("ExecuteWithAuthManager(%s) error = %v, want nil", path, errMsg)
+		}
+		if got, want := executor.opts.Metadata[coreexecutor.RequestRouteMetadataKey], string(RequestRouteClaudeViaOpenAICompat); got != want {
+			t.Fatalf("route metadata for %s = %v, want %q", path, got, want)
+		}
+	}
+}
+
 func TestExecuteWithAuthManager_MarksClaudeMessagesRouteMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
