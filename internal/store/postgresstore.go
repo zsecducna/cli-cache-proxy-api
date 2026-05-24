@@ -90,6 +90,7 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: open database connection: %w", err)
 	}
+	configurePostgresStorePool(db)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("postgres store: ping database: %w", err)
@@ -103,6 +104,17 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 		authDir:    authDir,
 	}
 	return store, nil
+}
+
+// configurePostgresStorePool bounds auth/config connections so reloads and auth refreshes cannot exhaust PostgreSQL.
+func configurePostgresStorePool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 }
 
 // Close releases the underlying database connection.
@@ -214,6 +226,12 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Snapshot the old file so a failed database persist can restore filesystem/database parity.
+	previous, hadPrevious, err := readExistingAuthFile(path)
+	if err != nil {
+		return "", err
+	}
+
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
@@ -228,6 +246,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			setter.SetMetadata(auth.Metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
+			restoreAuthFileAfterFailedPersist(path, previous, hadPrevious)
 			return "", err
 		}
 	case auth.Metadata != nil:
@@ -238,7 +257,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
 			if jsonEqual(existing, raw) {
-				return path, nil
+				break
 			}
 		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
@@ -268,6 +287,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", err
 	}
 	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
+		restoreAuthFileAfterFailedPersist(path, previous, hadPrevious)
 		return "", err
 	}
 	return path, nil
@@ -351,14 +371,27 @@ func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("postgres store: delete auth file: %w", err)
+	// Capture the file before deleting the database row so file-remove failures can restore the row.
+	previous, hadPrevious, err := readExistingAuthFile(path)
+	if err != nil {
+		return err
 	}
 	relID, err := s.relativeAuthID(path)
 	if err != nil {
 		return err
 	}
-	return s.deleteAuthRecord(ctx, relID)
+	if err = s.deleteAuthRecord(ctx, relID); err != nil {
+		return err
+	}
+	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if hadPrevious {
+			if errRestore := s.persistAuth(ctx, relID, previous); errRestore != nil {
+				log.WithError(errRestore).Warn("postgres store: failed to restore auth row after delete file error")
+			}
+		}
+		return fmt.Errorf("postgres store: delete auth file: %w", err)
+	}
+	return nil
 }
 
 // PersistAuthFiles stores the provided auth file changes in PostgreSQL.
@@ -425,11 +458,14 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 		if err = os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
 			return fmt.Errorf("postgres store: prepare config directory: %w", err)
 		}
-		if err = os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
-			return fmt.Errorf("postgres store: write config to spool: %w", err)
-		}
 		if errPersist := s.persistConfig(ctx, []byte(normalized)); errPersist != nil {
 			return errPersist
+		}
+		if err = os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
+			if errDelete := s.deleteConfigRecord(ctx); errDelete != nil {
+				log.WithError(errDelete).Warn("postgres store: failed to rollback config row after spool write error")
+			}
+			return fmt.Errorf("postgres store: write config to spool: %w", err)
 		}
 	case err != nil:
 		return fmt.Errorf("postgres store: load config from database: %w", err)
@@ -534,6 +570,31 @@ func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []by
 		return fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
 	return nil
+}
+
+// readExistingAuthFile captures prior auth bytes so Save can restore them when PostgreSQL rejects the update.
+func readExistingAuthFile(path string) ([]byte, bool, error) {
+	existing, err := os.ReadFile(path)
+	if err == nil {
+		return existing, true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("postgres store: read existing auth file: %w", err)
+}
+
+// restoreAuthFileAfterFailedPersist best-effort rolls back the spool after a database persist failure.
+func restoreAuthFileAfterFailedPersist(path string, previous []byte, hadPrevious bool) {
+	if hadPrevious {
+		if err := os.WriteFile(path, previous, 0o600); err != nil {
+			log.WithError(err).Warn("postgres store: failed to restore auth file after database error")
+		}
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.WithError(err).Warn("postgres store: failed to remove auth file after database error")
+	}
 }
 
 func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {

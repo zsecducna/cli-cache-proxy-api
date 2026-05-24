@@ -30,19 +30,18 @@ CREATE INDEX IF NOT EXISTS idx_prompt_cache_response_index_expires_at ON prompt_
 	return nil
 }
 
+// LookupPromptCacheKeyByResponseID resolves one response without running a broad expiry sweep.
 func (s *CacheStatisticsStore) LookupPromptCacheKeyByResponseID(ctx context.Context, responseID string) (string, bool, error) {
-	if s == nil || s.db == nil {
+	if !s.beginOperation() {
 		return "", false, nil
 	}
+	defer s.endOperation()
 	responseID = strings.TrimSpace(responseID)
 	if responseID == "" {
 		return "", false, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if err := s.deleteExpiredPromptCacheKeys(ctx, time.Now().UTC()); err != nil {
-		return "", false, err
 	}
 
 	var promptCacheKey string
@@ -64,6 +63,7 @@ WHERE response_id = %s`, s.promptCacheTableName(), s.bind(1)), responseID)
 	}
 
 	if !expiresAt.After(time.Now().UTC()) {
+		// Delete only the requested expired row; broad expiry sweeps are throttled on writes.
 		_, _ = s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE response_id = %s`, s.promptCacheTableName(), s.bind(1)), responseID)
 		return "", false, nil
 	}
@@ -74,10 +74,12 @@ WHERE response_id = %s`, s.promptCacheTableName(), s.bind(1)), responseID)
 	return promptCacheKey, true, nil
 }
 
+// UpsertPromptCacheKeyByResponseID records response-to-cache mapping and throttles cleanup work.
 func (s *CacheStatisticsStore) UpsertPromptCacheKeyByResponseID(ctx context.Context, responseID, promptCacheKey string, ttl time.Duration) error {
-	if s == nil || s.db == nil {
+	if !s.beginOperation() {
 		return nil
 	}
+	defer s.endOperation()
 	responseID = strings.TrimSpace(responseID)
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	if responseID == "" || promptCacheKey == "" {
@@ -94,7 +96,7 @@ func (s *CacheStatisticsStore) UpsertPromptCacheKeyByResponseID(ctx context.Cont
 	if err := s.upsertPromptCacheKeyByResponseID(ctx, responseID, promptCacheKey, expiresAt, now); err != nil {
 		return err
 	}
-	_ = s.deleteExpiredPromptCacheKeys(ctx, now)
+	_ = s.maybeDeleteExpiredPromptCacheKeys(ctx, now)
 	return nil
 }
 
@@ -150,6 +152,23 @@ func (s *CacheStatisticsStore) deleteExpiredPromptCacheKeys(ctx context.Context,
 		return fmt.Errorf("cache statistics store: delete expired prompt cache keys: %w", err)
 	}
 	return nil
+}
+
+// maybeDeleteExpiredPromptCacheKeys limits expiry sweeps to keep prompt-cache writes cheap under load.
+func (s *CacheStatisticsStore) maybeDeleteExpiredPromptCacheKeys(ctx context.Context, now time.Time) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.promptCacheCleanupMu.Lock()
+	defer s.promptCacheCleanupMu.Unlock()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if !s.lastPromptCacheCleanup.IsZero() && now.Sub(s.lastPromptCacheCleanup) < 5*time.Minute {
+		return nil
+	}
+	s.lastPromptCacheCleanup = now
+	return s.deleteExpiredPromptCacheKeys(ctx, now)
 }
 
 func LookupPromptCacheKeyByResponseID(responseID string) (string, bool) {

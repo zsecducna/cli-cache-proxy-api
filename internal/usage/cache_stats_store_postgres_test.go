@@ -151,3 +151,18 @@ WHERE api_key = $1`, "live-key-456")
 		t.Fatal("recent requests missing persisted live api key")
 	}
 }
+
+// TestConfigurePostgresCacheStatisticsPoolLimits ensures stats storage cannot open unbounded connections.
+func TestConfigurePostgresCacheStatisticsPoolLimits(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open(sqlite) error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	configurePostgresCacheStatisticsPool(db)
+
+	if got := db.Stats().MaxOpenConnections; got <= 0 {
+		t.Fatalf("MaxOpenConnections = %d, want positive bounded pool", got)
+	}
+}

@@ -125,10 +125,11 @@ type Manager struct {
 	stopOnce sync.Once
 	cancel   context.CancelFunc
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []queueItem
+	capacity int
+	closed   bool
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -136,7 +137,11 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	// Keep a real queue bound so a slow persistence plugin cannot grow memory without limit.
+	if buffer <= 0 {
+		buffer = 512
+	}
+	m := &Manager{capacity: buffer}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -188,9 +193,22 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
+	cancelWakeDone := m.wakeOnContextCancelLocked(ctx)
+	defer cancelWakeDone()
+	// Block instead of appending past capacity so slow plugins cannot turn into unbounded heap growth.
+	for !m.closed && len(m.queue) >= m.capacity {
+		if ctx.Err() != nil {
+			m.mu.Unlock()
+			return
+		}
+		m.cond.Wait()
+	}
 	if m.closed {
 		m.mu.Unlock()
 		return
@@ -198,6 +216,24 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
 	m.mu.Unlock()
 	m.cond.Signal()
+}
+
+// wakeOnContextCancelLocked wakes a blocked publisher when its context is canceled.
+func (m *Manager) wakeOnContextCancelLocked(ctx context.Context) func() {
+	if m == nil || ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			m.mu.Lock()
+			m.cond.Broadcast()
+			m.mu.Unlock()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 func (m *Manager) run(ctx context.Context) {
@@ -212,6 +248,7 @@ func (m *Manager) run(ctx context.Context) {
 		}
 		item := m.queue[0]
 		m.queue = m.queue[1:]
+		m.cond.Signal()
 		m.mu.Unlock()
 		m.dispatch(item)
 	}

@@ -98,3 +98,18 @@ func TestPostgresStoreBootstrapSeedsLocalConfigAndAuthWhenDatabaseEmpty(t *testi
 		t.Fatalf("expected auth logs to be ignored during bootstrap, stat err = %v", err)
 	}
 }
+
+// TestConfigurePostgresStorePoolLimits ensures auth/config storage cannot open unbounded connections.
+func TestConfigurePostgresStorePoolLimits(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://example.invalid/cliproxy")
+	if err != nil {
+		t.Fatalf("sql.Open(pgx) error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	configurePostgresStorePool(db)
+
+	if got := db.Stats().MaxOpenConnections; got <= 0 {
+		t.Fatalf("MaxOpenConnections = %d, want positive bounded pool", got)
+	}
+}

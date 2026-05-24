@@ -170,8 +170,18 @@ func (snapshot CacheStatisticsSnapshot) Redacted() CacheStatisticsSnapshot {
 }
 
 type CacheStatisticsStore struct {
-	path       string
-	db         *sql.DB
+	path string
+	db   *sql.DB
+
+	// opMu prevents configuration reloads from closing the sql.DB while a caller is using it.
+	opMu sync.RWMutex
+	// closed lets stale store pointers become no-ops after a reload instead of hitting sql.ErrConnDone.
+	closed bool
+	// promptCacheCleanupMu serializes prompt-cache cleanup bookkeeping while operations share the store read lock.
+	promptCacheCleanupMu sync.Mutex
+	// lastPromptCacheCleanup throttles expiry sweeps so hot prompt-cache lookups stay read-mostly.
+	lastPromptCacheCleanup time.Time
+
 	driver     string
 	schema     string
 	backendKey string
@@ -327,10 +337,39 @@ func (s *CacheStatisticsStore) Path() string {
 }
 
 func (s *CacheStatisticsStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if s.closed || s.db == nil {
+		return nil
+	}
+	s.closed = true
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+// beginOperation pins a live database handle for one public store operation.
+func (s *CacheStatisticsStore) beginOperation() bool {
+	if s == nil {
+		return false
+	}
+	s.opMu.RLock()
+	if s.closed || s.db == nil {
+		s.opMu.RUnlock()
+		return false
+	}
+	return true
+}
+
+// endOperation releases the live database handle pin acquired by beginOperation.
+func (s *CacheStatisticsStore) endOperation() {
+	if s == nil {
+		return
+	}
+	s.opMu.RUnlock()
 }
 
 func (s *CacheStatisticsStore) initSchema() error {
@@ -440,10 +479,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	return nil
 }
 
+// InsertEvent writes one request event while pinning the store against concurrent reload close.
 func (s *CacheStatisticsStore) InsertEvent(ctx context.Context, event CacheStatisticsEvent) error {
-	if s == nil || s.db == nil {
+	if !s.beginOperation() {
 		return nil
 	}
+	defer s.endOperation()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -662,14 +703,17 @@ func (s *CacheStatisticsStore) snapshotSince(ctx context.Context, recentLimit, m
 	return s.snapshotSinceProviders(ctx, recentLimit, modelLimit, since, cacheStatisticsProvidersForFilter(provider))
 }
 
+// snapshotSinceProviders builds the dashboard cache view under one live-store lease.
 func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recentLimit, modelLimit int, since string, providers []string) (CacheStatisticsSnapshot, error) {
-	result := CacheStatisticsSnapshot{Enabled: s != nil && s.db != nil}
+	result := CacheStatisticsSnapshot{Enabled: s != nil}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.db == nil {
+	if !s.beginOperation() {
+		result.Enabled = false
 		return result, nil
 	}
+	defer s.endOperation()
 	if recentLimit <= 0 {
 		recentLimit = defaultCacheStatisticsRecentLimit
 	}
@@ -743,6 +787,7 @@ func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (Statisti
 	return s.StatisticsSnapshotByProvider(ctx, "")
 }
 
+// StatisticsSnapshotByProviders returns the persisted usage snapshot used by management rollups.
 func (s *CacheStatisticsStore) StatisticsSnapshotByProviders(ctx context.Context, providers []string) (StatisticsSnapshot, error) {
 	result := StatisticsSnapshot{
 		APIs:           make(map[string]APISnapshot),
@@ -754,9 +799,10 @@ func (s *CacheStatisticsStore) StatisticsSnapshotByProviders(ctx context.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s == nil || s.db == nil {
+	if !s.beginOperation() {
 		return result, nil
 	}
+	defer s.endOperation()
 
 	query := fmt.Sprintf(`
 SELECT

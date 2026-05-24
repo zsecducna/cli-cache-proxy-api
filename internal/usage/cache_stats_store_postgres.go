@@ -65,6 +65,7 @@ func OpenPostgresCacheStatisticsStore(ctx context.Context, cfg PostgresCacheStat
 	if err != nil {
 		return nil, fmt.Errorf("cache statistics store: open postgres database: %w", err)
 	}
+	configurePostgresCacheStatisticsPool(db)
 	if err = db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cache statistics store: ping postgres database: %w", err)
@@ -81,6 +82,17 @@ func OpenPostgresCacheStatisticsStore(ctx context.Context, cfg PostgresCacheStat
 		return nil, err
 	}
 	return store, nil
+}
+
+// configurePostgresCacheStatisticsPool bounds analytics connections independently from request routing.
+func configurePostgresCacheStatisticsPool(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 }
 
 func postgresCacheStatisticsBackendKey(dsn, schema string) string {
@@ -196,6 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_requested_at ON ` + s.requestsTa
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_provider ON ` + s.requestsTableName() + ` (provider);
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON ` + s.requestsTableName() + ` (model);
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON ` + s.requestsTableName() + ` (api_key);
+CREATE INDEX IF NOT EXISTS idx_cache_statistics_provider_lower_requested_at ON ` + s.requestsTableName() + ` (LOWER(provider), requested_at DESC);
 `); err != nil {
 		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
 	}
@@ -213,6 +226,9 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_api_key ON ` + s.requestsTableNa
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_id ON ` + s.requestsTableName() + ` (messages_stream_id)`); err != nil {
 		return fmt.Errorf("cache statistics store: init postgres stream_id index: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_requested_at ON ` + s.requestsTableName() + ` (messages_stream_id, requested_at DESC)`); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres stream time index: %w", err)
 	}
 	if _, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS ` + s.promptCacheTableName() + ` (
