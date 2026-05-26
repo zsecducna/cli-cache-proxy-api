@@ -52,6 +52,7 @@ const (
 )
 
 type pinnedAuthContextKey struct{}
+type excludedAuthIDsContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
@@ -66,6 +67,34 @@ func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
+}
+
+// WithExcludedAuthIDs returns a child context that asks auth selection to skip
+// the supplied auth IDs for this execution attempt.
+func WithExcludedAuthIDs(ctx context.Context, authIDs []string) context.Context {
+	if len(authIDs) == 0 {
+		return ctx
+	}
+	normalized := make([]string, 0, len(authIDs))
+	seen := make(map[string]struct{}, len(authIDs))
+	for _, authID := range authIDs {
+		authID = strings.TrimSpace(authID)
+		if authID == "" {
+			continue
+		}
+		if _, ok := seen[authID]; ok {
+			continue
+		}
+		seen[authID] = struct{}{}
+		normalized = append(normalized, authID)
+	}
+	if len(normalized) == 0 {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, excludedAuthIDsContextKey{}, normalized)
 }
 
 // WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
@@ -232,6 +261,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
+	if excludedAuthIDs := excludedAuthIDsFromContext(ctx); len(excludedAuthIDs) > 0 {
+		meta[coreexecutor.ExcludedAuthIDsMetadataKey] = excludedAuthIDs
+	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
@@ -266,6 +298,31 @@ func headersFromContext(ctx context.Context) http.Header {
 		return ginCtx.Request.Header.Clone()
 	}
 	return nil
+}
+
+func excludedAuthIDsFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(excludedAuthIDsContextKey{})
+	values, ok := raw.([]string)
+	if !ok || len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func isClaudeMessagesHTTPRoute(ctx context.Context, handlerType string, providers []string) bool {

@@ -1246,10 +1246,34 @@ func TestDefaultRequestLoggerFactory_EnablesLoggingWhenDebugTrue(t *testing.T) {
 	if !fileLogger.IsEnabled() {
 		t.Fatal("expected request logger to be enabled when debug is true")
 	}
+	if fileLogger.WebsocketTimelineLoggingEnabled() {
+		t.Fatal("expected websocket timeline logging to stay disabled by default")
+	}
+}
+
+// TestDefaultRequestLoggerFactory_EnablesWebsocketTimelineLoggingOnlyWhenConfigured
+// proves the websocket request-log hot path is explicit opt-in even when
+// request logging itself is enabled.
+func TestDefaultRequestLoggerFactory_EnablesWebsocketTimelineLoggingOnlyWhenConfigured(t *testing.T) {
+	cfg := &proxyconfig.Config{
+		SDKConfig: proxyconfig.SDKConfig{
+			RequestLog: true,
+			Streaming:  proxyconfig.StreamingConfig{WebsocketTimelineLog: true},
+		},
+	}
+	logger := defaultRequestLoggerFactory(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+	if !fileLogger.WebsocketTimelineLoggingEnabled() {
+		t.Fatal("expected websocket timeline logging to be enabled when configured")
+	}
 }
 
 type toggleableRequestLogger struct {
-	enabled bool
+	enabled           bool
+	websocketTimeline bool
 }
 
 func (l *toggleableRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
@@ -1266,6 +1290,10 @@ func (l *toggleableRequestLogger) IsEnabled() bool {
 
 func (l *toggleableRequestLogger) SetEnabled(enabled bool) {
 	l.enabled = enabled
+}
+
+func (l *toggleableRequestLogger) SetWebsocketTimelineLoggingEnabled(enabled bool) {
+	l.websocketTimeline = enabled
 }
 
 func TestUpdateClients_TogglesRequestLoggerWhenOnlyDebugChanges(t *testing.T) {
@@ -1285,6 +1313,32 @@ func TestUpdateClients_TogglesRequestLoggerWhenOnlyDebugChanges(t *testing.T) {
 	server.UpdateClients(&proxyconfig.Config{})
 	if logger.enabled {
 		t.Fatal("expected request logger to be disabled when debug and request-log are both false")
+	}
+}
+
+// TestUpdateClients_TogglesWebsocketTimelineLoggingWhenStreamingConfigChanges
+// locks the reload path for the explicit websocket request-log flag.
+func TestUpdateClients_TogglesWebsocketTimelineLoggingWhenStreamingConfigChanges(t *testing.T) {
+	logger := &toggleableRequestLogger{}
+	server := &Server{
+		requestLogger: logger,
+		handlers:      apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil),
+	}
+	server.oldConfigYaml = []byte("streaming:\n  websocket-timeline-log: false\n")
+
+	server.UpdateClients(&proxyconfig.Config{
+		SDKConfig: proxyconfig.SDKConfig{
+			Streaming: proxyconfig.StreamingConfig{WebsocketTimelineLog: true},
+		},
+	})
+	if !logger.websocketTimeline {
+		t.Fatal("expected websocket timeline logging to be enabled after config change")
+	}
+
+	server.oldConfigYaml = []byte("streaming:\n  websocket-timeline-log: true\n")
+	server.UpdateClients(&proxyconfig.Config{})
+	if logger.websocketTimeline {
+		t.Fatal("expected websocket timeline logging to be disabled when config flag is removed")
 	}
 }
 

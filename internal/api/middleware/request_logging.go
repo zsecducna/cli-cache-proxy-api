@@ -75,8 +75,17 @@ type fileBodySourceFactory interface {
 	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
 }
 
+type websocketTimelineLoggingToggle interface {
+	WebsocketTimelineLoggingEnabled() bool
+}
+
+// attachWebsocketLogSources only allocates temp-backed websocket timeline
+// sinks when the logger explicitly opts into websocket timeline capture.
 func attachWebsocketLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
 	if c == nil || !loggerEnabled || !isResponsesWebsocketUpgrade(c.Request) {
+		return
+	}
+	if toggle, ok := logger.(websocketTimelineLoggingToggle); !ok || toggle == nil || !toggle.WebsocketTimelineLoggingEnabled() {
 		return
 	}
 	factory, ok := logger.(fileBodySourceFactory)

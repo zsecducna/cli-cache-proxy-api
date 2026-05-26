@@ -151,6 +151,7 @@ func TestAttachWebsocketLogSourcesUsesLoggerLogsDir(t *testing.T) {
 
 	logsDir := t.TempDir()
 	logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+	logger.SetWebsocketTimelineLoggingEnabled(true)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
@@ -182,6 +183,28 @@ func TestAttachWebsocketLogSourcesUsesLoggerLogsDir(t *testing.T) {
 		if !strings.HasPrefix(path, logsDir+string(os.PathSeparator)) {
 			t.Fatalf("%s part path %s is not under logs dir %s", key, path, logsDir)
 		}
+	}
+}
+
+// TestAttachWebsocketLogSourcesSkipsWhenTimelineLoggingDisabled keeps the new
+// production default cheap: request logging alone must not enable websocket
+// timeline file spooling unless the explicit websocket timeline flag is on.
+func TestAttachWebsocketLogSourcesSkipsWhenTimelineLoggingDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logger := logging.NewFileRequestLogger(true, t.TempDir(), "", 0)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request.Header.Set("Upgrade", "websocket")
+
+	attachWebsocketLogSources(c, logger, true)
+
+	if _, exists := c.Get(logging.WebsocketTimelineSourceContextKey); exists {
+		t.Fatalf("unexpected websocket timeline source attachment when disabled")
+	}
+	if _, exists := c.Get(logging.APIWebsocketTimelineSourceContextKey); exists {
+		t.Fatalf("unexpected api websocket timeline source attachment when disabled")
 	}
 }
 

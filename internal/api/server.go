@@ -74,7 +74,9 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 			logsDir = filepath.Join(wd, logsDir)
 		}
 	}
-	return logging.NewFileRequestLogger(config.EffectiveRequestLogEnabled(cfg), logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger := logging.NewFileRequestLogger(config.EffectiveRequestLogEnabled(cfg), logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.SetWebsocketTimelineLoggingEnabled(cfg != nil && cfg.Streaming.WebsocketTimelineLog)
+	return logger
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -1377,6 +1379,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled {
 		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
 			setter.SetHomeEnabled(cfg.Home.Enabled)
+		}
+	}
+
+	if oldCfg == nil || oldCfg.Streaming.WebsocketTimelineLog != cfg.Streaming.WebsocketTimelineLog {
+		if setter, ok := s.requestLogger.(interface{ SetWebsocketTimelineLoggingEnabled(bool) }); ok {
+			setter.SetWebsocketTimelineLoggingEnabled(cfg.Streaming.WebsocketTimelineLog)
 		}
 	}
 

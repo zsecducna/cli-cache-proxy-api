@@ -264,6 +264,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	modelKey := canonicalModelKey(model)
 	strategy := effectiveBuiltInStrategy(s.strategy, providerKey, model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
 	s.mu.Lock()
@@ -281,6 +282,9 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 			return false
 		}
 		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+			return false
+		}
+		if authExcludedByMetadata(excludedAuthIDs, entry.auth.ID) {
 			return false
 		}
 		if len(tried) > 0 {
@@ -319,6 +323,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 	strategy := effectiveBuiltInStrategy(s.strategy, "", model)
 
@@ -338,6 +343,9 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
 			}
+			if authExcludedByMetadata(excludedAuthIDs, entry.auth.ID) {
+				return false
+			}
 			if len(tried) == 0 {
 				return true
 			}
@@ -350,7 +358,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := triedPredicate(tried)
+	predicate := triedPredicateWithExclusions(tried, excludedAuthIDs)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	var bestRank availabilityRank
 	hasCandidate := false
@@ -485,11 +493,18 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 
 // triedPredicate builds a filter that excludes auths already attempted for the current request.
 func triedPredicate(tried map[string]struct{}) func(*scheduledAuth) bool {
-	if len(tried) == 0 {
+	return triedPredicateWithExclusions(tried, nil)
+}
+
+func triedPredicateWithExclusions(tried map[string]struct{}, excluded map[string]struct{}) func(*scheduledAuth) bool {
+	if len(tried) == 0 && len(excluded) == 0 {
 		return func(entry *scheduledAuth) bool { return entry != nil && entry.auth != nil }
 	}
 	return func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
+			return false
+		}
+		if authExcludedByMetadata(excluded, entry.auth.ID) {
 			return false
 		}
 		_, ok := tried[entry.auth.ID]

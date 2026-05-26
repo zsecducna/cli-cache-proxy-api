@@ -35,6 +35,9 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// ExcludedAuthIDsMetadataKey carries auth IDs that must be skipped for this
+	// execution attempt, for example after a recoverable auth rotation failure.
+	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.

@@ -221,7 +221,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
 
-	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
+	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog && h.Cfg.Streaming.WebsocketTimelineLog
 	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 
 	// Register the optional Codex upstream-disconnect hook without mirroring it
@@ -259,6 +259,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	sessionState := newResponsesWebsocketSessionState()
 	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
 		if h == nil || h.AuthManager == nil {
 			return nil, false
@@ -395,6 +396,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
+			if excludedAuthIDs := sessionState.ExcludedAuthIDs(); len(excludedAuthIDs) > 0 {
+				cliCtx = handlers.WithExcludedAuthIDs(cliCtx, excludedAuthIDs)
+			}
+			currentTurnAuthID := strings.TrimSpace(pinnedAuthID)
 			if pinnedAuthID != "" {
 				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 			} else {
@@ -407,6 +412,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					if !ok || selectedAuth == nil {
 						return
 					}
+					currentTurnAuthID = authID
 					if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
 						pinnedAuthID = authID
 					}
@@ -422,6 +428,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
+				sessionState.MarkAuthFailed(currentTurnAuthID)
 				if suppressForwardError {
 					suppressNextReplayableError = false
 					lastRequest = previousLastRequest
@@ -453,6 +460,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				// request normalization expands into a full transcript replay so
 				// the replacement auth receives complete context instead of the
 				// old previous_response_id chain bound to the exhausted account.
+				if errWait := waitResponsesWebsocketFailoverRetry(c.Request.Context(), sessionState.NextFailoverAttempt()); errWait != nil {
+					wsTerminateErr = errWait
+					return
+				}
 				pinnedAuthID = ""
 				forceTranscriptReplayNextRequest = true
 				suppressNextReplayableError = true
@@ -496,6 +507,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				break
 			}
 			suppressNextReplayableError = false
+			sessionState.ResetFailoverAttempts()
 			lastResponseOutput = completedOutput
 			break
 		}
@@ -595,7 +607,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// contains historical model output items, treating it as an incremental append
 	// duplicates stale turn-state and can leave late orphaned function_call items.
 	if shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
-		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		normalized, errReplayBudget := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		if errReplayBudget != nil {
+			return nil, lastRequest, errReplayBudget
+		}
 		return normalized, bytes.Clone(normalized), nil
 	}
 
@@ -666,6 +681,11 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	if errSanitize == nil {
 		mergedInput = sanitizedInput
 	}
+	budgetedInput, errReplayBudget := enforceResponsesWebsocketReplayBudget(mergedInput)
+	if errReplayBudget != nil {
+		return nil, lastRequest, errReplayBudget
+	}
+	mergedInput = budgetedInput
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -723,7 +743,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	return false
 }
 
-func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {
+func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) ([]byte, *interfaces.ErrorMessage) {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
 		normalized = bytes.Clone(rawJSON)
@@ -744,10 +764,14 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	if inputResult := gjson.GetBytes(normalized, "input"); inputResult.Exists() && inputResult.IsArray() {
 		if sanitized, err := removeOrphanedToolOutputs(inputResult.Raw); err == nil {
-			normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(sanitized))
+			budgeted, errBudget := enforceResponsesWebsocketReplayBudget(sanitized)
+			if errBudget != nil {
+				return nil, errBudget
+			}
+			normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(budgeted))
 		}
 	}
-	return bytes.Clone(normalized)
+	return bytes.Clone(normalized), nil
 }
 
 func dedupeFunctionCallsByCallID(rawArray string) (string, error) {

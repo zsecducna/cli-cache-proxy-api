@@ -56,4 +56,9 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// WebsocketTimelineLog enables verbose websocket request/response timeline
+	// capture for /v1/responses. Default is false so production request logging
+	// does not automatically spool long-lived websocket traffic to memory/disk.
+	WebsocketTimelineLog bool `yaml:"websocket-timeline-log,omitempty" json:"websocket-timeline-log,omitempty"`
 }

@@ -2086,6 +2086,51 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	}
 }
 
+func excludedAuthIDsFromMetadata(meta map[string]any) map[string]struct{} {
+	if len(meta) == 0 {
+		return nil
+	}
+	raw, ok := meta[cliproxyexecutor.ExcludedAuthIDsMetadataKey]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	addValue := func(out map[string]struct{}, value string) map[string]struct{} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return out
+		}
+		if out == nil {
+			out = make(map[string]struct{})
+		}
+		out[value] = struct{}{}
+		return out
+	}
+
+	var out map[string]struct{}
+	switch values := raw.(type) {
+	case []string:
+		for _, value := range values {
+			out = addValue(out, value)
+		}
+	case []any:
+		for _, value := range values {
+			if stringValue, ok := value.(string); ok {
+				out = addValue(out, stringValue)
+			}
+		}
+	case string:
+		for _, value := range strings.Split(values, ",") {
+			out = addValue(out, value)
+		}
+	case []byte:
+		for _, value := range strings.Split(string(values), ",") {
+			out = addValue(out, value)
+		}
+	}
+	return out
+}
+
 func disallowFreeAuthFromMetadata(meta map[string]any) bool {
 	if len(meta) == 0 {
 		return false
@@ -2106,6 +2151,18 @@ func disallowFreeAuthFromMetadata(meta map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+func authExcludedByMetadata(excluded map[string]struct{}, authID string) bool {
+	if len(excluded) == 0 {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false
+	}
+	_, ok := excluded[authID]
+	return ok
 }
 
 func isFreeCodexAuth(auth *Auth) bool {
@@ -3548,11 +3605,15 @@ func (m *Manager) pickNextLegacyWithSelector(ctx context.Context, provider, mode
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if authExcludedByMetadata(excludedAuthIDs, candidate.ID) {
 			continue
 		}
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
@@ -3628,6 +3689,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	for {
 		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
@@ -3639,6 +3701,13 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		}
 		if selected == nil {
 			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if authExcludedByMetadata(excludedAuthIDs, selected.ID) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
 			if tried == nil {
@@ -3667,6 +3736,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, selectorOverride Selector) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	selector := selectorOverride
 	if selector == nil {
 		selector = effectiveBuiltInSelector(m.selector, "", model)
@@ -3701,6 +3771,9 @@ func (m *Manager) pickNextMixedLegacyWithSelector(ctx context.Context, providers
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if authExcludedByMetadata(excludedAuthIDs, candidate.ID) {
 			continue
 		}
 		if disallowFreeAuth && isFreeCodexAuth(candidate) {
@@ -3816,6 +3889,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)
+	excludedAuthIDs := excludedAuthIDsFromMetadata(opts.Metadata)
 	for {
 		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
@@ -3827,6 +3901,13 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 		if selected == nil {
 			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		if authExcludedByMetadata(excludedAuthIDs, selected.ID) {
+			if tried == nil {
+				tried = make(map[string]struct{})
+			}
+			tried[selected.ID] = struct{}{}
+			continue
 		}
 		if disallowFreeAuth && isFreeCodexAuth(selected) {
 			if tried == nil {

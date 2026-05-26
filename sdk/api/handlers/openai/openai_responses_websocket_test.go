@@ -1316,7 +1316,12 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		RequestLog: true,
+		Streaming: sdkconfig.StreamingConfig{
+			WebsocketTimelineLog: true,
+		},
+	}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
 	logsDir := t.TempDir()
 
@@ -1977,6 +1982,88 @@ func TestResponsesWebsocketRetriesSamePayloadAfterAuthUnavailableError(t *testin
 	}
 }
 
+// TestResponsesWebsocketSessionDenylistSkipsFailedAuthOnLaterTurns proves a
+// recoverable auth failure denies that auth for the rest of the downstream
+// websocket session, even when later turns are no longer pinned.
+func TestResponsesWebsocketSessionDenylistSkipsFailedAuthOnLaterTurns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-a", "auth-b", "auth-a", "auth-b"}}
+	executor := &websocketPinnedFailoverExecutor{
+		failAuth: "auth-a",
+		failCall: 1,
+		failCode: http.StatusTooManyRequests,
+	}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authA := &coreauth.Auth{
+		ID:         "auth-a",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "false"},
+	}
+	if _, err := manager.Register(context.Background(), authA); err != nil {
+		t.Fatalf("Register auth A: %v", err)
+	}
+	authB := &coreauth.Auth{
+		ID:         "auth-b",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "false"},
+	}
+	if _, err := manager.Register(context.Background(), authB); err != nil {
+		t.Fatalf("Register auth B: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authA.ID, authA.Provider, []*registry.ModelInfo{{ID: "quota-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authB.ID, authB.Provider, []*registry.ModelInfo{{ID: "quota-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authA.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authB.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		`{"type":"response.create","model":"quota-model","input":[{"type":"message","id":"msg-1"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-auth-b-1","input":[{"type":"message","id":"msg-2"}]}`,
+	}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wsEventTypeCompleted, payload)
+		}
+	}
+
+	if got := executor.AuthIDs(); len(got) != 3 || got[0] != "auth-a" || got[1] != "auth-b" || got[2] != "auth-b" {
+		t.Fatalf("selected auth IDs = %v, want [auth-a auth-b auth-b]", got)
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestTreatsTranscriptReplacementAsReset(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"},{"type":"function_call","id":"fc-1","call_id":"call-1"},{"type":"function_call_output","id":"tool-out-1","call_id":"call-1"},{"type":"message","id":"assistant-1","role":"assistant"}]}`)
 	lastResponseOutput := []byte(`[
@@ -2477,5 +2564,99 @@ func TestNormalizeSubsequentRequestAssistantInputTriggersTranscriptReplacement(t
 	}
 	if input[0].Get("id").String() != "msg-3" {
 		t.Fatalf("input[0].id = %q, want %q", input[0].Get("id").String(), "msg-3")
+	}
+}
+
+// TestNormalizeSubsequentRequestCompactsOversizedReplay proves failover replay
+// is compacted into a bounded local snapshot before the proxy retries on a
+// replacement auth.
+func TestNormalizeSubsequentRequestCompactsOversizedReplay(t *testing.T) {
+	huge := strings.Repeat("history-", 40000)
+	lastRequest := []byte(fmt.Sprintf(`{"model":"gpt-5.4","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-1","content":[{"type":"input_text","text":%q}]},
+		{"type":"message","role":"assistant","id":"msg-2","content":[{"type":"output_text","text":%q}]}
+	]}`, huge, huge))
+	lastResponseOutput := []byte(fmt.Sprintf(`[
+		{"type":"message","role":"assistant","id":"msg-3","content":[{"type":"output_text","text":%q}]}
+	]`, huge))
+	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"msg-4","content":[{"type":"input_text","text":"latest"}]}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	inputRaw := gjson.GetBytes(normalized, "input").Raw
+	if len(inputRaw) > responsesWebsocketReplayMaxBytes {
+		t.Fatalf("compacted replay bytes = %d, want <= %d", len(inputRaw), responsesWebsocketReplayMaxBytes)
+	}
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) < 2 {
+		t.Fatalf("input len = %d, want compacted snapshot + latest items", len(items))
+	}
+	if got := items[0].Get("id").String(); !strings.HasPrefix(got, responsesWebsocketReplaySnapshotIDPrefix) {
+		t.Fatalf("snapshot id = %q, want prefix %q", got, responsesWebsocketReplaySnapshotIDPrefix)
+	}
+	if got := items[len(items)-1].Get("id").String(); got != "msg-4" {
+		t.Fatalf("last replay item = %q, want msg-4", got)
+	}
+}
+
+// TestNormalizeSubsequentRequestRejectsOversizedSingleTurnReplay proves the
+// proxy returns an explicit websocket error when even the compacted replay
+// cannot fit within the configured safety budget.
+func TestNormalizeSubsequentRequestRejectsOversizedSingleTurnReplay(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":[{"type":"input_text","text":"hello"}]}]}`)
+	lastResponseOutput := []byte(`[]`)
+	huge := strings.Repeat("x", responsesWebsocketReplayMaxBytes+4096)
+	raw := []byte(fmt.Sprintf(`{"type":"response.create","input":[{"type":"message","role":"user","id":"msg-2","content":[{"type":"input_text","text":%q}]}]}`, huge))
+
+	_, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+	if errMsg == nil {
+		t.Fatal("expected replay-too-large error")
+	}
+	if errMsg.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusRequestEntityTooLarge)
+	}
+	if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "session_replay_too_large") {
+		t.Fatalf("error = %v, want session_replay_too_large", errMsg.Error)
+	}
+}
+
+// TestResponsesWebsocketFailoverRetryWaitUsesBackoffAndLimiter proves the
+// retry helper applies bounded delay logic through injectable hooks so auth
+// storms can be throttled without sleeping in the test.
+func TestResponsesWebsocketFailoverRetryWaitUsesBackoffAndLimiter(t *testing.T) {
+	prevSleep := responsesWebsocketFailoverSleep
+	prevJitter := responsesWebsocketFailoverJitter
+	prevAcquire := responsesWebsocketFailoverAcquire
+	t.Cleanup(func() {
+		responsesWebsocketFailoverSleep = prevSleep
+		responsesWebsocketFailoverJitter = prevJitter
+		responsesWebsocketFailoverAcquire = prevAcquire
+	})
+
+	var acquired bool
+	var slept time.Duration
+	responsesWebsocketFailoverAcquire = func(context.Context) (func(), error) {
+		acquired = true
+		return func() { acquired = false }, nil
+	}
+	responsesWebsocketFailoverJitter = func(base time.Duration) time.Duration {
+		return base + 50*time.Millisecond
+	}
+	responsesWebsocketFailoverSleep = func(_ context.Context, d time.Duration) error {
+		slept = d
+		return nil
+	}
+
+	if err := waitResponsesWebsocketFailoverRetry(context.Background(), 2); err != nil {
+		t.Fatalf("waitResponsesWebsocketFailoverRetry: %v", err)
+	}
+	if acquired {
+		t.Fatal("expected limiter release after retry wait")
+	}
+	if slept <= 0 {
+		t.Fatalf("slept = %s, want positive backoff", slept)
 	}
 }

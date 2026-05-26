@@ -370,6 +370,11 @@ type FileRequestLogger struct {
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
 
+	// websocketTimelineEnabled gates expensive websocket timeline capture so
+	// request logging can stay on in production without spooling long-lived
+	// /v1/responses websocket traffic unless explicitly requested.
+	websocketTimelineEnabled bool
+
 	homeEnabled bool
 }
 
@@ -445,10 +450,11 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 		}
 	}
 	return &FileRequestLogger{
-		enabled:           enabled,
-		logsDir:           logsDir,
-		errorLogsMaxFiles: errorLogsMaxFiles,
-		homeEnabled:       false,
+		enabled:                  enabled,
+		logsDir:                  logsDir,
+		errorLogsMaxFiles:        errorLogsMaxFiles,
+		websocketTimelineEnabled: false,
+		homeEnabled:              false,
 	}
 }
 
@@ -481,6 +487,24 @@ func (l *FileRequestLogger) SetEnabled(enabled bool) {
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 	l.errorLogsMaxFiles = maxFiles
+}
+
+// SetWebsocketTimelineLoggingEnabled toggles websocket timeline capture for
+// /v1/responses independently from the broader request-log switch.
+func (l *FileRequestLogger) SetWebsocketTimelineLoggingEnabled(enabled bool) {
+	if l == nil {
+		return
+	}
+	l.websocketTimelineEnabled = enabled
+}
+
+// WebsocketTimelineLoggingEnabled reports whether expensive websocket timeline
+// capture is enabled for this logger instance.
+func (l *FileRequestLogger) WebsocketTimelineLoggingEnabled() bool {
+	if l == nil {
+		return false
+	}
+	return l.websocketTimelineEnabled
 }
 
 // NewFileBodySource creates a temp-backed source under the request log directory.
