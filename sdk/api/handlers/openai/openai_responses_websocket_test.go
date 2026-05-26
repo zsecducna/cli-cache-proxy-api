@@ -2594,26 +2594,24 @@ func TestNormalizeSubsequentRequestCompactsOversizedReplay(t *testing.T) {
 	if len(items) < 2 {
 		t.Fatalf("input len = %d, want compacted snapshot + latest items", len(items))
 	}
-	// Synthetic replay snapshots must use a plain upstream-looking `msg-` ID.
-	// Keeping any proxy-specific marker in the upstream-facing `message.id`
-	// leaks local failover bookkeeping into Codex websocket validation.
-	if got := items[0].Get("id").String(); !strings.HasPrefix(got, responsesWebsocketReplaySnapshotIDPrefix) {
-		t.Fatalf("snapshot id = %q, want prefix %q", got, responsesWebsocketReplaySnapshotIDPrefix)
-	} else if strings.Contains(got, "proxy-snapshot") {
-		t.Fatalf("snapshot id = %q, want proxy marker removed", got)
+	// Proxy-authored replay snapshot summaries are synthetic input messages, not
+	// untouched output items from a prior OpenAI response. They must not carry an
+	// upstream `message.id` at all.
+	if items[0].Get("id").Exists() {
+		t.Fatalf("snapshot id must be omitted, got %q", items[0].Get("id").String())
 	}
 	if got := items[len(items)-1].Get("id").String(); got != "msg-4" {
 		t.Fatalf("last replay item = %q, want msg-4", got)
 	}
 }
 
-// TestNormalizeSubsequentRequestRewritesLegacyProxySnapshotIDs proves websocket
-// normalization strips legacy proxy-managed replay snapshot markers before the
+// TestNormalizeSubsequentRequestStripsLegacyProxySnapshotIDs proves websocket
+// normalization removes legacy proxy-managed replay snapshot IDs before the
 // payload is forwarded to upstream Codex websocket.
-func TestNormalizeSubsequentRequestRewritesLegacyProxySnapshotIDs(t *testing.T) {
+func TestNormalizeSubsequentRequestStripsLegacyProxySnapshotIDs(t *testing.T) {
 	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"hello"}]}`)
 	lastResponseOutput := []byte(`[]`)
-	raw := []byte(`{"type":"response.append","input":[{"type":"message","role":"assistant","id":"proxy-snapshot-legacy","content":"summary"}]}`)
+	raw := []byte(fmt.Sprintf(`{"type":"response.append","input":[{"type":"message","role":"assistant","id":"proxy-snapshot-legacy","content":[{"type":"output_text","text":%q}]}]}`, responsesWebsocketReplaySummaryPrefix+" test"))
 
 	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
 	if errMsg != nil {
@@ -2624,21 +2622,45 @@ func TestNormalizeSubsequentRequestRewritesLegacyProxySnapshotIDs(t *testing.T) 
 	if len(items) != 1 {
 		t.Fatalf("input len = %d, want 1", len(items))
 	}
-	if got := items[0].Get("id").String(); got != "msg-legacy" {
-		t.Fatalf("input[0].id = %q, want %q", got, "msg-legacy")
+	if items[0].Get("id").Exists() {
+		t.Fatalf("input[0].id must be omitted, got %q", items[0].Get("id").String())
 	}
 }
 
-// TestNormalizeSubsequentRequestKeepsRewrittenLegacySnapshotIDsUnique proves
-// lossy legacy-ID sanitization does not collapse distinct proxy-managed replay
-// snapshots onto one upstream `msg-*` ID.
-func TestNormalizeSubsequentRequestKeepsRewrittenLegacySnapshotIDsUnique(t *testing.T) {
+// TestNormalizeSubsequentRequestStripsSyntheticSnapshotMessageIDs proves
+// already-synthesized proxy replay summary messages also lose their stale
+// upstream-looking IDs before being replayed.
+func TestNormalizeSubsequentRequestStripsSyntheticSnapshotMessageIDs(t *testing.T) {
 	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"hello"}]}`)
 	lastResponseOutput := []byte(`[]`)
-	raw := []byte(`{"type":"response.append","input":[
-		{"type":"message","role":"assistant","id":"proxy-snapshot-a:b","content":"summary-a"},
-		{"type":"message","role":"assistant","id":"proxy-snapshot-ab","content":"summary-b"}
-	]}`)
+	raw := []byte(fmt.Sprintf(`{"type":"response.append","input":[
+		{"type":"message","role":"assistant","id":"msg_7e9b86bc6ff84bc3a333b5aac6f1963f","content":[{"type":"output_text","text":%q}]}
+	]}`, responsesWebsocketReplaySummaryPrefix+" test"))
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("input len = %d, want 1", len(items))
+	}
+	if items[0].Get("id").Exists() {
+		t.Fatalf("synthetic snapshot id must be omitted, got %q", items[0].Get("id").String())
+	}
+}
+
+// TestNormalizeSubsequentRequestPreservesNativeMessageIDs proves proxy
+// snapshot cleanup does not mutate unrelated response items that already carry
+// native upstream IDs.
+func TestNormalizeSubsequentRequestPreservesNativeMessageIDs(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"hello"}]}`)
+	lastResponseOutput := []byte(`[]`)
+	raw := []byte(fmt.Sprintf(`{"type":"response.append","input":[
+		{"type":"message","role":"assistant","id":"msg_legacy","content":"native-summary"},
+		{"type":"message","role":"assistant","id":"proxy-snapshot-legacy","content":[{"type":"output_text","text":%q}]}
+	]}`, responsesWebsocketReplaySummaryPrefix+" test"))
 
 	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
 	if errMsg != nil {
@@ -2651,49 +2673,11 @@ func TestNormalizeSubsequentRequestKeepsRewrittenLegacySnapshotIDsUnique(t *test
 	}
 
 	firstID := items[0].Get("id").String()
-	secondID := items[1].Get("id").String()
-	if firstID == secondID {
-		t.Fatalf("rewritten legacy ids collided: %q", firstID)
+	if firstID != "msg_legacy" {
+		t.Fatalf("input[0].id = %q, want %q", firstID, "msg_legacy")
 	}
-	if !strings.HasPrefix(firstID, "msg-") || !strings.HasPrefix(secondID, "msg-") {
-		t.Fatalf("rewritten ids must stay upstream-compatible: %q %q", firstID, secondID)
-	}
-	if strings.Contains(firstID, ":") || strings.Contains(secondID, ":") {
-		t.Fatalf("rewritten ids must strip invalid characters: %q %q", firstID, secondID)
-	}
-}
-
-// TestNormalizeSubsequentRequestAvoidsCollisionWithExistingMessageID proves a
-// clean legacy suffix still gets reminted when it would collide with another
-// upstream-visible `msg-*` ID already present in the same payload.
-func TestNormalizeSubsequentRequestAvoidsCollisionWithExistingMessageID(t *testing.T) {
-	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"hello"}]}`)
-	lastResponseOutput := []byte(`[]`)
-	raw := []byte(`{"type":"response.append","input":[
-		{"type":"message","role":"assistant","id":"msg-legacy","content":"native-summary"},
-		{"type":"message","role":"assistant","id":"proxy-snapshot-legacy","content":"proxy-summary"}
-	]}`)
-
-	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
-	if errMsg != nil {
-		t.Fatalf("unexpected error: %v", errMsg.Error)
-	}
-
-	items := gjson.GetBytes(normalized, "input").Array()
-	if len(items) != 2 {
-		t.Fatalf("input len = %d, want 2", len(items))
-	}
-
-	firstID := items[0].Get("id").String()
-	secondID := items[1].Get("id").String()
-	if firstID != "msg-legacy" {
-		t.Fatalf("input[0].id = %q, want %q", firstID, "msg-legacy")
-	}
-	if secondID == firstID {
-		t.Fatalf("rewritten legacy id collided with native id: %q", secondID)
-	}
-	if !strings.HasPrefix(secondID, "msg-") {
-		t.Fatalf("rewritten id must stay upstream-compatible: %q", secondID)
+	if items[1].Get("id").Exists() {
+		t.Fatalf("proxy snapshot id must be omitted, got %q", items[1].Get("id").String())
 	}
 }
 

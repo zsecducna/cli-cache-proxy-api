@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/tidwall/gjson"
 )
@@ -28,13 +27,15 @@ const (
 	// snapshot prefix used before Codex websocket upstream started validating
 	// `message.id` prefixes strictly.
 	responsesWebsocketReplaySnapshotLegacyIDPrefix = "proxy-snapshot-"
-	// responsesWebsocketReplaySnapshotIDPrefix marks synthetic local snapshot
-	// messages inserted by the proxy during failover replay compaction.
-	//
-	// Upstream Codex websocket validation now rejects proxy-branded snapshot IDs
-	// such as `msg-proxy-snapshot-*`. Keep the upstream-facing identifier plain
-	// and indistinguishable from native message IDs.
-	responsesWebsocketReplaySnapshotIDPrefix = "msg-"
+	// responsesWebsocketReplaySnapshotLegacyCompatIDPrefix matches the older
+	// broken proxy rewrite that converted legacy snapshot IDs into
+	// upstream-looking `msg-proxy-snapshot-*` values. Keep it only so current
+	// releases can strip those stale IDs from in-flight sessions.
+	responsesWebsocketReplaySnapshotLegacyCompatIDPrefix = "msg-proxy-snapshot-"
+	// responsesWebsocketReplaySummaryPrefix marks synthetic proxy snapshot
+	// summaries. These items are local context compaction helpers, not untouched
+	// output items from OpenAI, so they must be replayed without an `id`.
+	responsesWebsocketReplaySummaryPrefix = "Proxy conversation snapshot after auth rotation. Earlier context summary:"
 	// responsesWebsocketReplaySummaryMaxChars bounds the human-readable snapshot
 	// summary that replaces older transcript history during local compaction.
 	responsesWebsocketReplaySummaryMaxChars = 2048
@@ -54,38 +55,6 @@ var responsesWebsocketFailoverLimiter = make(chan struct{}, responsesWebsocketFa
 var responsesWebsocketFailoverAcquire = defaultResponsesWebsocketFailoverAcquire
 var responsesWebsocketFailoverSleep = sleepResponsesWebsocketFailoverDelay
 var responsesWebsocketFailoverJitter = jitterResponsesWebsocketFailoverDelay
-
-// buildResponsesWebsocketReplayMessageID normalizes proxy-managed replay IDs to
-// the narrow upstream-safe `msg-*` form. Keep only letters, numbers,
-// underscores, and dashes in the suffix because Codex websocket rejects
-// replay IDs outside that visible character set and may also reject
-// proxy-branded marker strings even when they are otherwise ASCII-safe.
-func buildResponsesWebsocketReplayMessageID(seed string) string {
-	seed = strings.TrimSpace(seed)
-	if seed == "" {
-		seed = uuid.NewString()
-	}
-
-	var builder strings.Builder
-	builder.Grow(len(responsesWebsocketReplaySnapshotIDPrefix) + len(seed))
-	builder.WriteString(responsesWebsocketReplaySnapshotIDPrefix)
-	for _, r := range seed {
-		switch {
-		case r >= 'a' && r <= 'z':
-			builder.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			builder.WriteRune(r)
-		case r >= '0' && r <= '9':
-			builder.WriteRune(r)
-		case r == '_' || r == '-':
-			builder.WriteRune(r)
-		}
-	}
-	if builder.Len() == len(responsesWebsocketReplaySnapshotIDPrefix) {
-		builder.WriteString(uuid.NewString())
-	}
-	return builder.String()
-}
 
 // responsesWebsocketSessionState keeps the per-downstream websocket failover
 // guards: denied auth IDs and retry-streak backoff state.
@@ -292,9 +261,10 @@ func compactResponsesWebsocketReplay(rawArray string) (string, bool) {
 }
 
 // buildResponsesWebsocketReplaySnapshotItem collapses older replay history into
-// one synthetic assistant message. The upstream-facing `id` must stay in the
-// plain `msg-*` namespace because Codex websocket now validates message IDs and
-// rejects proxy-specific marker suffixes during replay.
+// one synthetic assistant message. Official Responses examples show client
+// input messages without `id`, while model output items carry server-generated
+// IDs like `msg_...`, so the proxy must not invent an upstream `message.id`
+// for its own local snapshot summary.
 func buildResponsesWebsocketReplaySnapshotItem(items []json.RawMessage) (json.RawMessage, bool) {
 	if len(items) == 0 {
 		return nil, false
@@ -305,7 +275,6 @@ func buildResponsesWebsocketReplaySnapshotItem(items []json.RawMessage) (json.Ra
 	}
 	item := map[string]any{
 		"type": "message",
-		"id":   buildResponsesWebsocketReplayMessageID(uuid.NewString()),
 		"role": "assistant",
 		"content": []map[string]string{
 			{
@@ -326,7 +295,7 @@ func summarizeResponsesWebsocketReplayItems(items []json.RawMessage) string {
 		return ""
 	}
 	var builder strings.Builder
-	builder.WriteString("Proxy conversation snapshot after auth rotation. Earlier context summary:")
+	builder.WriteString(responsesWebsocketReplaySummaryPrefix)
 	for i := 0; i < len(items); i++ {
 		entry := summarizeResponsesWebsocketReplayItem(items[i])
 		if entry == "" {
