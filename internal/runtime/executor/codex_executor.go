@@ -388,7 +388,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			continue
 		}
 
-		publishCodexUsageAndRecordPromptCache(ctx, reporter, eventData, cacheSelection)
+		publishCodexUsageAndRecordPromptCache(ctx, reporter, eventData, cacheSelection, "http")
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
@@ -647,7 +647,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
-					publishCodexUsageAndRecordPromptCache(ctx, reporter, data, cacheSelection)
+					publishCodexUsageAndRecordPromptCache(ctx, reporter, data, cacheSelection, "sse")
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)

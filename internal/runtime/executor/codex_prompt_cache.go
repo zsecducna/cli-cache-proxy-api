@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -88,11 +91,50 @@ func prepareCodexPromptCache(ctx context.Context, from sdktranslator.Format, req
 	return selection
 }
 
-func publishCodexUsageAndRecordPromptCache(ctx context.Context, reporter *helps.UsageReporter, responsePayload []byte, selection codexPromptCacheSelection) {
+func publishCodexUsageAndRecordPromptCache(ctx context.Context, reporter *helps.UsageReporter, responsePayload []byte, selection codexPromptCacheSelection, transport string) {
+	// Emit the raw completed-usage summary before parsing so websocket and cheapRouter
+	// investigations can compare the upstream payload against later dashboard rows.
+	logCodexWebsocketUsageDebug(responsePayload, selection, transport)
 	if detail, ok := helps.ParseCodexUsage(responsePayload); ok {
 		reporter.Publish(ctx, detail)
 	}
 	recordCodexPromptCacheResponse(ctx, responsePayload, selection.Key, selection.TTL)
+}
+
+// buildCodexWebsocketUsageDebugFields extracts the compact token fields we need to
+// compare raw Codex Responses usage against downstream reporting rows.
+func buildCodexWebsocketUsageDebugFields(responsePayload []byte, selection codexPromptCacheSelection, transport string) map[string]any {
+	return map[string]any{
+		"event_type":       strings.TrimSpace(gjson.GetBytes(responsePayload, "type").String()),
+		"transport":        strings.TrimSpace(transport),
+		"response_id":      strings.TrimSpace(gjson.GetBytes(responsePayload, "response.id").String()),
+		"model":            strings.TrimSpace(gjson.GetBytes(responsePayload, "response.model").String()),
+		"prompt_cache_key": strings.TrimSpace(selection.Key),
+		"input_tokens":     gjson.GetBytes(responsePayload, "response.usage.input_tokens").Int(),
+		"cached_tokens":    gjson.GetBytes(responsePayload, "response.usage.input_tokens_details.cached_tokens").Int(),
+		"reasoning_tokens": gjson.GetBytes(responsePayload, "response.usage.output_tokens_details.reasoning_tokens").Int(),
+		"output_tokens":    gjson.GetBytes(responsePayload, "response.usage.output_tokens").Int(),
+		"total_tokens":     gjson.GetBytes(responsePayload, "response.usage.total_tokens").Int(),
+	}
+}
+
+// logCodexWebsocketUsageDebug keeps websocket usage instrumentation opt-in so
+// production behavior is unchanged unless an explicit debug flag is enabled.
+func logCodexWebsocketUsageDebug(responsePayload []byte, selection codexPromptCacheSelection, transport string) {
+	if strings.TrimSpace(os.Getenv("CLIPROXYAPI_DEBUG_CODEX_WEBSOCKET_USAGE")) != "1" {
+		return
+	}
+
+	fields := buildCodexWebsocketUsageDebugFields(responsePayload, selection, transport)
+	if usageNode := gjson.GetBytes(responsePayload, "response.usage"); usageNode.Exists() {
+		fields["raw_usage"] = json.RawMessage(usageNode.Raw)
+	}
+	serialized, err := json.Marshal(fields)
+	if err != nil {
+		log.Infof("codex websocket usage debug: marshal_error=%v fields=%v", err, fields)
+		return
+	}
+	log.Infof("codex websocket usage debug: %s", string(serialized))
 }
 
 func recordCodexPromptCacheResponse(ctx context.Context, responsePayload []byte, promptCacheKey string, ttl time.Duration) {

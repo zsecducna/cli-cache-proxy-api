@@ -125,6 +125,44 @@ func TestApplyCodexWebsocketClientStore(t *testing.T) {
 	}
 }
 
+func TestBuildCodexWebsocketUsageDebugFields(t *testing.T) {
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-debug","model":"gpt-5.4","usage":{"input_tokens":32013,"output_tokens":1445,"total_tokens":34439,"input_tokens_details":{"cached_tokens":30592},"output_tokens_details":{"reasoning_tokens":981}}}}`)
+	selection := codexPromptCacheSelection{Key: "thread-debug"}
+
+	fields := buildCodexWebsocketUsageDebugFields(payload, selection, "websocket")
+
+	if fields["event_type"] != "response.completed" {
+		t.Fatalf("event_type = %v, want response.completed", fields["event_type"])
+	}
+	if fields["transport"] != "websocket" {
+		t.Fatalf("transport = %v, want websocket", fields["transport"])
+	}
+	if fields["response_id"] != "resp-debug" {
+		t.Fatalf("response_id = %v, want resp-debug", fields["response_id"])
+	}
+	if fields["model"] != "gpt-5.4" {
+		t.Fatalf("model = %v, want gpt-5.4", fields["model"])
+	}
+	if fields["prompt_cache_key"] != "thread-debug" {
+		t.Fatalf("prompt_cache_key = %v, want thread-debug", fields["prompt_cache_key"])
+	}
+	if fields["input_tokens"] != int64(32013) {
+		t.Fatalf("input_tokens = %v, want 32013", fields["input_tokens"])
+	}
+	if fields["cached_tokens"] != int64(30592) {
+		t.Fatalf("cached_tokens = %v, want 30592", fields["cached_tokens"])
+	}
+	if fields["reasoning_tokens"] != int64(981) {
+		t.Fatalf("reasoning_tokens = %v, want 981", fields["reasoning_tokens"])
+	}
+	if fields["output_tokens"] != int64(1445) {
+		t.Fatalf("output_tokens = %v, want 1445", fields["output_tokens"])
+	}
+	if fields["total_tokens"] != int64(34439) {
+		t.Fatalf("total_tokens = %v, want 34439", fields["total_tokens"])
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 

@@ -378,7 +378,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
-			publishCodexUsageAndRecordPromptCache(ctx, reporter, payload, cacheSelection)
+			publishCodexUsageAndRecordPromptCache(ctx, reporter, payload, cacheSelection, "websocket")
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
@@ -671,7 +671,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			payload = normalizeCodexWebsocketCompletion(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
 			if eventType == "response.completed" || eventType == "response.done" {
-				publishCodexUsageAndRecordPromptCache(ctx, reporter, payload, cacheSelection)
+				publishCodexUsageAndRecordPromptCache(ctx, reporter, payload, cacheSelection, "websocket")
 			}
 			helps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
 
