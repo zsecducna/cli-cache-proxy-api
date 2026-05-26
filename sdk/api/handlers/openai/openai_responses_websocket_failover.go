@@ -24,9 +24,18 @@ const (
 	// responsesWebsocketReplayRecentItems is the initial concrete tail preserved
 	// after older transcript items are collapsed into a synthetic snapshot.
 	responsesWebsocketReplayRecentItems = 24
+	// responsesWebsocketReplaySnapshotLegacyIDPrefix is the historical local
+	// snapshot prefix used before Codex websocket upstream started validating
+	// `message.id` prefixes strictly.
+	responsesWebsocketReplaySnapshotLegacyIDPrefix = "proxy-snapshot-"
 	// responsesWebsocketReplaySnapshotIDPrefix marks synthetic local snapshot
 	// messages inserted by the proxy during failover replay compaction.
-	responsesWebsocketReplaySnapshotIDPrefix = "proxy-snapshot-"
+	//
+	// Codex websocket upstream now validates message IDs and rejects synthetic
+	// replay snapshots unless they look like normal `message` IDs with a `msg`
+	// prefix. Keep the proxy-specific suffix for local diagnosability while
+	// satisfying upstream's strict ID-prefix validator.
+	responsesWebsocketReplaySnapshotIDPrefix = "msg-proxy-snapshot-"
 	// responsesWebsocketReplaySummaryMaxChars bounds the human-readable snapshot
 	// summary that replaces older transcript history during local compaction.
 	responsesWebsocketReplaySummaryMaxChars = 2048

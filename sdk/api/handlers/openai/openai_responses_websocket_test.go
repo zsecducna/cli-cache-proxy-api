@@ -2594,11 +2594,38 @@ func TestNormalizeSubsequentRequestCompactsOversizedReplay(t *testing.T) {
 	if len(items) < 2 {
 		t.Fatalf("input len = %d, want compacted snapshot + latest items", len(items))
 	}
+	// Synthetic replay snapshots must preserve the local marker while still
+	// looking like standard message IDs because Codex websocket upstream now
+	// validates `message.id` prefixes and rejects non-`msg` IDs.
 	if got := items[0].Get("id").String(); !strings.HasPrefix(got, responsesWebsocketReplaySnapshotIDPrefix) {
 		t.Fatalf("snapshot id = %q, want prefix %q", got, responsesWebsocketReplaySnapshotIDPrefix)
+	} else if !strings.HasPrefix(got, "msg-") {
+		t.Fatalf("snapshot id = %q, want upstream-compatible msg- prefix", got)
 	}
 	if got := items[len(items)-1].Get("id").String(); got != "msg-4" {
 		t.Fatalf("last replay item = %q, want msg-4", got)
+	}
+}
+
+// TestNormalizeSubsequentRequestRewritesLegacyProxySnapshotIDs proves websocket
+// normalization upgrades legacy proxy-managed replay snapshot IDs before the
+// payload is forwarded to upstream Codex websocket.
+func TestNormalizeSubsequentRequestRewritesLegacyProxySnapshotIDs(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"type":"message","role":"user","id":"msg-1","content":"hello"}]}`)
+	lastResponseOutput := []byte(`[]`)
+	raw := []byte(`{"type":"response.append","input":[{"type":"message","role":"assistant","id":"proxy-snapshot-legacy","content":"summary"}]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	items := gjson.GetBytes(normalized, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("input len = %d, want 1", len(items))
+	}
+	if got := items[0].Get("id").String(); got != "msg-proxy-snapshot-legacy" {
+		t.Fatalf("input[0].id = %q, want %q", got, "msg-proxy-snapshot-legacy")
 	}
 }
 

@@ -577,6 +577,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 			Error:      fmt.Errorf("missing model in response.create request"),
 		}
 	}
+	normalized = sanitizeResponsesWebsocketMessageIDs(normalized)
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -636,6 +637,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
 			normalized = defaultStoreForWebsocketPreviousResponseID(normalized)
+			normalized = sanitizeResponsesWebsocketMessageIDs(normalized)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
@@ -713,6 +715,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	normalized = sanitizeResponsesWebsocketMessageIDs(normalized)
 	return normalized, bytes.Clone(normalized), nil
 }
 
@@ -771,6 +774,7 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 			normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(budgeted))
 		}
 	}
+	normalized = sanitizeResponsesWebsocketMessageIDs(normalized)
 	return bytes.Clone(normalized), nil
 }
 
@@ -1213,6 +1217,85 @@ func normalizeResponsesInputArrayRaw(input gjson.Result) string {
 		}
 	}
 	return "[]"
+}
+
+// sanitizeResponsesWebsocketMessageIDs rewrites proxy-managed legacy snapshot
+// message IDs inside the websocket request body before the payload is forwarded
+// upstream. This keeps old in-flight replay payloads compatible after upstream
+// tightened `message.id` prefix validation for Codex websocket requests.
+func sanitizeResponsesWebsocketMessageIDs(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	sanitizedInput, changed, err := sanitizeResponsesWebsocketInputMessageIDs(input.Raw)
+	if err != nil || !changed {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", []byte(sanitizedInput))
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+// sanitizeResponsesWebsocketInputMessageIDs rewrites only proxy-owned legacy
+// replay snapshot IDs. User-supplied or upstream-native IDs are preserved so
+// the proxy does not silently mutate unrelated client identifiers.
+func sanitizeResponsesWebsocketInputMessageIDs(rawArray string) (string, bool, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", false, nil
+	}
+
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return "", false, errUnmarshal
+	}
+
+	changed := false
+	for i := range items {
+		itemType := strings.TrimSpace(gjson.GetBytes(items[i], "type").String())
+		if itemType != "message" {
+			continue
+		}
+		messageID := strings.TrimSpace(gjson.GetBytes(items[i], "id").String())
+		normalizedID := normalizeResponsesWebsocketMessageID(messageID)
+		if normalizedID == "" || normalizedID == messageID {
+			continue
+		}
+
+		updatedItem, errSet := sjson.SetBytes(items[i], "id", normalizedID)
+		if errSet != nil {
+			return "", false, errSet
+		}
+		items[i] = updatedItem
+		changed = true
+	}
+
+	if !changed {
+		return rawArray, false, nil
+	}
+
+	out, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return "", false, errMarshal
+	}
+	return string(out), true, nil
+}
+
+// normalizeResponsesWebsocketMessageID upgrades the historical local replay
+// snapshot prefix to the current upstream-compatible `msg-` form.
+func normalizeResponsesWebsocketMessageID(messageID string) string {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return ""
+	}
+	if strings.HasPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix) {
+		return responsesWebsocketReplaySnapshotIDPrefix + strings.TrimPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix)
+	}
+	return messageID
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact
