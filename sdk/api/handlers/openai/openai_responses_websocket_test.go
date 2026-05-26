@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	requestlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -75,6 +76,10 @@ type websocketPinnedFailoverExecutor struct {
 	authIDs  []string
 	calls    map[string]int
 	payloads map[string][][]byte
+	failAuth string
+	failCall int
+	failCode int
+	failMsg  string
 }
 
 type websocketPinnedFailoverStatusError struct {
@@ -239,13 +244,30 @@ func (e *websocketPinnedFailoverExecutor) ExecuteStream(_ context.Context, auth 
 	e.calls[authID]++
 	call := e.calls[authID]
 	e.payloads[authID] = append(e.payloads[authID], bytes.Clone(req.Payload))
+	failAuth := strings.TrimSpace(e.failAuth)
+	failCall := e.failCall
+	failCode := e.failCode
+	failMsg := e.failMsg
 	e.mu.Unlock()
 
-	if authID == "auth-a" && call == 2 {
+	if failAuth == "" {
+		failAuth = "auth-a"
+	}
+	if failCall == 0 {
+		failCall = 2
+	}
+	if failCode == 0 {
+		failCode = http.StatusTooManyRequests
+	}
+	if strings.TrimSpace(failMsg) == "" {
+		failMsg = `{"error":{"message":"quota exhausted","type":"rate_limit_error","code":"rate_limit_exceeded"}}`
+	}
+
+	if authID == failAuth && call == failCall {
 		chunks := make(chan coreexecutor.StreamChunk, 1)
 		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
-			status: http.StatusTooManyRequests,
-			msg:    `{"error":{"message":"quota exhausted","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+			status: failCode,
+			msg:    failMsg,
 		}}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
@@ -660,6 +682,34 @@ func TestSetWebsocketTimelineBody(t *testing.T) {
 	}
 }
 
+func TestWebsocketTimelineLogFallsBackToMemoryWithoutSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	timelineLog := newWebsocketTimelineLog(true, nil)
+	timelineLog.BeginRequest()
+	timelineLog.Append("request", []byte(`{"type":"response.create"}`), ts)
+	timelineLog.SetContext(c)
+
+	value, exists := c.Get(wsTimelineBodyKey)
+	if !exists {
+		t.Fatalf("timeline body key not set")
+	}
+	bodyBytes, ok := value.([]byte)
+	if !ok {
+		t.Fatalf("timeline body key type mismatch")
+	}
+	got := string(bodyBytes)
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
+	}
+	if !strings.Contains(got, `{"type":"response.create"}`) {
+		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"
@@ -1044,14 +1094,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 			false,
 		)
@@ -1131,14 +1181,14 @@ func TestForwardResponsesWebsocketUsesStreamedOutputItemsWhenCompletedOutputEmpt
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		completedOutput, errMsg, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 			false,
 		)
@@ -1216,7 +1266,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 		close(data)
 		close(errCh)
 
-		var timelineLog strings.Builder
+		timelineLog := newInMemoryWebsocketTimelineLog()
 		if errClose := conn.Close(); errClose != nil {
 			serverErrCh <- errClose
 			return
@@ -1228,7 +1278,7 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			func(...interface{}) {},
 			data,
 			errCh,
-			&timelineLog,
+			timelineLog,
 			"session-1",
 			false,
 		)
@@ -1266,17 +1316,35 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	manager := coreauth.NewManager(nil, nil, nil)
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
+	logsDir := t.TempDir()
 
 	timelineCh := make(chan string, 1)
 	router := gin.New()
 	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		source, errSource := requestlogging.NewFileBodySourceInDir(logsDir, "websocket-timeline-test")
+		if errSource != nil {
+			timelineCh <- ""
+			return
+		}
+		c.Set(requestlogging.WebsocketTimelineSourceContextKey, source)
 		h.ResponsesWebsocket(c)
 		timeline := ""
 		if value, exists := c.Get(wsTimelineBodyKey); exists {
 			if body, ok := value.([]byte); ok {
 				timeline = string(body)
+			}
+		} else if value, exists := c.Get(requestlogging.WebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				body, _ := source.Bytes()
+				timeline = string(body)
+				_ = source.Cleanup()
+			}
+		}
+		if value, exists := c.Get(requestlogging.APIWebsocketTimelineSourceContextKey); exists {
+			if source, ok := value.(*requestlogging.FileBodySource); ok {
+				_ = source.Cleanup()
 			}
 		}
 		timelineCh <- timeline
@@ -1307,7 +1375,11 @@ func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	}
 }
 
-func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
+// TestResponsesWebsocketSurvivesCodexUpstreamDisconnect locks the recovery
+// contract for Codex auth failover. Upstream disconnect notifications must not
+// hard-close the downstream websocket because the handler needs the socket to
+// stay alive long enough to replay the failed turn on a replacement auth.
+func TestResponsesWebsocketSurvivesCodexUpstreamDisconnect(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketUpstreamDisconnectExecutor{subscribed: make(chan string, 1)}
@@ -1337,10 +1409,17 @@ func TestResponsesWebsocketClosesOnCodexUpstreamDisconnect(t *testing.T) {
 
 	executor.TriggerDisconnect(sessionID, errors.New("upstream disconnected"))
 
+	if err = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[]}`)); err != nil {
+		t.Fatalf("write websocket message after upstream disconnect: %v", err)
+	}
+
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err = conn.ReadMessage()
-	if err == nil {
-		t.Fatalf("expected downstream websocket to close after upstream disconnect")
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("expected downstream websocket to stay open after upstream disconnect: %v", err)
+	}
+	if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("payload type = %s, want %s: %s", got, wsEventTypeError, payload)
 	}
 }
 
@@ -1718,7 +1797,11 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 	}
 }
 
-func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
+// TestResponsesWebsocketRetriesSamePayloadAfterQuotaError proves auth rotation
+// is transparent to the client. The failed turn must succeed on a replacement
+// auth, and the replacement upstream request must receive full replay context
+// instead of the old previous_response_id chain.
+func TestResponsesWebsocketRetriesSamePayloadAfterQuotaError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
@@ -1774,9 +1857,8 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 	requests := []string{
 		`{"type":"response.create","model":"quota-model","input":[{"type":"message","id":"msg-1"}]}`,
 		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`,
-		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-3"}]}`,
 	}
-	wantTypes := []string{wsEventTypeCompleted, wsEventTypeError, wsEventTypeCompleted}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeCompleted}
 	for i := range requests {
 		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
 			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
@@ -1788,8 +1870,8 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
 			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wantTypes[i], payload)
 		}
-		if i == 1 && int(gjson.GetBytes(payload, "status").Int()) != http.StatusTooManyRequests {
-			t.Fatalf("quota payload status = %d, want %d: %s", gjson.GetBytes(payload, "status").Int(), http.StatusTooManyRequests, payload)
+		if i == 1 && gjson.GetBytes(payload, "response.id").String() != "resp-auth-b-1" {
+			t.Fatalf("failover response id = %s, want resp-auth-b-1: %s", gjson.GetBytes(payload, "response.id").String(), payload)
 		}
 	}
 
@@ -1806,8 +1888,92 @@ func TestResponsesWebsocketReleasesPinnedAuthAfterQuotaError(t *testing.T) {
 		t.Fatalf("previous_response_id leaked after auth failover: %s", authBPayload)
 	}
 	authBInput := gjson.GetBytes(authBPayload, "input").Raw
-	if !strings.Contains(authBInput, `"id":"msg-1"`) || !strings.Contains(authBInput, `"id":"msg-3"`) {
+	if !strings.Contains(authBInput, `"id":"msg-1"`) || !strings.Contains(authBInput, `"id":"msg-2"`) {
 		t.Fatalf("auth-b replay input missing expected transcript items: %s", authBInput)
+	}
+	if !strings.Contains(authBInput, `"id":"out-auth-a-1"`) {
+		t.Fatalf("auth-b replay input missing prior upstream output context: %s", authBInput)
+	}
+}
+
+// TestResponsesWebsocketRetriesSamePayloadAfterAuthUnavailableError proves the
+// same transparent replay path works when the pinned auth fails with a manager-
+// style unavailable error instead of a direct 429 quota response.
+func TestResponsesWebsocketRetriesSamePayloadAfterAuthUnavailableError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
+	executor := &websocketPinnedFailoverExecutor{
+		failCode: http.StatusServiceUnavailable,
+		failMsg:  `auth_unavailable: no auth available`,
+	}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+
+	authA := &coreauth.Auth{
+		ID:         "auth-a",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authA); err != nil {
+		t.Fatalf("Register auth A: %v", err)
+	}
+	authB := &coreauth.Auth{
+		ID:         "auth-b",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), authB); err != nil {
+		t.Fatalf("Register auth B: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(authA.ID, authA.Provider, []*registry.ModelInfo{{ID: "quota-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authB.ID, authB.Provider, []*registry.ModelInfo{{ID: "quota-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authA.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authB.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	requests := []string{
+		`{"type":"response.create","model":"quota-model","input":[{"type":"message","id":"msg-1"}]}`,
+		`{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`,
+	}
+	wantTypes := []string{wsEventTypeCompleted, wsEventTypeCompleted}
+	for i := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(requests[i])); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := gjson.GetBytes(payload, "type").String(); got != wantTypes[i] {
+			t.Fatalf("message %d payload type = %s, want %s: %s", i+1, got, wantTypes[i], payload)
+		}
+		if i == 1 && gjson.GetBytes(payload, "response.id").String() != "resp-auth-b-1" {
+			t.Fatalf("failover response id = %s, want resp-auth-b-1: %s", gjson.GetBytes(payload, "response.id").String(), payload)
+		}
 	}
 }
 
