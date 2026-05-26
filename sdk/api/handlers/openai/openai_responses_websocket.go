@@ -1255,13 +1255,17 @@ func sanitizeResponsesWebsocketInputMessageIDs(rawArray string) (string, bool, e
 	}
 
 	changed := false
+	seenMessageIDs := make(map[string]struct{}, len(items))
 	for i := range items {
 		itemType := strings.TrimSpace(gjson.GetBytes(items[i], "type").String())
 		if itemType != "message" {
 			continue
 		}
 		messageID := strings.TrimSpace(gjson.GetBytes(items[i], "id").String())
-		normalizedID := normalizeResponsesWebsocketMessageID(messageID)
+		normalizedID := normalizeResponsesWebsocketMessageID(messageID, seenMessageIDs)
+		if normalizedID != "" {
+			seenMessageIDs[normalizedID] = struct{}{}
+		}
 		if normalizedID == "" || normalizedID == messageID {
 			continue
 		}
@@ -1285,17 +1289,41 @@ func sanitizeResponsesWebsocketInputMessageIDs(rawArray string) (string, bool, e
 	return string(out), true, nil
 }
 
-// normalizeResponsesWebsocketMessageID upgrades the historical local replay
-// snapshot prefix to the current upstream-compatible `msg-` form.
-func normalizeResponsesWebsocketMessageID(messageID string) string {
+// normalizeResponsesWebsocketMessageID upgrades only proxy-owned legacy replay
+// snapshot IDs to the narrow upstream-safe `msg-*` form. This strips the old
+// proxy marker while preserving only characters Codex websocket accepts.
+//
+// When the legacy suffix would need lossy sanitization or would collide with an
+// existing message ID in the same payload, generate a fresh upstream-safe ID
+// instead of collapsing multiple replay snapshots onto the same `msg-*` value.
+func normalizeResponsesWebsocketMessageID(messageID string, seenMessageIDs map[string]struct{}) string {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
 		return ""
 	}
-	if strings.HasPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix) {
-		return responsesWebsocketReplaySnapshotIDPrefix + strings.TrimPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix)
+	if !strings.HasPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix) {
+		return messageID
 	}
-	return messageID
+
+	legacySuffix := strings.TrimPrefix(messageID, responsesWebsocketReplaySnapshotLegacyIDPrefix)
+	normalizedID := buildResponsesWebsocketReplayMessageID(legacySuffix)
+
+	// Reuse the readable legacy suffix only when it is already upstream-safe.
+	// If sanitization had to drop characters, mint a fresh ID so two distinct
+	// legacy snapshot markers cannot collapse to the same normalized value.
+	if normalizedID != responsesWebsocketReplaySnapshotIDPrefix+legacySuffix {
+		normalizedID = buildResponsesWebsocketReplayMessageID(uuid.NewString())
+	}
+
+	// Avoid collisions with earlier message IDs already present in the same
+	// upstream payload. This keeps replay snapshots unique even when a clean
+	// legacy suffix matches a native `msg-*` identifier.
+	for {
+		if _, exists := seenMessageIDs[normalizedID]; !exists {
+			return normalizedID
+		}
+		normalizedID = buildResponsesWebsocketReplayMessageID(uuid.NewString())
+	}
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact

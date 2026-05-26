@@ -31,11 +31,10 @@ const (
 	// responsesWebsocketReplaySnapshotIDPrefix marks synthetic local snapshot
 	// messages inserted by the proxy during failover replay compaction.
 	//
-	// Codex websocket upstream now validates message IDs and rejects synthetic
-	// replay snapshots unless they look like normal `message` IDs with a `msg`
-	// prefix. Keep the proxy-specific suffix for local diagnosability while
-	// satisfying upstream's strict ID-prefix validator.
-	responsesWebsocketReplaySnapshotIDPrefix = "msg-proxy-snapshot-"
+	// Upstream Codex websocket validation now rejects proxy-branded snapshot IDs
+	// such as `msg-proxy-snapshot-*`. Keep the upstream-facing identifier plain
+	// and indistinguishable from native message IDs.
+	responsesWebsocketReplaySnapshotIDPrefix = "msg-"
 	// responsesWebsocketReplaySummaryMaxChars bounds the human-readable snapshot
 	// summary that replaces older transcript history during local compaction.
 	responsesWebsocketReplaySummaryMaxChars = 2048
@@ -55,6 +54,38 @@ var responsesWebsocketFailoverLimiter = make(chan struct{}, responsesWebsocketFa
 var responsesWebsocketFailoverAcquire = defaultResponsesWebsocketFailoverAcquire
 var responsesWebsocketFailoverSleep = sleepResponsesWebsocketFailoverDelay
 var responsesWebsocketFailoverJitter = jitterResponsesWebsocketFailoverDelay
+
+// buildResponsesWebsocketReplayMessageID normalizes proxy-managed replay IDs to
+// the narrow upstream-safe `msg-*` form. Keep only letters, numbers,
+// underscores, and dashes in the suffix because Codex websocket rejects
+// replay IDs outside that visible character set and may also reject
+// proxy-branded marker strings even when they are otherwise ASCII-safe.
+func buildResponsesWebsocketReplayMessageID(seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		seed = uuid.NewString()
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(responsesWebsocketReplaySnapshotIDPrefix) + len(seed))
+	builder.WriteString(responsesWebsocketReplaySnapshotIDPrefix)
+	for _, r := range seed {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '_' || r == '-':
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == len(responsesWebsocketReplaySnapshotIDPrefix) {
+		builder.WriteString(uuid.NewString())
+	}
+	return builder.String()
+}
 
 // responsesWebsocketSessionState keeps the per-downstream websocket failover
 // guards: denied auth IDs and retry-streak backoff state.
@@ -260,6 +291,10 @@ func compactResponsesWebsocketReplay(rawArray string) (string, bool) {
 	return "", false
 }
 
+// buildResponsesWebsocketReplaySnapshotItem collapses older replay history into
+// one synthetic assistant message. The upstream-facing `id` must stay in the
+// plain `msg-*` namespace because Codex websocket now validates message IDs and
+// rejects proxy-specific marker suffixes during replay.
 func buildResponsesWebsocketReplaySnapshotItem(items []json.RawMessage) (json.RawMessage, bool) {
 	if len(items) == 0 {
 		return nil, false
@@ -270,7 +305,7 @@ func buildResponsesWebsocketReplaySnapshotItem(items []json.RawMessage) (json.Ra
 	}
 	item := map[string]any{
 		"type": "message",
-		"id":   responsesWebsocketReplaySnapshotIDPrefix + uuid.NewString(),
+		"id":   buildResponsesWebsocketReplayMessageID(uuid.NewString()),
 		"role": "assistant",
 		"content": []map[string]string{
 			{
