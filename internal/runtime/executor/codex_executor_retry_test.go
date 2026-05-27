@@ -142,6 +142,31 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 }
 
+// TestNewCodexStatusErrPreservesUpstreamTokenInvalidatedCode ensures the
+// normalized auth_unavailable payload still carries the exact upstream code
+// needed by auth-purge logic.
+func TestNewCodexStatusErrPreservesUpstreamTokenInvalidatedCode(t *testing.T) {
+	body := []byte(`{"error":{"message":"Your authentication token has been invalidated. Please try signing in again.","type":"invalid_request_error","code":"token_invalidated"}}`)
+
+	err := newCodexStatusErr(http.StatusUnauthorized, body)
+
+	var payload struct {
+		Error struct {
+			Code         string `json:"code"`
+			UpstreamCode string `json:"upstream_code"`
+		} `json:"error"`
+	}
+	if errJSON := json.Unmarshal([]byte(err.Error()), &payload); errJSON != nil {
+		t.Fatalf("error body is not valid JSON: %v; body=%s", errJSON, err.Error())
+	}
+	if payload.Error.Code != "auth_unavailable" {
+		t.Fatalf("error.code = %q, want %q; body=%s", payload.Error.Code, "auth_unavailable", err.Error())
+	}
+	if payload.Error.UpstreamCode != "token_invalidated" {
+		t.Fatalf("error.upstream_code = %q, want %q; body=%s", payload.Error.UpstreamCode, "token_invalidated", err.Error())
+	}
+}
+
 func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode string) {
 	t.Helper()
 

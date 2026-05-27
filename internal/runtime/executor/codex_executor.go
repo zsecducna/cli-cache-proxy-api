@@ -977,6 +977,13 @@ func classifyCodexStatusError(statusCode int, body []byte) []byte {
 	out, _ = sjson.SetBytes(out, "error.message", message)
 	out, _ = sjson.SetBytes(out, "error.type", errType)
 	out, _ = sjson.SetBytes(out, "error.code", code)
+	// Preserve the exact upstream code alongside the normalized proxy code so
+	// auth-management policies can distinguish hard-invalid credentials such as
+	// token_invalidated from generic auth_unavailable routing behavior.
+	upstreamCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	if upstreamCode != "" && upstreamCode != code {
+		out, _ = sjson.SetBytes(out, "error.upstream_code", upstreamCode)
+	}
 	return out
 }
 

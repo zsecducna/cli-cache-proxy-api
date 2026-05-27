@@ -72,6 +72,9 @@ const (
 
 	quotaSelectionRefreshStaleAfter = 15 * time.Minute
 	sessionQuotaRefreshTurnLimit    = 20
+	// tokenInvalidatedErrorCode is the exact upstream error.code that means the
+	// credential itself is no longer usable and must be purged instead of cooled down.
+	tokenInvalidatedErrorCode = "token_invalidated"
 )
 
 type sessionQuotaState struct {
@@ -303,6 +306,72 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
 	m.scheduler.upsertAuth(snapshot)
+}
+
+// purgeAuthRuntimeState removes a hard-invalid auth from all in-memory caches so
+// no selector, session cache, or auto-refresh loop can keep reusing it.
+func (m *Manager) purgeAuthRuntimeState(authID string) {
+	authID = strings.TrimSpace(authID)
+	if m == nil || authID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	delete(m.auths, authID)
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(authID)
+	}
+	for sessionID, sessionAuths := range m.homeRuntimeAuths {
+		delete(sessionAuths, authID)
+		if len(sessionAuths) == 0 {
+			delete(m.homeRuntimeAuths, sessionID)
+		}
+	}
+	m.mu.Unlock()
+
+	m.sessionMu.Lock()
+	for key, state := range m.sessionQuota {
+		if state == nil || state.authID != authID {
+			continue
+		}
+		delete(m.sessionQuota, key)
+		for executionSessionID, keys := range m.executionSessions {
+			delete(keys, key)
+			if len(keys) == 0 {
+				delete(m.executionSessions, executionSessionID)
+			}
+		}
+	}
+	m.sessionMu.Unlock()
+
+	registry.GetGlobalRegistry().UnregisterClient(authID)
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.queueRefreshReschedule(authID)
+}
+
+// purgeAuthIfTokenInvalidated enforces the exact-match hard-delete policy the
+// user requested when upstream explicitly says the credential was invalidated.
+func (m *Manager) purgeAuthIfTokenInvalidated(ctx context.Context, authID, failureSource string, err error) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || !shouldPurgeAuthForError(err) {
+		return false
+	}
+	if ctx == nil || ctx.Err() != nil {
+		ctx = context.Background()
+	}
+
+	if m.store != nil {
+		// Delete from persistence first so a failed delete cannot leave a stale
+		// auth on disk/pgstore that silently reappears on the next restart.
+		if errDelete := m.store.Delete(ctx, authID); errDelete != nil {
+			log.WithError(errDelete).Warnf("failed to purge auth %s after %s returned %s", authID, failureSource, tokenInvalidatedErrorCode)
+			return false
+		}
+	}
+
+	m.purgeAuthRuntimeState(authID)
+	log.Warnf("purged auth %s after %s returned %s", authID, failureSource, tokenInvalidatedErrorCode)
+	return true
 }
 
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
@@ -963,6 +1032,8 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				// Streaming chunk failures can arrive after bootstrap, so purge here too.
+				m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "stream chunk execution", chunk.Err)
 			}
 			if !forward {
 				return false
@@ -1022,6 +1093,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			// Bootstrap-time token_invalidated should evict the auth immediately.
+			m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "stream execution", errStream)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -1043,6 +1116,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
+				// Invalidated creds should be purged before returning the bootstrap error.
+				m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "stream bootstrap", bootstrapErr)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
@@ -1054,6 +1129,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
+				// Invalidated creds should be purged before the next model retry.
+				m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "stream bootstrap", bootstrapErr)
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				continue
@@ -1065,6 +1142,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
+			// Invalidated creds should be purged before surfacing the bootstrap failure.
+			m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "stream bootstrap", bootstrapErr)
 			discardStreamChunks(streamResult.Chunks)
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
@@ -1525,6 +1604,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			// Prepare-time token_invalidated means this auth should never be reused.
+			m.purgeAuthIfTokenInvalidated(execCtx, auth.ID, "request auth preparation", errPrepare)
 			lastErr = errPrepare
 			continue
 		}
@@ -1547,6 +1628,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				// Execute-time token_invalidated must evict the auth before the next pick.
+				m.purgeAuthIfTokenInvalidated(execCtx, auth.ID, "request execution", errExec)
 				if isRequestInvalidError(errExec) {
 					authErr = errExec
 					break
@@ -1629,6 +1712,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			m.MarkResult(execCtx, result)
+			// Prepare-time token_invalidated means this auth should never be reused.
+			m.purgeAuthIfTokenInvalidated(execCtx, auth.ID, "request auth preparation", errPrepare)
 			lastErr = errPrepare
 			continue
 		}
@@ -1651,6 +1736,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				// Count-token failures must also evict hard-invalid credentials.
+				m.purgeAuthIfTokenInvalidated(execCtx, auth.ID, "count-tokens execution", errExec)
 				if isRequestInvalidError(errExec) {
 					authErr = errExec
 					break
@@ -3057,6 +3144,50 @@ func refreshErrorFromError(err error) *Error {
 		authErr.Retryable = false
 	}
 	return authErr
+}
+
+// exactUpstreamErrorCode extracts the raw upstream error.code from structured
+// JSON payloads, preferring error.upstream_code when the proxy normalized the
+// public-facing error.code for routing compatibility.
+func exactUpstreamErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if code := exactUpstreamErrorCodeFromMessage(authErr.Message); code != "" {
+			return code
+		}
+	}
+	return exactUpstreamErrorCodeFromMessage(err.Error())
+}
+
+// exactUpstreamErrorCodeFromMessage only returns a code when the payload is
+// structured JSON; plain-text failures intentionally do not match purge policy.
+func exactUpstreamErrorCodeFromMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	var payload struct {
+		Error struct {
+			Code         string `json:"code"`
+			UpstreamCode string `json:"upstream_code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(message), &payload); err != nil {
+		return ""
+	}
+	if code := strings.ToLower(strings.TrimSpace(payload.Error.UpstreamCode)); code != "" {
+		return code
+	}
+	return strings.ToLower(strings.TrimSpace(payload.Error.Code))
+}
+
+// shouldPurgeAuthForError keeps destructive auth removal pinned to the exact
+// upstream token_invalidated code the user asked for, and nothing broader.
+func shouldPurgeAuthForError(err error) bool {
+	return exactUpstreamErrorCode(err) == tokenInvalidatedErrorCode
 }
 
 func retryAfterFromError(err error) *time.Duration {
@@ -4698,6 +4829,11 @@ func (m *Manager) refreshQuotaUsageAuth(ctx context.Context, auth *Auth, now tim
 	updated, err := refresher.RefreshQuotaUsage(refreshCtx, auth.Clone())
 	if err != nil {
 		log.WithError(err).Debugf("quota/usage refresh failed for %s auth %s", auth.Provider, auth.ID)
+		// token_invalidated means the credential itself is dead, so purge it
+		// instead of persisting another failed quota refresh snapshot.
+		if m.purgeAuthIfTokenInvalidated(ctx, auth.ID, "quota/usage refresh", err) {
+			return
+		}
 		m.markQuotaUsageRefreshAttempt(ctx, auth, now, err)
 		return
 	}
@@ -5016,6 +5152,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		// Refresh-time token_invalidated is a hard invalidation, not a cooldown.
+		if m.purgeAuthIfTokenInvalidated(ctx, id, "auth refresh", err) {
+			return
+		}
 		unauthorized := isUnauthorizedError(err)
 		shouldReschedule := false
 		m.mu.Lock()
