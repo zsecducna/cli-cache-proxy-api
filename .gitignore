@@ -13,6 +13,11 @@ conv/*
 temp/*
 refs/*
 
+# Local code index, run logs, and cache stats (never committed)
+.codegraph/
+*.log
+stats/
+
 # Storage backends
 pgstore/*
 gitstore/*

@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -2600,6 +2601,181 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+// isValidAWSRegion reports whether s is a syntactically valid AWS region id
+// (lowercase letters, digits, and hyphens only, non-empty). It guards against host
+// injection when the region is interpolated into the AWS OIDC endpoint URL.
+func isValidAWSRegion(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// RequestKiroToken starts a Kiro (AWS CodeWhisperer) OAuth login from the WebUI.
+//
+// Kiro uses the AWS SSO OIDC device authorization flow (RFC 8628), not the
+// redirect-callback flow other providers use. The login method is derived from the
+// query parameters: an "idc_start_url" selects IAM Identity Center ("idc"), otherwise
+// the default AWS Builder ID flow ("builder-id"). The synchronous phase registers an
+// OIDC client and requests a device + user code; the returned verification URL and user
+// code are sent to the browser. A background goroutine then polls the token endpoint
+// until the user authorizes (or the device code expires) and persists the credential.
+func (h *Handler) RequestKiroToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Kiro authentication...")
+
+	// Resolve the region, falling back to the package default when not supplied.
+	region := strings.TrimSpace(c.Query("region"))
+	if region == "" {
+		region = kiro.DefaultRegion
+	}
+	// Validate the region before it is interpolated into the OIDC endpoint host
+	// (https://oidc.{region}.amazonaws.com/...). Without this, a value like
+	// "evil.com#" would redirect client registration and token polling — and thus
+	// the freshly minted OIDC client credentials — to an attacker-controlled host.
+	if !isValidAWSRegion(region) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid region"})
+		return
+	}
+
+	// Derive the login method and start URL from the IDC start URL parameter.
+	method := "builder-id"
+	startURL := kiro.BuilderIDStartURL
+	if idcStartURL := strings.TrimSpace(c.Query("idc_start_url")); idcStartURL != "" {
+		method = "idc"
+		startURL = idcStartURL
+	}
+
+	kiroAuth := kiro.NewKiroAuth(h.cfg)
+
+	// Register a public OIDC client, then request the device + user code pair. Both
+	// calls are bounded by the credential-phase HTTP timeout, so they run synchronously
+	// before responding to the browser.
+	clientID, clientSecret, errRegister := kiroAuth.RegisterClient(ctx, region)
+	if errRegister != nil {
+		log.Errorf("Failed to register Kiro OIDC client: %v", errRegister)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to register kiro client"})
+		return
+	}
+
+	deviceCode, errDevice := kiroAuth.StartDeviceAuthorization(ctx, clientID, clientSecret, startURL, region)
+	if errDevice != nil {
+		log.Errorf("Failed to start Kiro device authorization: %v", errDevice)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	// Prefer the complete verification URL (code pre-filled) when present.
+	authURL := deviceCode.VerificationURIComplete
+	if authURL == "" {
+		authURL = deviceCode.VerificationURI
+	}
+
+	state := fmt.Sprintf("kiro-%d", time.Now().UnixNano())
+	RegisterOAuthSession(state, "kiro")
+
+	go func() {
+		fmt.Println("Waiting for Kiro authorization...")
+		// Poll AWS SSO OIDC until the user authorizes or the device code expires.
+		tokenData, errPoll := kiroAuth.PollForToken(ctx, clientID, clientSecret, deviceCode.DeviceCode, region, deviceCode)
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Kiro authentication failed: %v\n", errPoll)
+			return
+		}
+
+		// Compute the absolute expiry timestamp from the token's expiresAt.
+		expired := ""
+		if tokenData.ExpiresAt > 0 {
+			expired = time.Unix(tokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		}
+		email := kiro.ExtractEmailFromJWT(tokenData.AccessToken)
+
+		// Persist the device-flow client credentials so the token can be refreshed via
+		// the AWS OIDC branch later. The profile ARN is left empty here; the executor
+		// resolves it lazily via ListAvailableProfiles on first use.
+		storage := &kiro.KiroTokenStorage{
+			AccessToken:  tokenData.AccessToken,
+			RefreshToken: tokenData.RefreshToken,
+			Expired:      expired,
+			ProfileArn:   tokenData.ProfileArn,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			Region:       region,
+			AuthMethod:   method,
+			StartURL:     startURL,
+			Email:        email,
+			Type:         "kiro",
+		}
+
+		// Metadata mirrors the storage fields; the executor reads credentials from here.
+		metadata := map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"region":        region,
+			"auth_method":   method,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		if expired != "" {
+			metadata["expired"] = expired
+		}
+		if tokenData.ProfileArn != "" {
+			metadata["profile_arn"] = tokenData.ProfileArn
+		}
+		if clientID != "" {
+			metadata["client_id"] = clientID
+		}
+		if clientSecret != "" {
+			metadata["client_secret"] = clientSecret
+		}
+		if startURL != "" {
+			metadata["start_url"] = startURL
+		}
+		if email != "" {
+			metadata["email"] = email
+		}
+
+		label := "Kiro User"
+		if email != "" {
+			label = email
+		}
+
+		fileName := fmt.Sprintf("kiro-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "kiro",
+			FileName: fileName,
+			Label:    label,
+			Storage:  storage,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Kiro authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Kiro authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("kiro")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "user_code": deviceCode.UserCode})
 }
 
 type projectSelectionRequiredError struct{}

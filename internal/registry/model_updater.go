@@ -27,6 +27,21 @@ var modelsURLs = []string{
 //go:embed models/models.json
 var embeddedModelsJSON []byte
 
+// embeddedKiroModels holds the Kiro models compiled into the binary via embeddedModelsJSON.
+// Kiro is absent from the remote catalog, so these are injected as builtins (see
+// WithKiroBuiltins) to keep Kiro models available after a remote refresh replaces the
+// live catalog.
+var embeddedKiroModels = parseEmbeddedKiroModels()
+
+// parseEmbeddedKiroModels extracts the Kiro section from the compiled-in models.json.
+func parseEmbeddedKiroModels() []*ModelInfo {
+	var data staticModelsJSON
+	if err := json.Unmarshal(embeddedModelsJSON, &data); err != nil {
+		return nil
+	}
+	return data.Kiro
+}
+
 type modelStore struct {
 	mu   sync.RWMutex
 	data *staticModelsJSON
@@ -214,6 +229,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"kiro", oldData.Kiro, newData.Kiro},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 	}
@@ -335,6 +351,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
+		{name: "kiro", models: data.Kiro},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 	}

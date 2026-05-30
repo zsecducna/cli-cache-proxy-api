@@ -51,6 +51,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
+- Amazon Kiro (AWS CodeWhisperer) support via OAuth login (`--kiro-login`): free Claude/GLM/MiniMax/Qwen/DeepSeek models
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling / tool support

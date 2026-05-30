@@ -1987,6 +1987,59 @@
       }
     }
   ],
+  "kiro": [
+    {
+      "id": "claude-opus-4.8",
+      "object": "model",
+      "created": 1740787200,
+      "owned_by": "anthropic",
+      "type": "kiro",
+      "display_name": "Claude Opus 4.8 (Kiro)",
+      "description": "Claude Opus 4.8 via Amazon Kiro (AWS CodeWhisperer)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4.6",
+      "object": "model",
+      "created": 1740787200,
+      "owned_by": "anthropic",
+      "type": "kiro",
+      "display_name": "Claude Sonnet 4.6 (Kiro)",
+      "description": "Claude Sonnet 4.6 via Amazon Kiro (AWS CodeWhisperer)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "object": "model",
+      "created": 1740787200,
+      "owned_by": "anthropic",
+      "type": "kiro",
+      "display_name": "Claude Haiku 4.5 (Kiro)",
+      "description": "Claude Haiku 4.5 via Amazon Kiro (AWS CodeWhisperer)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

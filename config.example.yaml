@@ -35,6 +35,13 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Kiro (Amazon Kiro / AWS CodeWhisperer) is OAuth/refresh-token based and needs no config
+# here. Authenticate with one of:
+#   ./cli-proxy-api --kiro-login                       # AWS Builder ID device flow (default)
+#   ./cli-proxy-api --kiro-login --kiro-idc-start-url <url> --kiro-region <region>  # IAM Identity Center
+#   ./cli-proxy-api --kiro-login --kiro-import <refresh-token>   # import (empty auto-detects ~/.aws/sso/cache)
+# Credentials are written to auth-dir as kiro-*.json (type: kiro).
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
@@ -327,7 +334,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, kiro, xai.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps

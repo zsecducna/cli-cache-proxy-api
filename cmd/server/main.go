@@ -67,6 +67,10 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
+	var kiroLogin bool
+	var kiroImport string
+	var kiroIDCStartURL string
+	var kiroRegion string
 	var xaiLogin bool
 	var projectID string
 	var vertexImport string
@@ -88,6 +92,10 @@ func main() {
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro (AWS CodeWhisperer) using OAuth")
+	flag.StringVar(&kiroImport, "kiro-import", "", "Import a Kiro refresh token (empty value auto-detects from ~/.aws/sso/cache)")
+	flag.StringVar(&kiroIDCStartURL, "kiro-idc-start-url", "", "Kiro IAM Identity Center start URL (enables the IDC login method)")
+	flag.StringVar(&kiroRegion, "kiro-region", "", "AWS region for Kiro OIDC endpoints (defaults to us-east-1)")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
@@ -561,6 +569,8 @@ func main() {
 		cmd.DoClaudeLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
+	} else if kiroLogin {
+		cmd.DoKiroLogin(cfg, options, kiroIDCStartURL, kiroRegion, kiroImport)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
 	} else {

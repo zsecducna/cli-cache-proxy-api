@@ -19,6 +19,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":           nil,
 	"antigravity":     nil,
 	"kimi":            nil,
+	"kiro":            nil,
 	"iflow":           nil,
 }
 
@@ -329,6 +330,9 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractOpenAIResponsesConfig(body)
 	case "kimi":
 		// Kimi uses OpenAI-compatible reasoning_effort format
+		return extractOpenAIConfig(body)
+	case "kiro":
+		// Kiro pivots through OpenAI, so thinking arrives as reasoning_effort.
 		return extractOpenAIConfig(body)
 	default:
 		return ThinkingConfig{}
