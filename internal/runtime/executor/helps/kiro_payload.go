@@ -149,6 +149,14 @@ func BuildKiroPayloadFromClaude(claudeBody []byte, upstreamModel, profileArn str
 // assembleKiroPayload turns normalized turns + tool specs into the final CodeWhisperer
 // conversationState body shared by the OpenAI and Anthropic request builders.
 func assembleKiroPayload(turns []kiroTurn, tools []kiroTool, upstreamModel, profileArn string, agentic, thinkingEnabled bool, thinkingBudget int, infer *kiroInferenceConfig) ([]byte, error) {
+	// Kiro rejects toolUse/toolResult blocks when no tools are declared ("toolConfig
+	// field must be defined"). Clients (e.g. Claude Code compaction or sub-requests) may
+	// replay tool history without re-sending tools, so fold that tool content into plain
+	// text when the request carries no tools.
+	if len(tools) == 0 {
+		turns = stripToolContentFromTurns(turns)
+	}
+
 	// 1. Collapse consecutive same-role turns to satisfy Kiro's strict alternation.
 	turns = collapseTurns(turns)
 
@@ -461,6 +469,29 @@ func parseOpenAITurns(messages gjson.Result, _ string) []kiroTurn {
 			turn.images = images
 		}
 		turns = append(turns, turn)
+	}
+	return turns
+}
+
+// stripToolContentFromTurns converts assistant tool_use calls and user tool_result
+// outputs into plain text and clears the structured tool fields. Kiro requires a
+// toolConfig (declared tools) whenever toolUse/toolResult blocks are present, so when a
+// request carries no tools this preserves the conversation context as text instead.
+func stripToolContentFromTurns(turns []kiroTurn) []kiroTurn {
+	for i := range turns {
+		t := &turns[i]
+		for _, tu := range t.toolUses {
+			t.text = append(t.text, "[Tool: "+tu.Name+"]\n"+string(tu.Input))
+		}
+		for _, tr := range t.toolResults {
+			parts := make([]string, 0, len(tr.Content))
+			for _, c := range tr.Content {
+				parts = append(parts, c.Text)
+			}
+			t.text = append(t.text, "[Tool Result]\n"+strings.Join(parts, "\n"))
+		}
+		t.toolUses = nil
+		t.toolResults = nil
 	}
 	return turns
 }

@@ -72,7 +72,7 @@ func TestBuildKiroPayload_ToolsNormalized(t *testing.T) {
 // TestBuildKiroPayload_ToolCallsAndResults verifies assistant tool calls map to toolUses
 // and tool messages map to the trailing message's toolResults.
 func TestBuildKiroPayload_ToolCallsAndResults(t *testing.T) {
-	body := []byte(`{"messages":[
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"foo","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}}],"messages":[
 		{"role":"user","content":"run"},
 		{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"foo","arguments":"{\"a\":1}"}}]},
 		{"role":"tool","tool_call_id":"t1","content":"result"}
@@ -93,6 +93,31 @@ func TestBuildKiroPayload_ToolCallsAndResults(t *testing.T) {
 	}
 	if tu.Get("input.a").Int() != 1 {
 		t.Fatalf("toolUses input not parsed to object: %s", tu.Raw)
+	}
+}
+
+// TestBuildKiroPayload_StripsToolContentWhenNoTools verifies that, when no tools are
+// declared, tool_calls/tool results are folded into plain text (Kiro rejects toolUse/
+// toolResult blocks without a toolConfig).
+func TestBuildKiroPayload_StripsToolContentWhenNoTools(t *testing.T) {
+	body := []byte(`{"messages":[
+		{"role":"user","content":"run"},
+		{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"foo","arguments":"{\"a\":1}"}}]},
+		{"role":"tool","tool_call_id":"t1","content":"result"},
+		{"role":"user","content":"summarize"}
+	]}`)
+	out, err := BuildKiroPayload(body, "claude-sonnet-4.5", "", false, false, 0)
+	if err != nil {
+		t.Fatalf("BuildKiroPayload() error = %v", err)
+	}
+	root := gjson.ParseBytes(out)
+	// No structured tool blocks must remain anywhere in the payload.
+	if strings.Contains(string(out), `"toolResults"`) || strings.Contains(string(out), `"toolUses"`) {
+		t.Fatalf("tool blocks should be stripped when no tools declared: %s", out)
+	}
+	// The tool context must survive as text in history.
+	if h := root.Get("conversationState.history.1.assistantResponseMessage.content").String(); !strings.Contains(h, "[Tool: foo]") {
+		t.Fatalf("assistant tool_use not folded to text: %q", h)
 	}
 }
 
