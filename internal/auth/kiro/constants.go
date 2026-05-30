@@ -80,16 +80,6 @@ func OIDCTokenURL(region string) string {
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com/token", normalizeRegion(region))
 }
 
-// IDCBrowserURL returns the IAM Identity Center sign-in URL the proxy opens in the
-// browser for the "idc" login method. Per the documented IDC flow it is the literal
-// start URL with the region and auth_method appended as parameters, e.g.
-// "https://d-90660ceab3.awsapps.com/start&region=us-east-1&auth_method=idc". The region
-// is normalized so an empty value falls back to DefaultRegion. The AWS device user_code
-// is not embedded here; it is printed separately for the user to enter.
-func IDCBrowserURL(startURL, region string) string {
-	return fmt.Sprintf("%s&region=%s&auth_method=idc", strings.TrimSpace(startURL), normalizeRegion(region))
-}
-
 // GenerateEndpoint returns the Kiro runtime streaming generate endpoint for a region.
 // Current Kiro models are served from runtime.{region}.kiro.dev (the legacy Amazon Q
 // codewhisperer host is decommissioned for recent models); this endpoint requires a

@@ -136,7 +136,7 @@ func (e *KiroClaudeStreamEncoder) convert(f kiroFrame) [][]byte {
 			s, _ = sjson.SetBytes(s, "content_block.name", name)
 			out = append(out, sseEvent("content_block_start", s))
 		}
-		if frag := toolInputFragment(root.Get("input")); frag != "" {
+		if frag := toolInputFragment(root.Get("input")); frag != "" && e.curKind == "tool" {
 			e.completionChars += len(frag)
 			d := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 			d, _ = sjson.SetBytes(d, "index", e.curIndex)

@@ -95,18 +95,13 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 		return nil, fmt.Errorf("kiro: failed to start device authorization: %w", err)
 	}
 
-	// Builder ID opens the AWS-returned verification URL, which embeds the user_code for
-	// one-click approval (e.g. https://view.awsapps.com/start/#/device?user_code=XXXX).
-	verificationURL := deviceCode.VerificationURIComplete
-	if verificationURL == "" {
-		verificationURL = deviceCode.VerificationURI
-	}
-	// IDC instead opens the literal Identity Center start URL with region + auth_method
-	// appended (per the documented IDC flow); the user_code is not embedded there, so it
-	// is printed separately below for the user to enter manually.
-	browserURL := verificationURL
-	if method == "idc" {
-		browserURL = kiro.IDCBrowserURL(startURL, region)
+	// AWS returns the verification URL with the user_code embedded for one-click approval.
+	// This holds for BOTH methods: Builder ID -> https://view.awsapps.com/start/#/device?user_code=XXXX
+	// and IDC -> {startURL}/#/device?user_code=XXXX. Prefer the complete form; fall back to
+	// the bare verification URI (user enters the code, printed below) only if AWS omits it.
+	browserURL := deviceCode.VerificationURIComplete
+	if browserURL == "" {
+		browserURL = deviceCode.VerificationURI
 	}
 	fmt.Printf("\nTo authenticate, please visit:\n%s\n\n", browserURL)
 	if deviceCode.UserCode != "" {
@@ -126,6 +121,19 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 		return nil, fmt.Errorf("kiro: %w", err)
 	}
 
+	// The runtime generate endpoint requires a profileArn. The device-code token exchange
+	// does not return one (only the social refresh path does), so resolve it once here and
+	// persist it in the bundle. Without this the executor must re-resolve it on every
+	// request (it only mutates a per-request auth clone, so its resolution never persists).
+	profileArn := tokenData.ProfileArn
+	if profileArn == "" {
+		if arn, errArn := authSvc.ListAvailableProfiles(ctx, tokenData.AccessToken, region); errArn != nil {
+			log.Warnf("kiro: failed to resolve profile ARN at login: %v", errArn)
+		} else {
+			profileArn = arn
+		}
+	}
+
 	return &kiro.KiroAuthBundle{
 		TokenData:    tokenData,
 		ClientID:     clientID,
@@ -133,7 +141,7 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 		Region:       region,
 		AuthMethod:   method,
 		StartURL:     startURL,
-		ProfileArn:   tokenData.ProfileArn,
+		ProfileArn:   profileArn,
 		Email:        kiro.ExtractEmailFromJWT(tokenData.AccessToken),
 	}, nil
 }

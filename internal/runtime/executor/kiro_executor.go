@@ -160,8 +160,10 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 	upstreamModel, agentic, thinkingSuffix := kiroauth.ResolveKiroModel(baseModel)
 
 	creds := kiroCreds(auth)
-	// The Kiro runtime generate endpoint requires a profileArn. IDC/device logins do not
-	// capture one, so resolve it via ListAvailableProfiles and persist it for reuse.
+	// The Kiro runtime generate endpoint requires a profileArn. Logins now resolve and
+	// persist it, but as a fallback (older credentials, or login-time resolution failure)
+	// resolve it here. This writes only the per-request auth clone, so it does not persist
+	// across requests — treat it as best-effort recovery, not a cache.
 	if creds.profileArn == "" {
 		arn, freshToken := e.resolveKiroProfileArn(ctx, auth, creds)
 		if arn != "" {
@@ -244,11 +246,13 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 	}, nil
 }
 
-// resolveKiroProfileArn resolves and persists the credential's CodeWhisperer profileArn
-// (required by the runtime generate endpoint). CodeWhisperer returns an EMPTY profile list
-// for an expired access token, so on an empty/failed result it refreshes the token once and
-// retries; the refreshed access token (if any) is returned so the caller can use it for the
-// generate request too. Returns (arn, freshAccessToken); either may be empty.
+// resolveKiroProfileArn resolves the credential's CodeWhisperer profileArn (required by the
+// runtime generate endpoint). CodeWhisperer returns an EMPTY profile list for an expired
+// access token, so on an empty/failed result it refreshes the token once and retries; the
+// refreshed access token (if any) is returned so the caller can use it for the generate
+// request too. The arn is written to auth.Metadata, but since the executor receives a
+// per-request clone this does NOT persist across requests. Returns (arn, freshAccessToken);
+// either may be empty.
 func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxyauth.Auth, creds kiroCredentials) (string, string) {
 	proxyURL := ""
 	if auth != nil {

@@ -2704,14 +2704,26 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		}
 		email := kiro.ExtractEmailFromJWT(tokenData.AccessToken)
 
+		// The runtime generate endpoint requires a profileArn. The device-code token
+		// exchange does not return one (only the social refresh path does), so resolve it
+		// once here and persist it. Without this the executor must re-resolve it on every
+		// request (it only mutates a per-request auth clone, so the resolution never sticks).
+		profileArn := tokenData.ProfileArn
+		if profileArn == "" {
+			if arn, errArn := kiroAuth.ListAvailableProfiles(ctx, tokenData.AccessToken, region); errArn != nil {
+				log.Warnf("kiro: failed to resolve profile ARN at login: %v", errArn)
+			} else {
+				profileArn = arn
+			}
+		}
+
 		// Persist the device-flow client credentials so the token can be refreshed via
-		// the AWS OIDC branch later. The profile ARN is left empty here; the executor
-		// resolves it lazily via ListAvailableProfiles on first use.
+		// the AWS OIDC branch later.
 		storage := &kiro.KiroTokenStorage{
 			AccessToken:  tokenData.AccessToken,
 			RefreshToken: tokenData.RefreshToken,
 			Expired:      expired,
-			ProfileArn:   tokenData.ProfileArn,
+			ProfileArn:   profileArn,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
 			Region:       region,
@@ -2733,8 +2745,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		if expired != "" {
 			metadata["expired"] = expired
 		}
-		if tokenData.ProfileArn != "" {
-			metadata["profile_arn"] = tokenData.ProfileArn
+		if profileArn != "" {
+			metadata["profile_arn"] = profileArn
 		}
 		if clientID != "" {
 			metadata["client_id"] = clientID

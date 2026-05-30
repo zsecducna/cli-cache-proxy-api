@@ -107,7 +107,9 @@ func (ts *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	// 0600: the file holds the refresh token and OIDC client secret, so restrict it to the
+	// owner (os.Create would use 0666 & umask, typically 0644).
+	f, err := os.OpenFile(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}

@@ -90,6 +90,9 @@ type kiroToolUse struct {
 	ToolUseID string          `json:"toolUseId"`
 	Name      string          `json:"name"`
 	Input     json.RawMessage `json:"input"`
+	// origName is the pre-shortening tool name (unexported: never serialized). Used by the
+	// no-tools strip to fold tool calls to text under their original, human-readable name.
+	origName string
 }
 
 // kiroTool is a function/tool specification advertised to the model.
@@ -234,10 +237,12 @@ func parseClaudeTurns(root gjson.Result) []kiroTurn {
 					turn.images = append(turn.images, img)
 				}
 			case "tool_use":
+				origName := part.Get("name").String()
 				turn.toolUses = append(turn.toolUses, kiroToolUse{
 					ToolUseID: part.Get("id").String(),
-					Name:      shortenKiroToolName(part.Get("name").String()),
+					Name:      shortenKiroToolName(origName),
 					Input:     rawObjectOrEmpty(part.Get("input")),
+					origName:  origName,
 				})
 			case "tool_result":
 				status := "success"
@@ -481,7 +486,11 @@ func stripToolContentFromTurns(turns []kiroTurn) []kiroTurn {
 	for i := range turns {
 		t := &turns[i]
 		for _, tu := range t.toolUses {
-			t.text = append(t.text, "[Tool: "+tu.Name+"]\n"+string(tu.Input))
+			name := tu.origName
+			if name == "" {
+				name = tu.Name
+			}
+			t.text = append(t.text, "[Tool: "+name+"]\n"+string(tu.Input))
 		}
 		for _, tr := range t.toolResults {
 			parts := make([]string, 0, len(tr.Content))
@@ -614,6 +623,7 @@ func parseAssistantToolUses(toolCalls gjson.Result) []kiroToolUse {
 			ToolUseID: tc.Get("id").String(),
 			Name:      shortenKiroToolName(name),
 			Input:     argumentsToObject(tc.Get("function.arguments").String()),
+			origName:  name,
 		})
 	}
 	return uses
