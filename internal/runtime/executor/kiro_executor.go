@@ -163,8 +163,14 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 	// The Kiro runtime generate endpoint requires a profileArn. IDC/device logins do not
 	// capture one, so resolve it via ListAvailableProfiles and persist it for reuse.
 	if creds.profileArn == "" {
-		if arn := e.resolveKiroProfileArn(ctx, auth, creds); arn != "" {
+		arn, freshToken := e.resolveKiroProfileArn(ctx, auth, creds)
+		if arn != "" {
 			creds.profileArn = arn
+		}
+		// Use the refreshed token (if any) for the generate request so it isn't sent with
+		// an expired token.
+		if freshToken != "" {
+			creds.accessToken = freshToken
 		}
 	}
 
@@ -239,16 +245,36 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 }
 
 // resolveKiroProfileArn resolves and persists the credential's CodeWhisperer profileArn
-// (required by the runtime generate endpoint), returning "" when it cannot be obtained.
-func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxyauth.Auth, creds kiroCredentials) string {
+// (required by the runtime generate endpoint). CodeWhisperer returns an EMPTY profile list
+// for an expired access token, so on an empty/failed result it refreshes the token once and
+// retries; the refreshed access token (if any) is returned so the caller can use it for the
+// generate request too. Returns (arn, freshAccessToken); either may be empty.
+func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxyauth.Auth, creds kiroCredentials) (string, string) {
 	proxyURL := ""
 	if auth != nil {
 		proxyURL = auth.ProxyURL
 	}
-	arn, err := kiroauth.NewKiroAuthWithProxy(e.cfg, proxyURL).ListAvailableProfiles(ctx, creds.accessToken, regionForCreds(creds))
+	svc := kiroauth.NewKiroAuthWithProxy(e.cfg, proxyURL)
+	region := regionForCreds(creds)
+	freshToken := ""
+	arn, err := svc.ListAvailableProfiles(ctx, creds.accessToken, region)
 	if err != nil || arn == "" {
-		log.Warnf("kiro executor: profile resolution failed: %v", err)
-		return ""
+		// Empty list usually means the access token is expired; refresh once and retry.
+		td, errRefresh := svc.RefreshToken(ctx, kiroauth.RefreshParams{
+			RefreshToken: creds.refreshToken,
+			ClientID:     creds.clientID,
+			ClientSecret: creds.clientSecret,
+			Region:       region,
+		})
+		if errRefresh != nil {
+			log.Warnf("kiro executor: profile resolution refresh failed: %v", errRefresh)
+			return "", ""
+		}
+		freshToken = td.AccessToken
+		if arn, err = svc.ListAvailableProfiles(ctx, freshToken, region); err != nil || arn == "" {
+			log.Warnf("kiro executor: profile resolution failed after refresh: %v", err)
+			return "", freshToken
+		}
 	}
 	if auth != nil {
 		if auth.Metadata == nil {
@@ -256,7 +282,7 @@ func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxy
 		}
 		auth.Metadata["profile_arn"] = arn
 	}
-	return arn
+	return arn, freshToken
 }
 
 // Execute performs a non-streaming generate request and assembles a single response.
@@ -528,6 +554,13 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 	if td.ProfileArn != "" {
 		auth.Metadata["profile_arn"] = td.ProfileArn
+	} else if strings.TrimSpace(creds.profileArn) == "" {
+		// The OIDC refresh does not return a profileArn; resolve it now with the fresh
+		// token (the runtime generate endpoint requires it) and persist it so it survives
+		// restarts and avoids per-request resolution.
+		if arn, errArn := svc.ListAvailableProfiles(ctx, td.AccessToken, regionForCreds(creds)); errArn == nil && arn != "" {
+			auth.Metadata["profile_arn"] = arn
+		}
 	}
 	if td.ExpiresAt > 0 {
 		auth.Metadata["expired"] = time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
