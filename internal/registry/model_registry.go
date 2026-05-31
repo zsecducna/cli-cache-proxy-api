@@ -1094,6 +1094,74 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
+// normalizeModelKey collapses a model id to a separator-insensitive lookup key so that
+// client-supplied variants like "claude-opus-4-8" and the registered "claude-opus-4.8"
+// map to the same key. It lowercases and treats '.' and '-' as equivalent because
+// standard Anthropic-style ids use dashes for the minor version while some upstreams
+// (e.g. Kiro/CodeWhisperer) advertise the dotted form.
+func normalizeModelKey(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "" {
+		return ""
+	}
+	return strings.ReplaceAll(modelID, ".", "-")
+}
+
+// registrationHasProvider reports whether a registration currently has at least one
+// provider able to serve the model. It mirrors GetModelProviders exactly: that method
+// returns no providers whenever the Providers map is empty, so an empty map means
+// unavailable here too (a non-zero Count with no provider entry is treated as unavailable).
+func registrationHasProvider(reg *ModelRegistration) bool {
+	if reg == nil {
+		return false
+	}
+	for _, count := range reg.Providers {
+		if count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveModelID returns the canonical registered model id for a requested model name.
+// Exact registrations always win so existing routing (date-suffixed or dash-form Claude
+// models registered verbatim) is preserved. When no exact registration exists it falls
+// back to a separator-insensitive match (dash<->dot) so that a standard request such as
+// "claude-opus-4-8" resolves to a registered "claude-opus-4.8". Returns "" when nothing
+// with an available provider matches. The lexicographically smallest id is chosen on a
+// normalized collision to keep the result deterministic across map iterations.
+func (r *ModelRegistry) ResolveModelID(requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return ""
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	// Exact match wins to avoid changing routing for verbatim registrations.
+	if registrationHasProvider(r.models[requested]) {
+		return requested
+	}
+
+	key := normalizeModelKey(requested)
+	if key == "" {
+		return ""
+	}
+	match := ""
+	for id, reg := range r.models {
+		if !registrationHasProvider(reg) {
+			continue
+		}
+		if normalizeModelKey(id) != key {
+			continue
+		}
+		if match == "" || id < match {
+			match = id
+		}
+	}
+	return match
+}
+
 // GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()

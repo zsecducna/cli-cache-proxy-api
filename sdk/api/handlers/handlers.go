@@ -1050,6 +1050,23 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(handlerType, modelName str
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	// Resolve separator variants so a standard Claude Code request like "claude-opus-4-8"
+	// routes to a registered upstream model advertised in dotted form ("claude-opus-4.8",
+	// e.g. Kiro/CodeWhisperer). Exact registrations resolve to themselves, so verbatim and
+	// date-suffixed ids keep their existing routing. Skipped in home mode, which forwards the
+	// client model name to the home aggregator unchanged. The canonical id flows into
+	// NormalizedModel so the executor sends the upstream-recognised model id.
+	if !(h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled()) {
+		if canonical := util.ResolveModelName(baseModel); canonical != "" && canonical != baseModel {
+			if parsed.HasSuffix && parsed.RawSuffix != "" {
+				resolvedModelName = fmt.Sprintf("%s(%s)", canonical, parsed.RawSuffix)
+			} else {
+				resolvedModelName = canonical
+			}
+			baseModel = canonical
+		}
+	}
+
 	if !allowImageModel && strings.EqualFold(baseModel, "gpt-image-2") {
 		return requestDetails{}, &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,

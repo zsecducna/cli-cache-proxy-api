@@ -59,6 +59,27 @@ func GetProviderName(modelName string) []string {
 	return providers
 }
 
+// ResolveModelName returns the canonical registered model id for a requested model name.
+// It allows separator variants — standard Claude Code requests use a dash before the
+// minor version (e.g. "claude-opus-4-8") while some upstreams advertise the dotted form
+// (e.g. Kiro/CodeWhisperer's "claude-opus-4.8") — to resolve to the registered model.
+// Exact registrations are returned unchanged; when no separator-insensitive match with an
+// available provider exists the input is returned unchanged so callers keep their existing
+// error paths.
+//
+// Parameters:
+//   - modelName: The requested model name (without thinking suffix).
+//
+// Returns:
+//   - string: The canonical registered model id, or modelName when nothing matches.
+func ResolveModelName(modelName string) string {
+	resolved := registry.GetGlobalRegistry().ResolveModelID(modelName)
+	if resolved == "" {
+		return modelName
+	}
+	return resolved
+}
+
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
 // It uses an empty handler type to get any available model from the registry.
 //
