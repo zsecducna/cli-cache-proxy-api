@@ -76,11 +76,24 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 	if region == "" {
 		region = kiro.DefaultRegion
 	}
+	username := strings.TrimSpace(opts.Metadata["username"])
 	startURL := kiro.BuilderIDStartURL
 	if method == "idc" {
 		startURL = strings.TrimSpace(opts.Metadata["idc_start_url"])
 		if startURL == "" {
 			return nil, fmt.Errorf("kiro: IDC login requires a start URL")
+		}
+		// The IDC access token is an opaque AWS blob with no derivable identity, so the
+		// account label that names the auth file (kiro-<username>-<directoryID>.json)
+		// cannot be inferred and must be supplied by the operator.
+		if username == "" {
+			return nil, fmt.Errorf("kiro: IDC login requires a username")
+		}
+		// Reject a username that carries no filename-safe characters; it would collapse
+		// to "" during filename generation and silently fall back to a timestamp name,
+		// breaking the kiro-<username>-<directoryID>.json contract.
+		if kiro.SanitizeFileComponent(username) == "" {
+			return nil, fmt.Errorf("kiro: IDC username has no filename-safe characters")
 		}
 	}
 
@@ -141,6 +154,7 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 		Region:       region,
 		AuthMethod:   method,
 		StartURL:     startURL,
+		Username:     username,
 		ProfileArn:   profileArn,
 		Email:        kiro.ExtractEmailFromJWT(tokenData.AccessToken),
 	}, nil
@@ -195,6 +209,7 @@ func buildKiroAuth(bundle *kiro.KiroAuthBundle) *coreauth.Auth {
 		Region:       bundle.Region,
 		AuthMethod:   bundle.AuthMethod,
 		StartURL:     bundle.StartURL,
+		Username:     bundle.Username,
 		Email:        bundle.Email,
 		Type:         "kiro",
 	}
@@ -223,16 +238,21 @@ func buildKiroAuth(bundle *kiro.KiroAuthBundle) *coreauth.Auth {
 	if bundle.StartURL != "" {
 		metadata["start_url"] = bundle.StartURL
 	}
+	if bundle.Username != "" {
+		metadata["username"] = bundle.Username
+	}
 	if bundle.Email != "" {
 		metadata["email"] = bundle.Email
 	}
 
 	label := "Kiro User"
-	if bundle.Email != "" {
+	if bundle.Username != "" {
+		label = bundle.Username
+	} else if bundle.Email != "" {
 		label = bundle.Email
 	}
 
-	fileName := fmt.Sprintf("kiro-%d.json", time.Now().UnixMilli())
+	fileName := kiro.CredentialFileName(bundle.AuthMethod, bundle.Username, bundle.StartURL, bundle.Email, time.Now().UnixMilli())
 	fmt.Println("\nKiro authentication successful!")
 
 	return &coreauth.Auth{

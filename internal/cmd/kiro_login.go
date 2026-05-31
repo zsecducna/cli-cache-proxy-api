@@ -22,7 +22,9 @@ import (
 //   - idcStartURL: IAM Identity Center start URL (idc method only)
 //   - region: AWS region for the OIDC endpoints (defaults to us-east-1 when empty)
 //   - importToken: a refresh token to import (import method only; empty triggers auto-detect)
-func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region, importToken string) {
+//   - username: account label used to name the IDC auth file (required for the idc method;
+//     the IDC access token is opaque and carries no derivable identity)
+func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region, importToken, username string) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -34,6 +36,7 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 	idcStartURL = strings.TrimSpace(idcStartURL)
 	region = strings.TrimSpace(region)
 	importToken = strings.TrimSpace(importToken)
+	username = strings.TrimSpace(username)
 
 	method := "builder-id"
 	switch {
@@ -41,6 +44,22 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 		method = "import"
 	case idcStartURL != "":
 		method = "idc"
+		// IDC names the auth file kiro-<username>-<directoryID>.json. The username cannot be
+		// inferred from the opaque IDC token, so in non-interactive (flag-driven) use it must
+		// be supplied; prompt for it interactively when a TTY prompt is available.
+		if username == "" {
+			username = promptKiroUsername(options)
+			if username == "" {
+				log.Error("Kiro authentication failed: --kiro-username is required for IDC login")
+				return
+			}
+		}
+		// Reject a username with no filename-safe characters early (the SDK enforces this
+		// too, but a CLI-side check gives a clearer message before the login round-trip).
+		if kiro.SanitizeFileComponent(username) == "" {
+			log.Error("Kiro authentication failed: --kiro-username must contain filename-safe characters")
+			return
+		}
 	default:
 		// No method-selecting flag provided: ask interactively.
 		promptFn := options.Prompt
@@ -48,7 +67,7 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 			promptFn = defaultProjectPrompt()
 		}
 		var err error
-		method, idcStartURL, region, err = promptKiroMethod(promptFn, region)
+		method, idcStartURL, region, username, err = promptKiroMethod(promptFn, region)
 		if err != nil {
 			log.Errorf("Kiro authentication failed: %v", err)
 			return
@@ -63,6 +82,7 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 			"idc_start_url": idcStartURL,
 			"region":        region,
 			"import_token":  importToken,
+			"username":      username,
 		},
 		Prompt: options.Prompt,
 	}
@@ -83,18 +103,19 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 }
 
 // promptKiroMethod interactively asks the user to choose a Kiro authentication method and,
-// for IAM Identity Center, collects the start URL and AWS region. It is only invoked when
-// no method-selecting flag was supplied. The returned method is one of "builder-id" or
-// "idc". defaultRegion pre-fills the region prompt (falling back to kiro.DefaultRegion when
-// blank). It returns an error only when required IDC input is missing.
-func promptKiroMethod(promptFn func(string) (string, error), defaultRegion string) (method, idcStartURL, region string, err error) {
+// for IAM Identity Center, collects the start URL, AWS region, and account username. It is
+// only invoked when no method-selecting flag was supplied. The returned method is one of
+// "builder-id" or "idc". defaultRegion pre-fills the region prompt (falling back to
+// kiro.DefaultRegion when blank). The returned username is non-empty only for the IDC method.
+// It returns an error only when required IDC input is missing.
+func promptKiroMethod(promptFn func(string) (string, error), defaultRegion string) (method, idcStartURL, region, username string, err error) {
 	// Present the two supported interactive methods; Builder ID is the default on empty input.
 	fmt.Println("Select Kiro authentication method:")
 	fmt.Println("  1) AWS Builder ID (default)")
 	fmt.Println("  2) AWS IAM Identity Center")
 	choice, err := promptFn("Enter choice [1-2] (default 1): ")
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to read authentication method: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to read authentication method: %w", err)
 	}
 
 	switch strings.TrimSpace(choice) {
@@ -102,11 +123,11 @@ func promptKiroMethod(promptFn func(string) (string, error), defaultRegion strin
 		// IAM Identity Center requires a start URL; the region defaults to us-east-1.
 		idcStartURL, err = promptFn("IDC Start URL (e.g. https://d-90660ceab3.awsapps.com/start): ")
 		if err != nil {
-			return "", "", "", fmt.Errorf("failed to read IDC start URL: %w", err)
+			return "", "", "", "", fmt.Errorf("failed to read IDC start URL: %w", err)
 		}
 		idcStartURL = strings.TrimSpace(idcStartURL)
 		if idcStartURL == "" {
-			return "", "", "", fmt.Errorf("kiro: IDC login requires a start URL")
+			return "", "", "", "", fmt.Errorf("kiro: IDC login requires a start URL")
 		}
 
 		regionDefault := strings.TrimSpace(defaultRegion)
@@ -115,15 +136,46 @@ func promptKiroMethod(promptFn func(string) (string, error), defaultRegion strin
 		}
 		region, err = promptFn(fmt.Sprintf("AWS Region (default %s): ", regionDefault))
 		if err != nil {
-			return "", "", "", fmt.Errorf("failed to read AWS region: %w", err)
+			return "", "", "", "", fmt.Errorf("failed to read AWS region: %w", err)
 		}
 		region = strings.TrimSpace(region)
 		if region == "" {
 			region = regionDefault
 		}
-		return "idc", idcStartURL, region, nil
+
+		// The IDC token is opaque, so the username that names the auth file must be entered.
+		username, err = promptFn("Account username (used to name the auth file): ")
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("failed to read username: %w", err)
+		}
+		username = strings.TrimSpace(username)
+		if username == "" {
+			return "", "", "", "", fmt.Errorf("kiro: IDC login requires a username")
+		}
+		return "idc", idcStartURL, region, username, nil
 	default:
 		// Any other input (including empty) selects the Builder ID device flow.
-		return "builder-id", "", strings.TrimSpace(defaultRegion), nil
+		return "builder-id", "", strings.TrimSpace(defaultRegion), "", nil
 	}
+}
+
+// promptKiroUsername reads the IDC account username from the configured prompt (or the
+// default project prompt). It returns "" when no prompt is available or the user enters
+// nothing, letting the caller surface the "username required" error.
+func promptKiroUsername(options *LoginOptions) string {
+	promptFn := options.Prompt
+	if promptFn == nil {
+		promptFn = defaultProjectPrompt()
+	}
+	if promptFn == nil {
+		return ""
+	}
+	value, err := promptFn("Account username (used to name the auth file): ")
+	if err != nil {
+		// Preserve the underlying cause (e.g. closed stdin) at debug level; the caller
+		// surfaces the user-facing "username is required" error.
+		log.Debugf("kiro: username prompt failed: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(value)
 }

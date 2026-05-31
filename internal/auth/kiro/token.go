@@ -35,6 +35,10 @@ type KiroTokenStorage struct {
 	AuthMethod string `json:"auth_method,omitempty"`
 	// StartURL is the IAM Identity Center start URL (IDC method only).
 	StartURL string `json:"start_url,omitempty"`
+	// Username is the operator-supplied account label used to name the auth file
+	// (kiro-<username>-<directoryID>.json). Required for the IDC method because the
+	// IDC access token is an opaque AWS blob that carries no derivable identity.
+	Username string `json:"username,omitempty"`
 	// Email is the best-effort account email parsed from the access token JWT.
 	Email string `json:"email,omitempty"`
 	// Type indicates the authentication provider type, always "kiro" for this storage.
@@ -76,6 +80,9 @@ type KiroAuthBundle struct {
 	AuthMethod string
 	// StartURL is the IDC start URL when applicable.
 	StartURL string
+	// Username is the operator-supplied account label (IDC method) used to name
+	// the persisted auth file.
+	Username string
 	// ProfileArn is the resolved CodeWhisperer profile ARN when available.
 	ProfileArn string
 	// Email is the best-effort account email.

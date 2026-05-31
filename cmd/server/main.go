@@ -71,6 +71,7 @@ func main() {
 	var kiroImport string
 	var kiroIDCStartURL string
 	var kiroRegion string
+	var kiroUsername string
 	var xaiLogin bool
 	var projectID string
 	var vertexImport string
@@ -96,6 +97,7 @@ func main() {
 	flag.StringVar(&kiroImport, "kiro-import", "", "Import a Kiro refresh token (empty value auto-detects from ~/.aws/sso/cache)")
 	flag.StringVar(&kiroIDCStartURL, "kiro-idc-start-url", "", "Kiro IAM Identity Center start URL (enables the IDC login method)")
 	flag.StringVar(&kiroRegion, "kiro-region", "", "AWS region for Kiro OIDC endpoints (defaults to us-east-1)")
+	flag.StringVar(&kiroUsername, "kiro-username", "", "Account label for the Kiro auth file (required for IDC login; names kiro-<username>-<directoryID>.json)")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
@@ -570,7 +572,7 @@ func main() {
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else if kiroLogin {
-		cmd.DoKiroLogin(cfg, options, kiroIDCStartURL, kiroRegion, kiroImport)
+		cmd.DoKiroLogin(cfg, options, kiroIDCStartURL, kiroRegion, kiroImport, kiroUsername)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
 	} else {

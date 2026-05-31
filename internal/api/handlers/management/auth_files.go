@@ -2654,9 +2654,23 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 	// Derive the login method and start URL from the IDC start URL parameter.
 	method := "builder-id"
 	startURL := kiro.BuilderIDStartURL
+	username := strings.TrimSpace(c.Query("username"))
 	if idcStartURL := strings.TrimSpace(c.Query("idc_start_url")); idcStartURL != "" {
 		method = "idc"
 		startURL = idcStartURL
+		// The IDC access token is an opaque AWS blob with no derivable identity, so the
+		// account label that names the auth file (kiro-<username>-<directoryID>.json) must
+		// be supplied by the caller.
+		if username == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "username is required for IDC login"})
+			return
+		}
+		// A username made only of unsafe characters collapses to "" during filename
+		// generation and would silently fall back to a timestamp name.
+		if kiro.SanitizeFileComponent(username) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "username has no filename-safe characters"})
+			return
+		}
 	}
 
 	kiroAuth := kiro.NewKiroAuth(h.cfg)
@@ -2729,6 +2743,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			Region:       region,
 			AuthMethod:   method,
 			StartURL:     startURL,
+			Username:     username,
 			Email:        email,
 			Type:         "kiro",
 		}
@@ -2757,16 +2772,21 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		if startURL != "" {
 			metadata["start_url"] = startURL
 		}
+		if username != "" {
+			metadata["username"] = username
+		}
 		if email != "" {
 			metadata["email"] = email
 		}
 
 		label := "Kiro User"
-		if email != "" {
+		if username != "" {
+			label = username
+		} else if email != "" {
 			label = email
 		}
 
-		fileName := fmt.Sprintf("kiro-%d.json", time.Now().UnixMilli())
+		fileName := kiro.CredentialFileName(method, username, startURL, email, time.Now().UnixMilli())
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "kiro",
