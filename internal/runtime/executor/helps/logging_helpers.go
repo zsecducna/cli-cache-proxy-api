@@ -81,6 +81,21 @@ type AnthropicCacheObservability struct {
 	CacheReadInputTokens     int64  `json:"anthropic_cache_read_input_tokens,omitempty"`
 }
 
+// KiroCacheObservability captures the cache-relevant signals Kiro (AWS CodeWhisperer)
+// reports. Kiro does NOT return token-level cache counts like Anthropic; instead its
+// EventStream carries a meteringEvent (credit cost for the request) and a
+// contextUsageEvent (percentage of the model context window consumed). A repeated,
+// cache-eligible prompt costs materially fewer credits, so Credits is the observable
+// proxy for Kiro's prompt cache: a falling credit cost across identical prefixes is a
+// cache hit. These are recorded for statistics only and never affect routing.
+type KiroCacheObservability struct {
+	// Credits is the credit cost Kiro billed for the request (meteringEvent.usage).
+	Credits float64 `json:"kiro_credits,omitempty"`
+	// ContextUsagePercent is the fraction (0..1) of the context window used
+	// (contextUsageEvent.contextUsagePercentage).
+	ContextUsagePercent float64 `json:"kiro_context_usage_percent,omitempty"`
+}
+
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	ginCtx := ginContextFrom(ctx)
@@ -658,6 +673,45 @@ func getAnthropicCacheObservabilityFromGin(ginCtx *gin.Context) (AnthropicCacheO
 	obs, ok := value.(AnthropicCacheObservability)
 	if !ok {
 		return AnthropicCacheObservability{}, false
+	}
+	return obs, true
+}
+
+// SetKiroCacheObservability records the latest Kiro credit cost and context-usage signal in
+// the gin context. The last meteringEvent/contextUsageEvent of a request wins (Kiro emits one
+// terminal frame of each), so non-zero values overwrite. No-op when there is no gin context
+// (e.g. SDK-embedded callers without an HTTP request).
+func SetKiroCacheObservability(ctx context.Context, value KiroCacheObservability) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	obs, _ := getKiroCacheObservabilityFromGin(ginCtx)
+	if value.Credits > 0 {
+		obs.Credits = value.Credits
+	}
+	if value.ContextUsagePercent > 0 {
+		obs.ContextUsagePercent = value.ContextUsagePercent
+	}
+	ginCtx.Set("KIRO_CACHE_OBSERVABILITY", obs)
+}
+
+// GetKiroCacheObservability returns the Kiro cache observability recorded for the request.
+func GetKiroCacheObservability(ctx context.Context) (KiroCacheObservability, bool) {
+	return getKiroCacheObservabilityFromGin(ginContextFrom(ctx))
+}
+
+func getKiroCacheObservabilityFromGin(ginCtx *gin.Context) (KiroCacheObservability, bool) {
+	if ginCtx == nil {
+		return KiroCacheObservability{}, false
+	}
+	value, exists := ginCtx.Get("KIRO_CACHE_OBSERVABILITY")
+	if !exists {
+		return KiroCacheObservability{}, false
+	}
+	obs, ok := value.(KiroCacheObservability)
+	if !ok {
+		return KiroCacheObservability{}, false
 	}
 	return obs, true
 }

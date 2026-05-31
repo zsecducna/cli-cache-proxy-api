@@ -118,6 +118,40 @@ func parseKiroEventType(headers []byte) string {
 	return ""
 }
 
+// accumulateKiroCacheFrame extracts Kiro's cache-relevant signals from a single frame into
+// obs. Kiro reports no token-level cache counts; instead meteringEvent carries the credit
+// cost of the request and contextUsageEvent carries the context-window usage fraction. A
+// repeated cache-eligible prompt bills fewer credits, so a falling credit cost is the
+// observable cache-hit signal. Non-cache frames are ignored. The last frame of each type
+// wins (Kiro emits one terminal frame of each per request).
+func accumulateKiroCacheFrame(eventType string, payload []byte, obs *KiroCacheObservability) {
+	if obs == nil {
+		return
+	}
+	switch eventType {
+	case "meteringEvent":
+		if v := gjson.GetBytes(payload, "usage"); v.Exists() {
+			obs.Credits = v.Float()
+		}
+	case "contextUsageEvent":
+		if v := gjson.GetBytes(payload, "contextUsagePercentage"); v.Exists() {
+			obs.ContextUsagePercent = v.Float()
+		}
+	}
+}
+
+// ParseKiroCacheObservability scans a complete Kiro EventStream body and returns the credit
+// cost and context-usage signal. Used by the non-streaming assembler path, which already has
+// the full body in memory.
+func ParseKiroCacheObservability(full []byte) KiroCacheObservability {
+	frames, _ := parseKiroFrames(full)
+	var obs KiroCacheObservability
+	for i := range frames {
+		accumulateKiroCacheFrame(frames[i].eventType, frames[i].payload, &obs)
+	}
+	return obs
+}
+
 // KiroEventStreamDecoder incrementally turns EventStream bytes into OpenAI SSE lines.
 // Each returned line is "data: {chat.completion.chunk json}". The executor appends the
 // terminal "data: [DONE]" itself.
@@ -137,6 +171,9 @@ type KiroEventStreamDecoder struct {
 	// nameRestore maps shortened tool names back to their originals (tool names >64 chars
 	// are shortened on the request side to satisfy Kiro's limit).
 	nameRestore map[string]string
+	// cache accumulates Kiro's credit/context-usage signals from metering/contextUsage
+	// frames (Kiro reports no token-level cache counts).
+	cache KiroCacheObservability
 }
 
 // NewKiroEventStreamDecoder creates a decoder that stamps chunks with the given model.
@@ -179,6 +216,12 @@ func (d *KiroEventStreamDecoder) Finish() [][]byte {
 	return lines
 }
 
+// CacheObservability returns the Kiro credit/context-usage signal accumulated from the
+// stream's metering/contextUsage frames.
+func (d *KiroEventStreamDecoder) CacheObservability() KiroCacheObservability {
+	return d.cache
+}
+
 // convert maps a single decoded frame to zero or more OpenAI SSE lines.
 func (d *KiroEventStreamDecoder) convert(f kiroFrame) [][]byte {
 	root := gjson.ParseBytes(f.payload)
@@ -201,6 +244,8 @@ func (d *KiroEventStreamDecoder) convert(f kiroFrame) [][]byte {
 		return d.finishChunks()
 	case "metricsEvent", "contextUsageEvent", "meteringEvent":
 		// Bookkeeping only — CodeWhisperer reports credits/context%, not token counts.
+		// Capture the credit/context-usage signal for cache statistics.
+		accumulateKiroCacheFrame(f.eventType, f.payload, &d.cache)
 	default:
 		// Some assistant text frames omit an explicit event-type header.
 		if c := root.Get("content").String(); c != "" {

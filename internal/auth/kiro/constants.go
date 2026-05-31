@@ -169,9 +169,15 @@ func BuildThinkingPrefix(budget int) string {
 	return fmt.Sprintf("<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>%d</max_thinking_length>", ClampThinkingBudget(budget))
 }
 
-// BuildContextPrefix returns the per-request context prefix carrying the current time.
+// BuildContextPrefix returns the per-request context prefix carrying the current date.
+// It is quantized to date granularity (not a per-second timestamp) on purpose: this prefix
+// is prepended to the current user message, and CodeWhisperer prompt-caches on the request
+// prefix. A per-second timestamp changed the prefix on every call and broke the cache every
+// time (measured: identical prefix -> ~46% lower credit cost on repeat; per-second timestamp
+// -> flat, no cache hit). Date granularity keeps the prefix stable across a day's requests so
+// the cache survives, while still giving the model the current date.
 func BuildContextPrefix(now time.Time) string {
-	return fmt.Sprintf("[Context: Current time is %s]", now.Format(time.RFC3339))
+	return fmt.Sprintf("[Context: Current date is %s]", now.Format("2006-01-02"))
 }
 
 // AgenticSystemPrompt is injected verbatim as a content prefix for "-agentic" model

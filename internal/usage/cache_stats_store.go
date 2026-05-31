@@ -39,6 +39,7 @@ type CacheStatisticsEvent struct {
 	Tokens          TokenStats
 	Cache           *helps.CodexCacheObservability
 	AnthropicCache  helps.AnthropicCacheObservability
+	KiroCache       helps.KiroCacheObservability
 	StreamID        string
 }
 
@@ -134,6 +135,8 @@ type CacheStatisticsRequest struct {
 	AnthropicBreakpoints              string    `json:"anthropic_breakpoints,omitempty"`
 	AnthropicCacheCreationInputTokens int64     `json:"anthropic_cache_creation_input_tokens"`
 	AnthropicCacheReadInputTokens     int64     `json:"anthropic_cache_read_input_tokens"`
+	KiroCredits                       float64   `json:"kiro_credits,omitempty"`
+	KiroContextUsagePercent           float64   `json:"kiro_context_usage_percent,omitempty"`
 	CacheRatio                        float64   `json:"cache_ratio"`
 }
 
@@ -411,6 +414,8 @@ CREATE TABLE IF NOT EXISTS cache_statistics_requests (
     anthropic_breakpoints TEXT NOT NULL DEFAULT '',
     anthropic_cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
     anthropic_cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    kiro_credits REAL NOT NULL DEFAULT 0,
+    kiro_context_usage_percent REAL NOT NULL DEFAULT 0,
     messages_stream_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cache_statistics_requested_at ON cache_statistics_requests(requested_at DESC);
@@ -464,6 +469,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_model ON cache_statistics_reques
 	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "messages_stream_id", "ALTER TABLE cache_statistics_requests ADD COLUMN messages_stream_id TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "kiro_credits", "ALTER TABLE cache_statistics_requests ADD COLUMN kiro_credits REAL NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
+	if err := ensureCacheStatisticsColumn(s.db, "cache_statistics_requests", "kiro_context_usage_percent", "ALTER TABLE cache_statistics_requests ADD COLUMN kiro_context_usage_percent REAL NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init schema: %w", err)
+	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_id ON cache_statistics_requests(messages_stream_id)`); err != nil {
 		return fmt.Errorf("cache statistics store: init schema: %w", err)
 	}
@@ -505,13 +516,14 @@ INSERT INTO %s (
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens,
-    messages_stream_id
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    messages_stream_id,
+    kiro_credits, kiro_context_usage_percent
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_key) DO NOTHING`,
 			s.requestsTableName(),
 			s.bind(1), s.bind(2), s.bind(3), s.bind(4), s.bind(5), s.bind(6), s.bind(7), s.bind(8), s.bind(9), s.bind(10), s.bind(11),
 			s.bind(12), s.bind(13), s.bind(14), s.bind(15), s.bind(16), s.bind(17), s.bind(18), s.bind(19), s.bind(20), s.bind(21), s.bind(22),
-			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28), s.bind(29), s.bind(30)),
+			s.bind(23), s.bind(24), s.bind(25), s.bind(26), s.bind(27), s.bind(28), s.bind(29), s.bind(30), s.bind(31), s.bind(32)),
 			eventKey,
 			s.timestampArg(timestamp),
 			strings.TrimSpace(event.Provider),
@@ -542,6 +554,8 @@ ON CONFLICT (event_key) DO NOTHING`,
 			anthropicCacheCreationTokens(event.AnthropicCache),
 			anthropicCacheReadTokens(event.AnthropicCache),
 			strings.TrimSpace(event.StreamID),
+			kiroCreditsValue(event.KiroCache),
+			kiroContextUsageValue(event.KiroCache),
 		)
 		if err != nil {
 			return fmt.Errorf("cache statistics store: insert event: %w", err)
@@ -555,8 +569,9 @@ INSERT OR IGNORE INTO cache_statistics_requests (
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
     anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens,
-    messages_stream_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    messages_stream_id,
+    kiro_credits, kiro_context_usage_percent
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventKey,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		strings.TrimSpace(event.Provider),
@@ -587,6 +602,8 @@ INSERT OR IGNORE INTO cache_statistics_requests (
 		anthropicCacheCreationTokens(event.AnthropicCache),
 		anthropicCacheReadTokens(event.AnthropicCache),
 		strings.TrimSpace(event.StreamID),
+		kiroCreditsValue(event.KiroCache),
+		kiroContextUsageValue(event.KiroCache),
 	)
 	if err != nil {
 		return fmt.Errorf("cache statistics store: insert event: %w", err)
@@ -1426,7 +1443,8 @@ SELECT
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
     prompt_cache_key, previous_response_id, response_id, prompt_cache_retention,
     anthropic_rewrite_applied, anthropic_overwrote_client_layout, anthropic_matched_agentic_loop, anthropic_cache_ttl, anthropic_breakpoints,
-    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens
+    anthropic_cache_creation_input_tokens, anthropic_cache_read_input_tokens,
+    kiro_credits, kiro_context_usage_percent
 FROM %s
 WHERE requested_at >= %s`, s.requestsTableName(), s.bind(1))
 	args := []any{s.sinceArg(since)}
@@ -1475,6 +1493,8 @@ LIMIT ` + s.bind(len(args)+1)
 			&item.AnthropicBreakpoints,
 			&item.AnthropicCacheCreationInputTokens,
 			&item.AnthropicCacheReadInputTokens,
+			&item.KiroCredits,
+			&item.KiroContextUsagePercent,
 		); err != nil {
 			return nil, fmt.Errorf("cache statistics store: scan recent request: %w", err)
 		}
@@ -1920,4 +1940,22 @@ func anthropicCacheCreationTokens(obs helps.AnthropicCacheObservability) int64 {
 
 func anthropicCacheReadTokens(obs helps.AnthropicCacheObservability) int64 {
 	return normaliseNonNegative(obs.CacheReadInputTokens)
+}
+
+// kiroCreditsValue returns the Kiro credit cost, clamped to non-negative. Kiro reports
+// fractional credits per request; a lower value on a repeated prompt indicates a cache hit.
+func kiroCreditsValue(obs helps.KiroCacheObservability) float64 {
+	if obs.Credits < 0 {
+		return 0
+	}
+	return obs.Credits
+}
+
+// kiroContextUsageValue returns the Kiro context-window usage fraction (0..1), clamped to
+// non-negative.
+func kiroContextUsageValue(obs helps.KiroCacheObservability) float64 {
+	if obs.ContextUsagePercent < 0 {
+		return 0
+	}
+	return obs.ContextUsagePercent
 }

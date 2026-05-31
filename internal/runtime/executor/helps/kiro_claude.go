@@ -33,6 +33,9 @@ type KiroClaudeStreamEncoder struct {
 	nextIndex int    // next content block index to assign
 	curToolID string // toolUseId of the currently open tool block
 	sawTool   bool
+	// cache accumulates Kiro's credit/context-usage signals from metering/contextUsage
+	// frames (Kiro reports no token-level cache counts).
+	cache KiroCacheObservability
 }
 
 // NewKiroClaudeStreamEncoder creates an encoder stamped with the given model. promptTokens
@@ -86,6 +89,12 @@ func (e *KiroClaudeStreamEncoder) Finish() [][]byte {
 func (e *KiroClaudeStreamEncoder) UsageDetail() usage.Detail {
 	completion := estimateTokensFromChars(e.completionChars)
 	return usage.Detail{InputTokens: int64(e.promptTokens), OutputTokens: int64(completion), TotalTokens: int64(e.promptTokens + completion)}
+}
+
+// CacheObservability returns the Kiro credit/context-usage signal accumulated from the
+// stream's metering/contextUsage frames.
+func (e *KiroClaudeStreamEncoder) CacheObservability() KiroCacheObservability {
+	return e.cache
 }
 
 // convert maps a single Kiro frame to zero or more Anthropic SSE lines.
@@ -145,6 +154,10 @@ func (e *KiroClaudeStreamEncoder) convert(f kiroFrame) [][]byte {
 		}
 	case "messageStopEvent":
 		out = append(out, e.Finish()...)
+	case "metricsEvent", "contextUsageEvent", "meteringEvent":
+		// Kiro reports credits/context%, not token counts. Capture the credit/context-usage
+		// signal for cache statistics; emits no client-visible SSE.
+		accumulateKiroCacheFrame(f.eventType, f.payload, &e.cache)
 	}
 	return out
 }

@@ -23,7 +23,7 @@ func TestBuildKiroPayload_CollapseAndHistory(t *testing.T) {
 	root := gjson.ParseBytes(out)
 
 	content := root.Get("conversationState.currentMessage.userInputMessage.content").String()
-	if !strings.Contains(content, "bye") || !strings.Contains(content, "[Context: Current time is") {
+	if !strings.Contains(content, "bye") || !strings.Contains(content, "[Context: Current date is") {
 		t.Fatalf("current content missing bye/context prefix: %q", content)
 	}
 	if model := root.Get("conversationState.currentMessage.userInputMessage.modelId").String(); model != "claude-sonnet-4.5" {
@@ -130,7 +130,7 @@ func TestBuildKiroPayload_ThinkingAndAgenticPrefixes(t *testing.T) {
 		t.Fatalf("BuildKiroPayload() error = %v", err)
 	}
 	content := gjson.GetBytes(out, "conversationState.currentMessage.userInputMessage.content").String()
-	for _, want := range []string{"<thinking_mode>enabled</thinking_mode>", "<max_thinking_length>8192</max_thinking_length>", "[Context: Current time is", "CHUNKED WRITE PROTOCOL", "do it"} {
+	for _, want := range []string{"<thinking_mode>enabled</thinking_mode>", "<max_thinking_length>8192</max_thinking_length>", "[Context: Current date is", "CHUNKED WRITE PROTOCOL", "do it"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("content missing %q: %q", want, content)
 		}

@@ -497,6 +497,7 @@ func buildCacheStatisticsEvent(ctx context.Context, record coreusage.Record) Cac
 		Tokens:          detail.Tokens,
 		Cache:           detail.Cache,
 		AnthropicCache:  valueOrZeroAnthropic(detail.AnthropicCache),
+		KiroCache:       resolveKiroCacheMetadata(ctx),
 		StreamID:        helps.GetMessagesStreamID(ctx),
 	}
 }
@@ -724,6 +725,16 @@ func valueOrZeroAnthropic(obs *helps.AnthropicCacheObservability) helps.Anthropi
 		return helps.AnthropicCacheObservability{}
 	}
 	return *obs
+}
+
+// resolveKiroCacheMetadata returns the Kiro credit/context-usage signal recorded for the
+// request, or a zero value when the request was not served by Kiro.
+func resolveKiroCacheMetadata(ctx context.Context) helps.KiroCacheObservability {
+	obs, ok := helps.GetKiroCacheObservability(ctx)
+	if !ok {
+		return helps.KiroCacheObservability{}
+	}
+	return obs
 }
 
 func formatHour(hour int) string {

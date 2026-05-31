@@ -325,6 +325,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
+	// Record Kiro's credit/context-usage cache signal (Kiro reports no token-level cache
+	// counts; reduced credits on a repeated prompt is the observable cache hit).
+	helps.SetKiroCacheObservability(ctx, helps.ParseKiroCacheObservability(data))
+
 	promptTokens := prep.promptTokens
 	if prep.from == sdktranslator.FromString("claude") {
 		// Direct Kiro EventStream -> Anthropic Messages (no OpenAI intermediate).
@@ -449,8 +453,16 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 					return
 				}
 			}
+			// Record the Kiro cache signal BEFORE publishing usage: the usage record is handed
+			// to a separate dispatcher goroutine that reads this gin-context value, so it must be
+			// set first or the persisted row would race to 0/0 (mirrors the claude executor order).
+			helps.SetKiroCacheObservability(ctx, claudeEnc.CacheObservability())
 			reporter.Publish(ctx, claudeEnc.UsageDetail())
 		} else {
+			// Record the Kiro cache signal before the finish loop: that loop's usage chunk
+			// triggers reporter.Publish (via emit), which the dispatcher goroutine consumes and
+			// reads this value from, so it must be set first to avoid a race to 0/0.
+			helps.SetKiroCacheObservability(ctx, decoder.CacheObservability())
 			// Emit terminal finish/usage chunks, then the SSE [DONE] marker.
 			for _, line := range decoder.Finish() {
 				if !emit(line) {

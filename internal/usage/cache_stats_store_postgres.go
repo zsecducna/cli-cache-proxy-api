@@ -201,6 +201,8 @@ CREATE TABLE IF NOT EXISTS ` + s.requestsTableName() + ` (
     anthropic_breakpoints TEXT NOT NULL DEFAULT '',
     anthropic_cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
     anthropic_cache_read_input_tokens BIGINT NOT NULL DEFAULT 0,
+    kiro_credits DOUBLE PRECISION NOT NULL DEFAULT 0,
+    kiro_context_usage_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -222,6 +224,12 @@ CREATE INDEX IF NOT EXISTS idx_cache_statistics_provider_lower_requested_at ON `
 		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
 	}
 	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "messages_stream_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
+	}
+	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "kiro_credits", "DOUBLE PRECISION NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
+	}
+	if err := ensurePostgresColumn(s.db, s.requestsTableName(), "kiro_context_usage_percent", "DOUBLE PRECISION NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("cache statistics store: init postgres request schema: %w", err)
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_statistics_stream_id ON ` + s.requestsTableName() + ` (messages_stream_id)`); err != nil {
