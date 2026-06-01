@@ -61,7 +61,19 @@ type CacheStatisticsSummary struct {
 	AvgLatencyMs                float64                       `json:"avg_latency_ms"`
 	AnthropicCacheWrite5mTokens int64                         `json:"anthropic_cache_write_5m_tokens,omitempty"`
 	AnthropicCacheWrite1hTokens int64                         `json:"anthropic_cache_write_1h_tokens,omitempty"`
-	GPT54                       CacheStatisticsModelBreakdown `json:"gpt_5_4"`
+	// KiroCredits is the total credits Kiro billed across requests in the window.
+	// Kiro reports its prompt-cache benefit only as reduced credits (no token-level
+	// cache counts), so this is the raw fuel for the Kiro cache signal.
+	KiroCredits float64 `json:"kiro_credits,omitempty"`
+	// KiroContextUsagePercent is the average context-window usage fraction (0..1)
+	// across Kiro requests that reported a usage frame.
+	KiroContextUsagePercent float64 `json:"kiro_context_usage_percent,omitempty"`
+	// KiroCacheSavingsRatio is the derived Kiro prompt-cache hit proxy (0..1): the
+	// fraction of credits saved versus each model's cold (most expensive per-input)
+	// baseline. It replaces the token-based cache_ratio for Kiro, which is always
+	// zero because Kiro emits no cache token counts.
+	KiroCacheSavingsRatio float64                       `json:"kiro_cache_savings_ratio,omitempty"`
+	GPT54                 CacheStatisticsModelBreakdown `json:"gpt_5_4"`
 }
 
 type CacheStatisticsBreakdownBucket struct {
@@ -92,6 +104,11 @@ type CacheStatisticsModelSummary struct {
 	AvgLatencyMs                float64 `json:"avg_latency_ms"`
 	AnthropicCacheWrite5mTokens int64   `json:"anthropic_cache_write_5m_tokens,omitempty"`
 	AnthropicCacheWrite1hTokens int64   `json:"anthropic_cache_write_1h_tokens,omitempty"`
+	// KiroCredits, KiroContextUsagePercent, and KiroCacheSavingsRatio carry the
+	// Kiro cache signal per model (see CacheStatisticsSummary for semantics).
+	KiroCredits             float64 `json:"kiro_credits,omitempty"`
+	KiroContextUsagePercent float64 `json:"kiro_context_usage_percent,omitempty"`
+	KiroCacheSavingsRatio   float64 `json:"kiro_cache_savings_ratio,omitempty"`
 }
 
 type CacheStatisticsDaySummary struct {
@@ -783,6 +800,14 @@ func (s *CacheStatisticsStore) snapshotSinceProviders(ctx context.Context, recen
 	if err != nil {
 		return result, err
 	}
+	// Kiro reports no token-level cache counts, so the token-based cache_ratio is
+	// always zero for Kiro models. Derive a truthful cache signal from the credit
+	// cost spread instead and attach it to the summary and per-model breakdown.
+	kiroStats, err := s.queryKiroCacheStats(ctx, since, providers)
+	if err != nil {
+		return result, err
+	}
+	applyKiroCacheSignal(&summary, byModel, kiroStats)
 	result.Summary = summary
 	result.ByModel = byModel
 	result.ByDay = byDay
@@ -798,6 +823,162 @@ func snapshotSince(days int) string {
 	since := time.Now().UTC().AddDate(0, 0, -(days - 1))
 	since = since.Truncate(24 * time.Hour)
 	return since.Format(time.RFC3339Nano)
+}
+
+// kiroCacheModelStat holds the aggregated Kiro credit signal for one model in the
+// query window, plus the raw per-request credit-per-1k-input samples needed to
+// derive the cache-savings ratio against the model's own cold baseline.
+type kiroCacheModelStat struct {
+	creditSum    float64
+	ctxUsageSum  float64
+	ctxUsageRows int64
+	// creditPer1kInput holds one sample per cache-eligible request (input>2048),
+	// used to compute the per-model cold baseline (max) and savings ratio.
+	creditPer1kInput []float64
+}
+
+// kiroCacheEligibleInputThreshold mirrors Kiro's prompt-cache eligibility floor:
+// prompts at or below this input-token count are not cache-eligible, so their
+// credit cost carries no cache signal and must be excluded from the baseline.
+const kiroCacheEligibleInputThreshold = 2048
+
+// queryKiroCacheStats returns the per-model Kiro credit/context-usage aggregates
+// for the window. It scans raw rows (credits + input tokens) so the savings ratio
+// can be derived in Go against each model's cold baseline — something a single
+// SQL aggregate cannot express.
+func (s *CacheStatisticsStore) queryKiroCacheStats(ctx context.Context, since string, providers []string) (map[string]*kiroCacheModelStat, error) {
+	stats := make(map[string]*kiroCacheModelStat)
+	if s == nil || s.db == nil {
+		return stats, nil
+	}
+	query := fmt.Sprintf(`
+SELECT model, input_tokens, kiro_credits, kiro_context_usage_percent
+FROM %s
+WHERE requested_at >= %s AND LOWER(provider) = 'kiro' AND kiro_credits > 0`, s.requestsTableName(), s.bind(1))
+	args := []any{s.sinceArg(since)}
+	query, args = appendCacheStatisticsProvidersFilter(query, args, providers)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("cache statistics store: query kiro cache stats: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			model    string
+			inputTok int64
+			credits  float64
+			ctxUsage float64
+		)
+		if err := rows.Scan(&model, &inputTok, &credits, &ctxUsage); err != nil {
+			return nil, fmt.Errorf("cache statistics store: scan kiro cache stat: %w", err)
+		}
+		model = strings.TrimSpace(model)
+		if model == "" {
+			model = "unknown"
+		}
+		stat := stats[model]
+		if stat == nil {
+			stat = &kiroCacheModelStat{}
+			stats[model] = stat
+		}
+		stat.creditSum += credits
+		if ctxUsage > 0 {
+			stat.ctxUsageSum += ctxUsage
+			stat.ctxUsageRows++
+		}
+		if inputTok > kiroCacheEligibleInputThreshold {
+			stat.creditPer1kInput = append(stat.creditPer1kInput, credits/float64(inputTok)*1000.0)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cache statistics store: iterate kiro cache stats: %w", err)
+	}
+	return stats, nil
+}
+
+// kiroCacheSavingsRatio derives a prompt-cache hit proxy (0..1) from the spread of
+// per-request credit cost. The cold baseline is the most expensive credit-per-1k-
+// input sample; each request's saving versus that baseline is averaged. A flat
+// cost (no cache benefit) yields 0; consistently cheaper repeats approach 1.
+func kiroCacheSavingsRatio(samples []float64) float64 {
+	if len(samples) < 2 {
+		return 0
+	}
+	baseline := 0.0
+	for _, v := range samples {
+		if v > baseline {
+			baseline = v
+		}
+	}
+	if baseline <= 0 {
+		return 0
+	}
+	var savingsSum float64
+	for _, v := range samples {
+		saving := (baseline - v) / baseline
+		if saving < 0 {
+			saving = 0
+		}
+		savingsSum += saving
+	}
+	ratio := savingsSum / float64(len(samples))
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
+// applyKiroCacheSignal threads the derived Kiro cache signal onto the per-model
+// summaries and the aggregate summary. Token-based cache_ratio stays untouched
+// (it is zero for Kiro by nature); these fields are the truthful replacement.
+func applyKiroCacheSignal(summary *CacheStatisticsSummary, byModel []CacheStatisticsModelSummary, stats map[string]*kiroCacheModelStat) {
+	if summary == nil || len(stats) == 0 {
+		return
+	}
+	var (
+		totalCredits float64
+		totalCtxSum  float64
+		totalCtxRows int64
+		// weightedSavings accumulates each model's savings ratio scaled by its
+		// credit volume, so the aggregate is a credit-weighted average of the
+		// per-model ratios rather than a single global baseline over pooled
+		// samples. Pooling would misread the structural credit-per-input gap
+		// between models (e.g. opus vs haiku) as cache savings.
+		weightedSavings float64
+		savingsWeight   float64
+	)
+	for i := range byModel {
+		stat := stats[strings.TrimSpace(byModel[i].Model)]
+		if stat == nil {
+			continue
+		}
+		byModel[i].KiroCredits = stat.creditSum
+		if stat.ctxUsageRows > 0 {
+			byModel[i].KiroContextUsagePercent = stat.ctxUsageSum / float64(stat.ctxUsageRows)
+		}
+		byModel[i].KiroCacheSavingsRatio = kiroCacheSavingsRatio(stat.creditPer1kInput)
+	}
+	for _, stat := range stats {
+		totalCredits += stat.creditSum
+		totalCtxSum += stat.ctxUsageSum
+		totalCtxRows += stat.ctxUsageRows
+		// Weight each model's savings by its credit spend so a high-volume model
+		// dominates the headline number proportionally to its actual cost.
+		if stat.creditSum > 0 {
+			weightedSavings += kiroCacheSavingsRatio(stat.creditPer1kInput) * stat.creditSum
+			savingsWeight += stat.creditSum
+		}
+	}
+	summary.KiroCredits = totalCredits
+	if totalCtxRows > 0 {
+		summary.KiroContextUsagePercent = totalCtxSum / float64(totalCtxRows)
+	}
+	if savingsWeight > 0 {
+		summary.KiroCacheSavingsRatio = weightedSavings / savingsWeight
+	}
 }
 
 func (s *CacheStatisticsStore) StatisticsSnapshot(ctx context.Context) (StatisticsSnapshot, error) {

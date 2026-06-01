@@ -2150,6 +2150,23 @@
     const cachedTokens = Number(summary && summary.cached_tokens || 0);
     const inputTokens = Number(summary && summary.input_tokens || 0);
     const effectiveInputTokens = Number(summary && summary.effective_input_tokens || inputTokens || 0);
+    // Kiro (AWS CodeWhisperer) reports no token-level cache counts, so cached_tokens
+    // is always 0 for Kiro traffic and the token ratio would read a misleading 0%.
+    // When the summary carries the Kiro credit signal, show the derived cache-savings
+    // ratio (credits saved vs the cold per-input baseline) and total credits instead.
+    const kiroCredits = Number(summary && summary.kiro_credits || 0);
+    if (kiroCredits > 0) {
+      const savingsRatio = Number(summary && summary.kiro_cache_savings_ratio || 0);
+      const savingsPct = (savingsRatio * 100).toFixed(2);
+      const ctxUsagePct = (Number(summary && summary.kiro_context_usage_percent || 0) * 100).toFixed(1);
+      const kiroSignature = ['cached-card-kiro', timeRange && timeRange.key || '', getUsageProviderFilter(), kiroCredits, savingsPct, ctxUsagePct].join(':');
+      setEnhancerMarkup(cachedCard, kiroSignature, `
+      <div class="cliproxy-enhancer__label">Kiro Cache Savings</div>
+      <div class="cliproxy-enhancer__value">${escapeHTML(savingsPct)}%<span>${escapeHTML(formatCompact(kiroCredits))} credits</span></div>
+      <div class="cliproxy-enhancer__hint">credits saved vs cold baseline; avg context usage ${escapeHTML(ctxUsagePct)}% (Kiro reports cache benefit as reduced credits, not cached tokens)</div>
+    `);
+      return;
+    }
     const percentage = effectiveInputTokens > 0 ? ((cachedTokens / effectiveInputTokens) * 100).toFixed(2) : '0.00';
     const signature = ['cached-card', timeRange && timeRange.key || '', getUsageProviderFilter(), cachedTokens, effectiveInputTokens, percentage].join(':');
     setEnhancerMarkup(cachedCard, signature, `

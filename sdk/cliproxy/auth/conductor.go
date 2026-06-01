@@ -3123,6 +3123,54 @@ func isUnauthorizedError(err error) bool {
 	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
 }
 
+// isInvalidGrantError reports whether err is an OAuth2 invalid_grant failure.
+// Providers such as Kiro (AWS SSO IDC) return this as an HTTP 400, so it escapes
+// the 401-only isUnauthorizedError check; without special handling the refresh
+// scheduler would retry the same dead/consumed refresh token indefinitely.
+func isInvalidGrantError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
+}
+
+// refreshTokenFromAuth extracts the OAuth2 refresh token stored in auth metadata,
+// returning "" when absent. Used to detect whether a sibling process already
+// rotated the token in the shared store.
+func refreshTokenFromAuth(auth *Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	if v, ok := auth.Metadata["refresh_token"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// reloadAuthFromStore fetches the authoritative copy of an auth record from the
+// backing store (the DB is shared across processes), returning nil when no store
+// is configured, the lookup fails, or the id is absent. This lets a refresh that
+// failed on a stale in-memory token detect a token another process rotated.
+func (m *Manager) reloadAuthFromStore(ctx context.Context, id string) *Auth {
+	if m == nil || m.store == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	items, err := m.store.List(ctx)
+	if err != nil {
+		log.WithError(err).Debugf("reload auth from store failed for %s", id)
+		return nil
+	}
+	for _, item := range items {
+		if item != nil && item.ID == id {
+			return item
+		}
+	}
+	return nil
+}
+
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
 	if auth == nil || auth.LastError == nil {
 		return false
@@ -5156,12 +5204,65 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		if m.purgeAuthIfTokenInvalidated(ctx, id, "auth refresh", err) {
 			return
 		}
+		// invalid_grant (e.g. Kiro/AWS SSO IDC returns it as HTTP 400) means the
+		// refresh token we presented was rejected. The dominant cause is a sibling
+		// process having already consumed and rotated the single-use refresh token
+		// in the shared store. Reload the authoritative copy to tell a rotated token
+		// (recoverable) apart from a genuinely revoked one (must stop retrying).
 		unauthorized := isUnauthorizedError(err)
+		if isInvalidGrantError(err) && !unauthorized {
+			if stored := m.reloadAuthFromStore(ctx, id); stored != nil {
+				storedRT := refreshTokenFromAuth(stored)
+				if storedRT != "" && storedRT != refreshTokenFromAuth(cloned) {
+					// A sibling rotated the token; retry once with the fresh copy.
+					retryAuth := stored.Clone()
+					if retried, retryErr := exec.Refresh(ctx, retryAuth); retryErr == nil {
+						log.Debugf("refresh recovered %s, %s via rotated store token", auth.Provider, auth.ID)
+						if retried == nil {
+							retried = retryAuth
+						}
+						if retried.Runtime == nil {
+							retried.Runtime = auth.Runtime
+						}
+						retried.LastRefreshedAt = now
+						retried.NextRefreshAfter = time.Time{}
+						retried.LastError = nil
+						retried.UpdatedAt = now
+						if m.shouldRefresh(retried, now) {
+							retried.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
+						}
+						_, _ = m.Update(ctx, retried)
+						return
+					}
+					// The rotated token also failed: most likely the sibling
+					// rotated again mid-flight (transient contention), not a dead
+					// credential. Fall through to a timed backoff rather than
+					// permanently disabling a token that may still be valid.
+				} else {
+					// The store holds the same token we just used, so it is
+					// genuinely revoked: escalate to unauthorized to stop the loop.
+					unauthorized = true
+				}
+			} else {
+				// No authoritative store copy to disprove deadness (e.g. no store
+				// configured): treat invalid_grant as a hard failure and stop the
+				// scheduler from retrying a dead token every refreshFailureBackoff.
+				unauthorized = true
+			}
+		}
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
 			if unauthorized {
+				// Normalize to a 401/unauthorized LastError so hasUnauthorizedAuthFailure
+				// removes this auth from the auto-refresh schedule. invalid_grant arrives
+				// as HTTP 400, which would otherwise leave the auth schedulable.
+				current.LastError = &Error{
+					Code:       "unauthorized",
+					Message:    err.Error(),
+					HTTPStatus: http.StatusUnauthorized,
+				}
 				current.NextRefreshAfter = time.Time{}
 				current.Unavailable = true
 				current.Status = StatusError
