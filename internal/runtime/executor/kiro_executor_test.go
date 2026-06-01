@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -53,8 +55,52 @@ func TestRegionForCreds(t *testing.T) {
 	}
 }
 
-// TestRefresh_NoRefreshTokenIsNoop verifies Refresh returns the auth unchanged and makes
-// no network call when there is no refresh token.
+// TestKiroRetryAfter verifies the 429 cooldown derivation: non-429 yields no hint,
+// 429 without an upstream hint is floored, and explicit hints above the floor win.
+func TestKiroRetryAfter(t *testing.T) {
+	// Non-429 must return nil so other statuses fall through to default handling.
+	if got := kiroRetryAfter(http.StatusInternalServerError, nil, nil); got != nil {
+		t.Fatalf("non-429 retryAfter = %v, want nil", got)
+	}
+
+	// 429 with no hint anywhere is raised to the floor.
+	if got := kiroRetryAfter(http.StatusTooManyRequests, nil, []byte(`{"message":"Too many requests"}`)); got == nil || *got != kiroRateLimitCooldownFloor {
+		t.Fatalf("hint-less 429 retryAfter = %v, want %v", got, kiroRateLimitCooldownFloor)
+	}
+
+	// Retry-After header in seconds, above the floor, wins.
+	hdr := http.Header{}
+	hdr.Set("Retry-After", "30")
+	if got := kiroRetryAfter(http.StatusTooManyRequests, hdr, nil); got == nil || *got != 30*time.Second {
+		t.Fatalf("Retry-After=30 retryAfter = %v, want 30s", got)
+	}
+
+	// A header hint below the floor is raised to the floor.
+	hdrLow := http.Header{}
+	hdrLow.Set("Retry-After", "1")
+	if got := kiroRetryAfter(http.StatusTooManyRequests, hdrLow, nil); got == nil || *got != kiroRateLimitCooldownFloor {
+		t.Fatalf("Retry-After=1 retryAfter = %v, want floor %v", got, kiroRateLimitCooldownFloor)
+	}
+
+	// Retry-After-Ms is honored when larger than the floor.
+	hdrMs := http.Header{}
+	hdrMs.Set("Retry-After-Ms", "12000")
+	if got := kiroRetryAfter(http.StatusTooManyRequests, hdrMs, nil); got == nil || *got != 12*time.Second {
+		t.Fatalf("Retry-After-Ms=12000 retryAfter = %v, want 12s", got)
+	}
+
+	// Body retryDelay (Google-style duration string) is honored when larger than the floor.
+	if got := kiroRetryAfter(http.StatusTooManyRequests, nil, []byte(`{"retryDelay":"15s"}`)); got == nil || *got != 15*time.Second {
+		t.Fatalf("body retryDelay=15s retryAfter = %v, want 15s", got)
+	}
+
+	// A far-future / bogus hint is clamped to the max so a credential cannot be suspended indefinitely.
+	hdrHuge := http.Header{}
+	hdrHuge.Set("Retry-After", "86400") // 24h
+	if got := kiroRetryAfter(http.StatusTooManyRequests, hdrHuge, nil); got == nil || *got != kiroRateLimitCooldownMax {
+		t.Fatalf("Retry-After=86400 retryAfter = %v, want clamp %v", got, kiroRateLimitCooldownMax)
+	}
+}
 func TestRefresh_NoRefreshTokenIsNoop(t *testing.T) {
 	e := NewKiroExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "a"}}

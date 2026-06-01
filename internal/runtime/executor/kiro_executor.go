@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -289,6 +290,73 @@ func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxy
 	return arn, freshToken
 }
 
+// kiroRateLimitCooldownFloor is the minimum cooldown applied to a Kiro auth file
+// after a 429. Kiro's "SERVICE_REQUEST_RATE_EXCEEDED" body carries no retry hint,
+// so without a floor the conductor's quota backoff would start at 1s and the
+// fill-first selector would ping-pong across files at 1s granularity. A 5s floor
+// gives the rate-limited credential time to recover before it is reselected.
+const kiroRateLimitCooldownFloor = 5 * time.Second
+
+// kiroRateLimitCooldownMax caps the cooldown derived from an upstream hint. A
+// malformed or far-future Retry-After HTTP-date would otherwise suspend the
+// credential for the full bogus duration (MarkResult stores now+retryAfter with
+// no ceiling). Five minutes is well beyond any legitimate rate-limit window.
+const kiroRateLimitCooldownMax = 5 * time.Minute
+
+// kiroRetryAfter derives the cooldown to attach to a Kiro 429 error. It prefers an
+// explicit upstream hint (Retry-After / Retry-After-Ms headers, or a body retryDelay),
+// then enforces kiroRateLimitCooldownFloor so a hint-less rate-limit still yields a
+// calm cooldown. It returns nil for any non-429 status so other failures fall through
+// to the conductor's default per-status handling unchanged.
+func kiroRetryAfter(status int, header http.Header, body []byte) *time.Duration {
+	if status != http.StatusTooManyRequests {
+		return nil
+	}
+
+	// Largest of any explicit upstream hint wins; default 0 means "no hint".
+	var hint time.Duration
+
+	// Retry-After header: integer seconds or an HTTP-date.
+	if header != nil {
+		if raw := strings.TrimSpace(header.Get("Retry-After")); raw != "" {
+			if secs, errConv := strconv.Atoi(raw); errConv == nil && secs > 0 {
+				hint = time.Duration(secs) * time.Second
+			} else if when, errParse := http.ParseTime(raw); errParse == nil {
+				if d := time.Until(when); d > hint {
+					hint = d
+				}
+			}
+		}
+		// Retry-After-Ms header: integer milliseconds (Anthropic-style).
+		if raw := strings.TrimSpace(header.Get("Retry-After-Ms")); raw != "" {
+			if ms, errConv := strconv.Atoi(raw); errConv == nil && ms > 0 {
+				if d := time.Duration(ms) * time.Millisecond; d > hint {
+					hint = d
+				}
+			}
+		}
+	}
+
+	// Body retryDelay (e.g. "0.847655010s" or "30s"), if the upstream ever sends one.
+	if len(body) > 0 {
+		if raw := strings.TrimSpace(gjson.GetBytes(body, "retryDelay").String()); raw != "" {
+			if d, errDur := time.ParseDuration(raw); errDur == nil && d > hint {
+				hint = d
+			}
+		}
+	}
+
+	// Enforce the floor: a hint shorter than the floor (or no hint at all) is raised.
+	if hint < kiroRateLimitCooldownFloor {
+		hint = kiroRateLimitCooldownFloor
+	}
+	// Cap a bogus/far-future upstream hint so it cannot suspend the credential indefinitely.
+	if hint > kiroRateLimitCooldownMax {
+		hint = kiroRateLimitCooldownMax
+	}
+	return &hint
+}
+
 // Execute performs a non-streaming generate request and assembles a single response.
 func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -314,7 +382,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: kiroRetryAfter(httpResp.StatusCode, httpResp.Header, b)}
 		return resp, err
 	}
 
@@ -371,7 +439,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kiro executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: kiroRetryAfter(httpResp.StatusCode, httpResp.Header, b)}
 		return nil, err
 	}
 
