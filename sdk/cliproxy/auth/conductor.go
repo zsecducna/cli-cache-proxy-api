@@ -2765,18 +2765,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						suspendReason = "model_not_supported"
 						shouldSuspendModel = true
 					} else if isCloudflareChallengeResultError(result.Error) {
-						var next time.Time
-						backoffLevel := state.Quota.BackoffLevel
-						if !disableCooling {
-							cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-							if cooldown < 10*time.Second {
-								cooldown = 10 * time.Second
-							}
-							if cooldown > 0 {
-								next = now.Add(cooldown)
-							}
-							backoffLevel = nextLevel
-						}
+						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
 						state.NextRetryAfter = next
 						state.StatusMessage = "cloudflare challenge"
 						if auth.LastError != nil {
@@ -3339,7 +3328,7 @@ func isCloudflareChallengeErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(lower, "challenge-platform") ||
 		strings.Contains(lower, "cf-mitigated") ||
-		strings.Contains(lower, "challenge") ||
+		strings.Contains(lower, "cloudflare challenge") ||
 		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
 }
 
@@ -3355,6 +3344,21 @@ func isCloudflareChallengeResultError(err *Error) bool {
 		return false
 	}
 	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
+func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
+	var next time.Time
+	if !disableCooling {
+		cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
+		if cooldown < 10*time.Second {
+			cooldown = 10 * time.Second
+		}
+		if cooldown > 0 {
+			next = now.Add(cooldown)
+		}
+		backoffLevel = nextLevel
+	}
+	return next, backoffLevel
 }
 func isRequestScopedNotFoundMessage(message string) bool {
 	if message == "" {
@@ -3445,18 +3449,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	statusCode := statusCodeFromResult(resultErr)
 	if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
-		var next time.Time
-		backoffLevel := auth.Quota.BackoffLevel
-		if !disableCooling {
-			cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-			if cooldown < 10*time.Second {
-				cooldown = 10 * time.Second
-			}
-			if cooldown > 0 {
-				next = now.Add(cooldown)
-			}
-			backoffLevel = nextLevel
-		}
+		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
 		auth.Quota = QuotaState{
 			Exceeded:      true,
 			Reason:        "cloudflare challenge",
