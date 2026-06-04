@@ -4,6 +4,8 @@ English | [中文](README_CN.md) | [日本語](README_JA.md)
 
 A proxy server that exposes OpenAI, Gemini, Claude, and Codex compatible API interfaces for CLI tools and SDKs. It supports OAuth-backed access for Claude Code, OpenAI Codex (GPT models), Qwen Code, iFlow, and other compatible clients, plus configurable upstream routing and multi-account load balancing.
 
+> A fork of the original [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+
 ## Installation
 
 Pick the install method for your platform. Each installer is interactive and walks you through config, service setup, and optional Postgres provisioning.
