@@ -54,7 +54,7 @@ statistics with Postgres:
 
 ```bash
 cat > .env <<'EOF'
-PGSTORE_DSN=postgresql://cheaprouter:cheaprouter@localhost:5432/cliproxy
+PGSTORE_DSN=postgresql://<db-user>:<db-password>@localhost:5432/cliproxy
 PGSTORE_SCHEMA=public
 PGSTORE_LOCAL_PATH=~/.cli-cache-proxy
 EOF
