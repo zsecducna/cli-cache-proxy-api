@@ -140,11 +140,33 @@ func (a KiroAuthenticator) loginDevice(ctx context.Context, authSvc *kiro.KiroAu
 	// request (it only mutates a per-request auth clone, so its resolution never persists).
 	profileArn := tokenData.ProfileArn
 	if profileArn == "" {
-		if arn, errArn := authSvc.ListAvailableProfiles(ctx, tokenData.AccessToken, region); errArn != nil {
-			log.Warnf("kiro: failed to resolve profile ARN at login: %v", errArn)
-		} else {
-			profileArn = arn
+		resolvedTokenData, resolvedProfileArn, errResolve := authSvc.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
+			RefreshToken: tokenData.RefreshToken,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			Region:       region,
+		})
+		if resolvedTokenData != nil {
+			tokenData = resolvedTokenData
 		}
+		if errResolve != nil {
+			log.Warnf("kiro: failed to resolve profile ARN at login: %v", errResolve)
+		} else {
+			profileArn = resolvedProfileArn
+		}
+	}
+	// Some IDC tenants return an empty profile list even after the OIDC refresh retry.
+	// Reuse a previously resolved profileArn from the same start URL and region when one
+	// already exists in the configured auth directory.
+	if profileArn == "" {
+		if cachedProfileArn := authSvc.CachedProfileArnForStartURL(startURL, region); cachedProfileArn != "" {
+			profileArn = cachedProfileArn
+		}
+	}
+	// Reject a credential that still has no profileArn: the runtime generate endpoint
+	// will hard-fail every request, so persisting it only creates a broken auth record.
+	if errProfile := kiro.RequireProfileArn(profileArn, "kiro login"); errProfile != nil {
+		return nil, errProfile
 	}
 
 	return &kiro.KiroAuthBundle{
@@ -180,6 +202,11 @@ func (a KiroAuthenticator) loginImport(ctx context.Context, authSvc *kiro.KiroAu
 	}
 	if tokenData.RefreshToken == "" {
 		tokenData.RefreshToken = refreshToken
+	}
+	// Imported credentials must already carry the runtime profileArn because there is no
+	// separate login-time recovery step after the file is persisted.
+	if errProfile := kiro.RequireProfileArn(tokenData.ProfileArn, "kiro import"); errProfile != nil {
+		return nil, errProfile
 	}
 
 	return &kiro.KiroAuthBundle{

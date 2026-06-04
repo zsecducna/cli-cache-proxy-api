@@ -60,3 +60,7 @@ _bmad-output/*
 .cli-proxy-api/
 .venv/
 .omx/
+
+# Local kiro payload probes
+.tmp_build_kiro_payload_probe.go
+tmp_kiroprobe/

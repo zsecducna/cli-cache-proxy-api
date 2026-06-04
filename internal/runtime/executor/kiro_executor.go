@@ -176,6 +176,11 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 			creds.accessToken = freshToken
 		}
 	}
+	// Stop locally when the credential still has no profileArn: forwarding the request
+	// only produces an opaque upstream 400 and leaves the operator with no repair hint.
+	if errProfile := kiroauth.RequireProfileArn(creds.profileArn, "kiro request"); errProfile != nil {
+		return kiroRequest{}, errProfile
+	}
 
 	var openaiBody, kiroBody []byte
 	var nameRestore map[string]string
@@ -645,6 +650,11 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		if arn, errArn := svc.ListAvailableProfiles(ctx, td.AccessToken, regionForCreds(creds)); errArn == nil && arn != "" {
 			auth.Metadata["profile_arn"] = arn
 		}
+	}
+	// Reject refresh results that still cannot identify a runtime profile so the broken
+	// credential is not persisted back to pgstore/file storage as "successfully refreshed".
+	if errProfile := kiroauth.RequireProfileArn(strings.TrimSpace(metaStringValue(auth.Metadata, "profile_arn")), "kiro refresh"); errProfile != nil {
+		return nil, errProfile
 	}
 	if td.ExpiresAt > 0 {
 		auth.Metadata["expired"] = time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)

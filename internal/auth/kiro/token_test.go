@@ -80,3 +80,14 @@ func TestNeedsRefresh(t *testing.T) {
 		t.Fatal("NeedsRefresh() = false with refresh token and expiry, want true")
 	}
 }
+
+// TestRequireProfileArn verifies Kiro rejects credentials that never resolved the
+// runtime-mandatory profile ARN.
+func TestRequireProfileArn(t *testing.T) {
+	if err := RequireProfileArn("arn:aws:codewhisperer:us-east-1:1:profile/p", "kiro test"); err != nil {
+		t.Fatalf("RequireProfileArn() unexpected error = %v", err)
+	}
+	if err := RequireProfileArn("", "kiro test"); err == nil {
+		t.Fatal("RequireProfileArn() error = nil, want missing-profile failure")
+	}
+}

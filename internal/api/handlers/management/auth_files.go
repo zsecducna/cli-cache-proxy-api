@@ -1629,7 +1629,18 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, err := store.Save(ctx, record)
+	if err != nil {
+		return "", err
+	}
+	// Refresh the live auth manager immediately after persistence so a newly saved or
+	// overwritten OAuth record is usable for requests in the same server process. The
+	// file watcher will also observe the write later, but login flows must not depend on
+	// that asynchronous reload to pick up fresh access tokens.
+	if errUpsert := h.upsertAuthRecord(ctx, record); errUpsert != nil {
+		return "", errUpsert
+	}
+	return savedPath, nil
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -2724,11 +2735,35 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		// request (it only mutates a per-request auth clone, so the resolution never sticks).
 		profileArn := tokenData.ProfileArn
 		if profileArn == "" {
-			if arn, errArn := kiroAuth.ListAvailableProfiles(ctx, tokenData.AccessToken, region); errArn != nil {
-				log.Warnf("kiro: failed to resolve profile ARN at login: %v", errArn)
-			} else {
-				profileArn = arn
+			resolvedTokenData, resolvedProfileArn, errResolve := kiroAuth.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
+				RefreshToken: tokenData.RefreshToken,
+				ClientID:     clientID,
+				ClientSecret: clientSecret,
+				Region:       region,
+			})
+			if resolvedTokenData != nil {
+				tokenData = resolvedTokenData
 			}
+			if errResolve != nil {
+				log.Warnf("kiro: failed to resolve profile ARN at login: %v", errResolve)
+			} else {
+				profileArn = resolvedProfileArn
+			}
+		}
+		// Some IDC tenants return an empty profile list even after the OIDC refresh retry.
+		// Reuse a previously resolved profileArn from the same start URL and region when one
+		// already exists in the configured auth directory.
+		if profileArn == "" {
+			if cachedProfileArn := kiroAuth.CachedProfileArnForStartURL(startURL, region); cachedProfileArn != "" {
+				profileArn = cachedProfileArn
+			}
+		}
+		// Refuse to persist a Kiro auth without profileArn: every runtime request would
+		// fail upstream, and pgstore/file mirrors would keep replaying the broken record.
+		if errProfile := kiro.RequireProfileArn(profileArn, "kiro login"); errProfile != nil {
+			SetOAuthSessionError(state, fmt.Sprintf("Kiro profile ARN resolution failed: %v", errProfile))
+			fmt.Printf("Kiro authentication failed: %v\n", errProfile)
+			return
 		}
 
 		// Persist the device-flow client credentials so the token can be refreshed via

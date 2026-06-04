@@ -37,18 +37,21 @@ type KiroAuth struct {
 	proxyURL string
 	// tokenURLFn and socialRefreshURL are overridable in tests; they default to the real
 	// AWS SSO OIDC token endpoint and the social refresh endpoint respectively.
-	tokenURLFn       func(region string) string
-	socialRefreshURL string
+	tokenURLFn func(region string) string
+	// listProfilesURLFn is overridable in tests so header/body assertions can target a
+	// local httptest server instead of the real CodeWhisperer endpoint.
+	listProfilesURLFn func(region string) string
+	socialRefreshURL  string
 }
 
 // NewKiroAuth creates a new KiroAuth service instance.
 func NewKiroAuth(cfg *config.Config) *KiroAuth {
-	return &KiroAuth{cfg: cfg, tokenURLFn: OIDCTokenURL, socialRefreshURL: socialAuthBase + "/refreshToken"}
+	return &KiroAuth{cfg: cfg, tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken"}
 }
 
 // NewKiroAuthWithProxy creates a KiroAuth that overrides the configured proxy URL.
 func NewKiroAuthWithProxy(cfg *config.Config, proxyURL string) *KiroAuth {
-	return &KiroAuth{cfg: cfg, proxyURL: strings.TrimSpace(proxyURL), tokenURLFn: OIDCTokenURL, socialRefreshURL: socialAuthBase + "/refreshToken"}
+	return &KiroAuth{cfg: cfg, proxyURL: strings.TrimSpace(proxyURL), tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken"}
 }
 
 // httpClient builds a proxy-aware HTTP client with a credential-phase timeout.
@@ -115,6 +118,14 @@ func (k *KiroAuth) socialRefreshEndpoint() string {
 		return k.socialRefreshURL
 	}
 	return socialAuthBase + "/refreshToken"
+}
+
+// listProfilesURL resolves the ListAvailableProfiles endpoint, honoring a test override.
+func (k *KiroAuth) listProfilesURL(region string) string {
+	if k.listProfilesURLFn != nil {
+		return k.listProfilesURLFn(region)
+	}
+	return ListProfilesEndpoint(region)
 }
 
 // RegisterClient registers a public OAuth client with AWS SSO OIDC and returns the
@@ -330,6 +341,113 @@ func (k *KiroAuth) ValidateImportToken(ctx context.Context, refreshToken string)
 	return k.refreshViaSocial(ctx, refreshToken)
 }
 
+// ResolveProfileArn resolves the runtime-mandatory profileArn for a Kiro credential.
+// It first tries the current access token, then refreshes once with the OIDC client
+// credentials and retries the profile lookup. When the refresh path succeeds, the
+// refreshed token data is returned so callers can persist the working token set rather
+// than the stale pre-refresh access token.
+func (k *KiroAuth) ResolveProfileArn(ctx context.Context, tokenData *KiroTokenData, params RefreshParams) (*KiroTokenData, string, error) {
+	if tokenData == nil {
+		return nil, "", fmt.Errorf("kiro: token data is nil")
+	}
+	if profileArn := strings.TrimSpace(tokenData.ProfileArn); profileArn != "" {
+		return tokenData, profileArn, nil
+	}
+	if strings.TrimSpace(tokenData.AccessToken) == "" {
+		return tokenData, "", fmt.Errorf("kiro: access token is empty")
+	}
+
+	arn, errLookup := k.ListAvailableProfiles(ctx, tokenData.AccessToken, params.Region)
+	if errLookup == nil && strings.TrimSpace(arn) != "" {
+		return tokenData, arn, nil
+	}
+
+	if strings.TrimSpace(params.RefreshToken) == "" || strings.TrimSpace(params.ClientID) == "" || strings.TrimSpace(params.ClientSecret) == "" {
+		if errLookup != nil {
+			return tokenData, "", errLookup
+		}
+		return tokenData, "", fmt.Errorf("kiro: no profiles available")
+	}
+
+	refreshed, errRefresh := k.RefreshToken(ctx, params)
+	if errRefresh != nil {
+		if errLookup != nil {
+			return tokenData, "", fmt.Errorf("kiro: profile lookup failed before refresh retry: %v; refresh retry failed: %w", errLookup, errRefresh)
+		}
+		return tokenData, "", fmt.Errorf("kiro: refresh retry failed while resolving profile ARN: %w", errRefresh)
+	}
+	if profileArn := strings.TrimSpace(refreshed.ProfileArn); profileArn != "" {
+		return refreshed, profileArn, nil
+	}
+
+	arn, errRetry := k.ListAvailableProfiles(ctx, refreshed.AccessToken, params.Region)
+	if errRetry == nil && strings.TrimSpace(arn) != "" {
+		return refreshed, arn, nil
+	}
+	if errRetry != nil {
+		if errLookup != nil {
+			return refreshed, "", fmt.Errorf("kiro: profile lookup failed before refresh retry: %v; retry failed after refresh: %w", errLookup, errRetry)
+		}
+		return refreshed, "", errRetry
+	}
+	if errLookup != nil {
+		return refreshed, "", fmt.Errorf("kiro: profile lookup failed before refresh retry: %v; no profiles available after refresh", errLookup)
+	}
+	return refreshed, "", fmt.Errorf("kiro: no profiles available after refresh")
+}
+
+// CachedProfileArnForStartURL looks for an existing Kiro auth in the configured auth
+// directory that already resolved a profileArn for the same IDC start URL and region.
+// This is a last-resort fallback for tenants where ListAvailableProfiles currently
+// returns an empty list even after a successful device login + OIDC refresh.
+func (k *KiroAuth) CachedProfileArnForStartURL(startURL, region string) string {
+	if k == nil || k.cfg == nil {
+		return ""
+	}
+	resolvedAuthDir, err := util.ResolveAuthDir(k.cfg.AuthDir)
+	if err != nil || strings.TrimSpace(resolvedAuthDir) == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(resolvedAuthDir)
+	if err != nil {
+		return ""
+	}
+	wantStartURL := strings.TrimSpace(startURL)
+	wantRegion := normalizeRegion(region)
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		data, errRead := os.ReadFile(filepath.Join(resolvedAuthDir, entry.Name()))
+		if errRead != nil || len(data) == 0 {
+			continue
+		}
+		var parsed struct {
+			Type       string `json:"type"`
+			StartURL   string `json:"start_url"`
+			Region     string `json:"region"`
+			ProfileArn string `json:"profile_arn"`
+		}
+		if errParse := json.Unmarshal(data, &parsed); errParse != nil {
+			continue
+		}
+		if strings.TrimSpace(parsed.Type) != "kiro" {
+			continue
+		}
+		if strings.TrimSpace(parsed.ProfileArn) == "" {
+			continue
+		}
+		if strings.TrimSpace(parsed.StartURL) != wantStartURL {
+			continue
+		}
+		if normalizeRegion(parsed.Region) != wantRegion {
+			continue
+		}
+		return strings.TrimSpace(parsed.ProfileArn)
+	}
+	return ""
+}
+
 // AutoDetectToken scans ~/.aws/sso/cache for a cached Kiro refresh token, preferring
 // kiro-auth-token.json. It returns the first refresh token with the expected prefix.
 func (k *KiroAuth) AutoDetectToken() (string, error) {
@@ -416,14 +534,21 @@ func (k *KiroAuth) ListAvailableProfiles(ctx context.Context, accessToken, regio
 	if err != nil {
 		return "", fmt.Errorf("kiro: failed to marshal list-profiles request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ListProfilesEndpoint(region), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, k.listProfilesURL(region), bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("kiro: failed to create list-profiles request: %w", err)
 	}
-	// aws-json-1.0 protocol: operation is routed by X-Amz-Target, not the path.
+	// Mirror the Kiro client headers closely here too: profile resolution hits a separate
+	// service endpoint, but it still expects an AWS JSON target request that looks like a
+	// Kiro/Amazon Q Developer client rather than a generic bearer-token POST.
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+	req.Header.Set("Accept", "application/x-amz-json-1.0")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("X-Amz-Target", ListProfilesTarget)
+	req.Header.Set("amz-sdk-invocation-id", BuildMachineID(accessToken, region, "list-profiles"))
+	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
+	req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	req.Header.Set("User-Agent", BuildUserAgent(machineID))
 	req.Header.Set("x-amz-user-agent", BuildXAmzUserAgent(machineID))
 
