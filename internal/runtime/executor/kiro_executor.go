@@ -39,6 +39,88 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor { return &KiroExecutor{cf
 // Identifier returns the executor identifier.
 func (e *KiroExecutor) Identifier() string { return "kiro" }
 
+// ShouldPrepareRequestAuth reports whether the access token must be refreshed before
+// the request is sent. Kiro access tokens are short-lived and AWS SSO OIDC rotates them
+// on every refresh, immediately invalidating the previous one. The background refresh
+// loop alone is insufficient: a request that picked an auth clone before the loop rotated
+// the token would send the now-dead token and get a 403 "bearer token ... is invalid".
+// Returning true here routes the auth through Manager.prepareRequestAuth, which refreshes
+// under a per-auth lock against the latest in-memory state and persists once, closing that
+// rotation race. Refresh is only possible (and only worthwhile) when a refresh token exists
+// and the access token is missing or within the refresh lead of expiry.
+func (e *KiroExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	creds := kiroCreds(auth)
+	if strings.TrimSpace(creds.refreshToken) == "" {
+		return false // Cannot refresh without a refresh token; send what we have.
+	}
+	if strings.TrimSpace(creds.accessToken) == "" {
+		return true // No usable token at all; must mint one before the request.
+	}
+	return kiroAccessTokenExpiringSoon(auth)
+}
+
+// PrepareRequestAuth refreshes the Kiro access token just before the request when
+// ShouldPrepareRequestAuth signaled it is missing or near expiry. It delegates to the
+// shared Refresh path so token rotation, profileArn resolution, and metadata updates stay
+// in one place. Returning the same auth unchanged when no refresh is needed lets the
+// caller proceed with the existing token.
+func (e *KiroExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
+		return auth, nil
+	}
+	refreshed, err := e.Refresh(ctx, auth)
+	if err != nil {
+		// ShouldPrepareRequestAuth fires up to 5 minutes BEFORE expiry, so the current
+		// token is often still valid right now. A transient refresh failure (network blip,
+		// AWS OIDC 5xx) must not fail the request when we still hold a usable token: fall
+		// back to it and let the next attempt or the proactive loop retry the refresh.
+		// Only surface the error when there is no usable token left to send (missing or
+		// already expired).
+		if kiroAccessTokenStillUsable(auth) {
+			log.Warnf("kiro executor: request-time refresh failed, falling back to still-valid token: %v", err)
+			return auth, nil
+		}
+		return nil, err
+	}
+	return refreshed, nil
+}
+
+// kiroAccessTokenStillUsable reports whether auth currently holds an access token that can
+// still be sent upstream: present, and — when a parseable expiry exists — not yet past it.
+// Distinct from kiroAccessTokenExpiringSoon (which fires within the pre-expiry lead): a
+// token can be "expiring soon" yet "still usable" in the lead window.
+func kiroAccessTokenStillUsable(auth *cliproxyauth.Auth) bool {
+	if strings.TrimSpace(kiroCreds(auth).accessToken) == "" {
+		return false
+	}
+	expiry, ok := auth.ExpirationTime()
+	if !ok || expiry.IsZero() {
+		return true // Present token with no parseable expiry: assume usable.
+	}
+	return time.Now().Before(expiry)
+}
+
+// kiroAccessTokenExpiringSoon reports whether the access token expires within the Kiro
+// refresh lead (5 minutes, matching sdk/auth.kiroRefreshLead and the conductor's proactive
+// scheduler). A missing or unparseable expiry is treated as "not expiring" here because the
+// missing-token case is already handled by ShouldPrepareRequestAuth; we only want the
+// time-based trigger to fire on a genuine, parseable near-expiry timestamp.
+func kiroAccessTokenExpiringSoon(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	expiry, ok := auth.ExpirationTime()
+	if !ok || expiry.IsZero() {
+		return false
+	}
+	return time.Until(expiry) <= kiroRequestRefreshLead
+}
+
+// kiroRequestRefreshLead is the pre-expiry window in which a request-time refresh is
+// triggered. It matches the proactive loop's lead (sdk/auth.kiroRefreshLead) so the
+// request path and the background loop agree on when a token is "near expiry".
+const kiroRequestRefreshLead = 5 * time.Minute
+
 // kiroCredentials holds the per-auth credentials read from metadata/attributes.
 type kiroCredentials struct {
 	accessToken  string
@@ -651,15 +733,20 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 			auth.Metadata["profile_arn"] = arn
 		}
 	}
-	// Reject refresh results that still cannot identify a runtime profile so the broken
-	// credential is not persisted back to pgstore/file storage as "successfully refreshed".
-	if errProfile := kiroauth.RequireProfileArn(strings.TrimSpace(metaStringValue(auth.Metadata, "profile_arn")), "kiro refresh"); errProfile != nil {
-		return nil, errProfile
-	}
+	// Always persist the freshly minted token, including its new expiry. The token
+	// refresh itself SUCCEEDED above; AWS SSO OIDC has already rotated and invalidated the
+	// previous access token, so the old one in metadata is dead. Discarding this result on a
+	// profileArn-resolution miss (RequireProfileArn returning an error) would leave the dead
+	// token in place and guarantee a 403 "bearer token ... is invalid" on the next request —
+	// exactly the failure this path is meant to prevent. A missing profileArn is separately
+	// recoverable at request time (resolveKiroProfileArn), so we keep the token and only warn.
 	if td.ExpiresAt > 0 {
 		auth.Metadata["expired"] = time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
 	auth.Metadata["type"] = "kiro"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	if errProfile := kiroauth.RequireProfileArn(strings.TrimSpace(metaStringValue(auth.Metadata, "profile_arn")), "kiro refresh"); errProfile != nil {
+		log.Warnf("kiro executor: refreshed token but profileArn unresolved (will retry at request time): %v", errProfile)
+	}
 	return auth, nil
 }

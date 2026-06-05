@@ -3160,13 +3160,18 @@ func refreshTokenFromAuth(auth *Auth) string {
 	return ""
 }
 
-// reloadAuthFromStore fetches the authoritative copy of an auth record from the
-// backing store (the DB is shared across processes), returning nil when no store
-// is configured, the lookup fails, or the id is absent. This lets a refresh that
-// failed on a stale in-memory token detect a token another process rotated.
-func (m *Manager) reloadAuthFromStore(ctx context.Context, id string) *Auth {
+// reloadAuthFromStoreChecked fetches the authoritative copy of an auth record from the
+// backing store (the DB is shared across processes). It reports whether the store READ
+// itself failed so callers that make a destructive decision on a nil result (e.g.
+// sticky-disabling a credential because it looks genuinely revoked) can distinguish a
+// transient store-read failure (storeReadFailed=true → do NOT treat as authoritative)
+// from an authoritative "no such record / no store configured" (storeReadFailed=false).
+// This lets a refresh that failed on a stale in-memory token detect a token another
+// process rotated. Returns (auth, storeReadFailed): auth is non-nil only on a successful
+// matching lookup.
+func (m *Manager) reloadAuthFromStoreChecked(ctx context.Context, id string) (*Auth, bool) {
 	if m == nil || m.store == nil || strings.TrimSpace(id) == "" {
-		return nil
+		return nil, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -3174,14 +3179,14 @@ func (m *Manager) reloadAuthFromStore(ctx context.Context, id string) *Auth {
 	items, err := m.store.List(ctx)
 	if err != nil {
 		log.WithError(err).Debugf("reload auth from store failed for %s", id)
-		return nil
+		return nil, true
 	}
 	for _, item := range items {
 		if item != nil && item.ID == id {
-			return item
+			return item, false
 		}
 	}
-	return nil
+	return nil, false
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
@@ -5275,7 +5280,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		// (recoverable) apart from a genuinely revoked one (must stop retrying).
 		unauthorized := isUnauthorizedError(err)
 		if isInvalidGrantError(err) && !unauthorized {
-			if stored := m.reloadAuthFromStore(ctx, id); stored != nil {
+			stored, storeReadFailed := m.reloadAuthFromStoreChecked(ctx, id)
+			switch {
+			case stored != nil:
 				storedRT := refreshTokenFromAuth(stored)
 				if storedRT != "" && storedRT != refreshTokenFromAuth(cloned) {
 					// A sibling rotated the token; retry once with the fresh copy.
@@ -5307,7 +5314,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 					// genuinely revoked: escalate to unauthorized to stop the loop.
 					unauthorized = true
 				}
-			} else {
+			case storeReadFailed:
+				// The store read itself failed (DB blip, contention). We cannot prove the
+				// token is dead, so do NOT escalate to unauthorized — that would sticky-disable
+				// a credential that may still be valid. Fall through to a timed failure backoff
+				// and retry later, exactly like transient contention.
+				log.Debugf("refresh invalid_grant for %s, %s but store read failed; backing off instead of disabling", auth.Provider, auth.ID)
+			default:
 				// No authoritative store copy to disprove deadness (e.g. no store
 				// configured): treat invalid_grant as a hard failure and stop the
 				// scheduler from retrying a dead token every refreshFailureBackoff.
@@ -5315,6 +5328,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			}
 		}
 		shouldReschedule := false
+		var disabledSnapshot *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.LastError = refreshErrorFromError(err)
@@ -5331,6 +5345,22 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 				current.Unavailable = true
 				current.Status = StatusError
 				current.StatusMessage = "unauthorized"
+				// Kiro credentials whose refresh is CONFIRMED dead (genuine 401, or
+				// invalid_grant where the shared store still holds the same — not rotated —
+				// refresh token) cannot recover without re-login. Auth-level Unavailable is
+				// bypassed by the model-scoped selector path (isAuthBlockedForModel only
+				// blocks unconditionally on Disabled/StatusDisabled), so a revoked Kiro
+				// credential could keep being picked and fail every request. Disable it
+				// stickily and persist disabled:true so it stays out of selection across
+				// restarts until the operator re-authenticates. This is gated on the
+				// confirmed-dead `unauthorized` signal, NOT the transient request-time 403
+				// rotation race (handled by the just-in-time refresh on the request path).
+				if strings.EqualFold(current.Provider, "kiro") {
+					current.Disabled = true
+					current.Status = StatusDisabled
+					current.StatusMessage = "disabled: refresh token invalid"
+					disabledSnapshot = current.Clone()
+				}
 			} else {
 				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			}
@@ -5341,6 +5371,16 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			}
 		}
 		m.mu.Unlock()
+		if disabledSnapshot != nil {
+			// Persist the disabled state (sticky across restarts). Best-effort: a persist
+			// failure still leaves the in-memory Disabled flag in force for this process.
+			if errPersist := m.persist(ctx, disabledSnapshot); errPersist != nil {
+				log.WithError(errPersist).Warnf("kiro auth %s: failed to persist disabled state", id)
+			} else {
+				log.Warnf("kiro auth %s disabled: refresh token invalid (re-login required)", id)
+			}
+			m.hook.OnAuthUpdated(ctx, disabledSnapshot)
+		}
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}

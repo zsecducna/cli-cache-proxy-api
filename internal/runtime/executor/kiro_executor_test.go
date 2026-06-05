@@ -112,3 +112,66 @@ func TestRefresh_NoRefreshTokenIsNoop(t *testing.T) {
 		t.Fatal("Refresh() should return the same auth when there is nothing to refresh")
 	}
 }
+
+// TestShouldPrepareRequestAuth covers the request-time refresh gate that closes the
+// token-rotation race. The proactive loop is not enough: a request that picked an auth
+// clone before the loop rotated the token would send the now-dead token and get a 403
+// "bearer token ... is invalid".
+func TestShouldPrepareRequestAuth(t *testing.T) {
+	e := NewKiroExecutor(&config.Config{})
+	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	now := time.Now()
+
+	cases := []struct {
+		name string
+		meta map[string]any
+		want bool
+	}{
+		{
+			name: "no refresh token: cannot refresh, send as-is",
+			meta: map[string]any{"access_token": "a", "expired": rfc(now.Add(-time.Hour))},
+			want: false,
+		},
+		{
+			name: "missing access token: must mint before request",
+			meta: map[string]any{"refresh_token": "r"},
+			want: true,
+		},
+		{
+			name: "already expired: refresh",
+			meta: map[string]any{"access_token": "a", "refresh_token": "r", "expired": rfc(now.Add(-time.Minute))},
+			want: true,
+		},
+		{
+			name: "within 5m lead: refresh",
+			meta: map[string]any{"access_token": "a", "refresh_token": "r", "expired": rfc(now.Add(2 * time.Minute))},
+			want: true,
+		},
+		{
+			name: "comfortably valid: do not refresh",
+			meta: map[string]any{"access_token": "a", "refresh_token": "r", "expired": rfc(now.Add(time.Hour))},
+			want: false,
+		},
+		{
+			name: "valid token, no parseable expiry: do not refresh (loop owns it)",
+			meta: map[string]any{"access_token": "a", "refresh_token": "r"},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{Metadata: tc.meta}
+			if got := e.ShouldPrepareRequestAuth(auth); got != tc.want {
+				t.Fatalf("ShouldPrepareRequestAuth() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestKiroExecutorImplementsRequestAuthPreparer guards the wiring: prepareRequestAuth in
+// the conductor only refreshes at request time for executors implementing this interface.
+// If the methods are renamed/removed, the rotation-race fix silently regresses.
+func TestKiroExecutorImplementsRequestAuthPreparer(t *testing.T) {
+	var _ cliproxyauth.RequestAuthPreparer = NewKiroExecutor(&config.Config{})
+}

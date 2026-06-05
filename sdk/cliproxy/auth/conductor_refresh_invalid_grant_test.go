@@ -62,6 +62,16 @@ func (s *staticRefreshStore) List(context.Context) ([]*Auth, error) {
 func (s *staticRefreshStore) Save(context.Context, *Auth) (string, error) { return "", nil }
 func (s *staticRefreshStore) Delete(context.Context, string) error        { return nil }
 
+// erroringRefreshStore is a Store whose List always fails, simulating a transient
+// store-read failure (DB blip/contention) at refresh time.
+type erroringRefreshStore struct{}
+
+func (erroringRefreshStore) List(context.Context) ([]*Auth, error) {
+	return nil, errors.New("postgres store: list auth: connection reset")
+}
+func (erroringRefreshStore) Save(context.Context, *Auth) (string, error) { return "", nil }
+func (erroringRefreshStore) Delete(context.Context, string) error        { return nil }
+
 // TestManager_RefreshInvalidGrantStopsRetryWhenTokenUnchanged verifies that an
 // invalid_grant (HTTP 400) refresh failure is treated as a hard unauthorized
 // failure when the store holds the same refresh token we just tried (the token
@@ -109,6 +119,15 @@ func TestManager_RefreshInvalidGrantStopsRetryWhenTokenUnchanged(t *testing.T) {
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected invalid_grant auth to be removed from the auto-refresh schedule")
+	}
+	// A confirmed-dead Kiro refresh token must auto-disable the auth (sticky), because
+	// the model-scoped selector path only blocks unconditionally on Disabled/StatusDisabled;
+	// a merely-Unavailable revoked credential could keep being picked and 403 every request.
+	if !updated.Disabled || updated.Status != StatusDisabled {
+		t.Fatalf("expected confirmed-dead kiro auth to be disabled; Disabled=%v Status=%v", updated.Disabled, updated.Status)
+	}
+	if AuthSelectableForModel(updated, "some-model", now) {
+		t.Fatal("expected disabled kiro auth to be unselectable for any model")
 	}
 }
 
@@ -223,5 +242,60 @@ func TestManager_RefreshInvalidGrantDoesNotDisableOnTransientContention(t *testi
 	// have been attempted (two Refresh calls: original + retry).
 	if len(exec.usedRefreshTokens) != 2 {
 		t.Fatalf("Refresh attempts = %d, want 2 (original + rotated-token retry)", len(exec.usedRefreshTokens))
+	}
+	// Transient contention is NOT confirmed-dead, so the auth must NOT be disabled —
+	// disabling here would knock out a credential that may still be valid.
+	if updated.Disabled || updated.Status == StatusDisabled {
+		t.Fatal("expected transient contention to NOT disable the auth")
+	}
+}
+
+// TestManager_RefreshInvalidGrantDoesNotDisableOnStoreReadFailure verifies that when the
+// store READ itself fails at refresh time (DB blip/contention), an invalid_grant failure is
+// NOT escalated to unauthorized and the kiro auth is NOT disabled. We cannot prove the token
+// is dead without an authoritative store copy, so disabling here would sticky-kill a possibly
+// valid credential. The auth must fall back to a timed backoff and stay schedulable.
+func TestManager_RefreshInvalidGrantDoesNotDisableOnStoreReadFailure(t *testing.T) {
+	ctx := context.Background()
+	exec := &invalidGrantRefreshTestExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "kiro"},
+	}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(exec)
+	manager.SetStore(erroringRefreshStore{})
+
+	auth := &Auth{
+		ID:       "kiro-store-read-fail",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"auth_method":   "idc",
+			"refresh_token": "in-memory-token",
+			"client_id":     "cid",
+			"client_secret": "secret",
+		},
+	}
+	if _, err := manager.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	manager.refreshAuth(ctx, auth.ID)
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+	if updated.Disabled || updated.Status == StatusDisabled {
+		t.Fatal("expected store-read failure to NOT disable the auth")
+	}
+	if updated.LastError != nil && updated.LastError.Code == "unauthorized" {
+		t.Fatal("expected store-read failure to avoid unauthorized escalation")
+	}
+	if updated.NextRefreshAfter.IsZero() {
+		t.Fatal("expected a non-zero failure backoff after store-read failure")
+	}
+	now := time.Now()
+	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); !shouldSchedule {
+		t.Fatal("expected auth to remain on the auto-refresh schedule after store-read failure")
 	}
 }
