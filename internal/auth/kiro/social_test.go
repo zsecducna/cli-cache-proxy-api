@@ -287,6 +287,38 @@ func TestRefreshToken_ExternalIdp(t *testing.T) {
 	}
 }
 
+// TestListAvailableProfiles_ExternalIdpHeader verifies the TokenType:EXTERNAL_IDP header is
+// sent only for external IdP credentials — without it CodeWhisperer silently returns an
+// empty profile list for enterprise tokens.
+func TestListAvailableProfiles_ExternalIdpHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		externalIdp bool
+		wantHeader  string
+	}{
+		{"non-external-idp omits header", false, ""},
+		{"external-idp sends header", true, "EXTERNAL_IDP"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotTokenType string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotTokenType = r.Header.Get("TokenType")
+				_, _ = fmt.Fprint(w, `{"profiles":[{"arn":"arn:aws:codewhisperer:us-east-1:1:profile/p"}]}`)
+			}))
+			defer srv.Close()
+
+			svc := NewKiroAuth(nil)
+			svc.listProfilesURLFn = func(string) string { return srv.URL }
+			if _, err := svc.ListAvailableProfiles(context.Background(), "tok", "us-east-1", tc.externalIdp); err != nil {
+				t.Fatalf("ListAvailableProfiles error: %v", err)
+			}
+			if gotTokenType != tc.wantHeader {
+				t.Fatalf("TokenType header = %q, want %q", gotTokenType, tc.wantHeader)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 // newFormServer starts an httptest server that parses an x-www-form-urlencoded body,

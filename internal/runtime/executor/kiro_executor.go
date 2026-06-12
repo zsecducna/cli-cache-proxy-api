@@ -193,6 +193,11 @@ func applyKiroHeaders(r *http.Request, creds kiroCredentials) {
 	r.Header.Set("x-amzn-codewhisperer-optout", "true")
 	r.Header.Set("User-Agent", kiroauth.BuildUserAgent(machineID))
 	r.Header.Set("x-amz-user-agent", kiroauth.BuildXAmzUserAgent(machineID))
+	// External IdP (enterprise SSO) tokens must declare their type or CodeWhisperer rejects
+	// the generate call; the Kiro IDE adds the same header for external_idp credentials.
+	if creds.authMethod == "external_idp" {
+		r.Header.Set("TokenType", "EXTERNAL_IDP")
+	}
 }
 
 // PrepareRequest injects the bearer token and custom headers for generic HTTP paths.
@@ -249,10 +254,12 @@ func (e *KiroExecutor) prepareWithAuth(ctx context.Context, auth *cliproxyauth.A
 	upstreamModel, agentic, thinkingSuffix := kiroauth.ResolveKiroModel(baseModel)
 
 	creds := kiroCreds(auth)
-	// The Kiro runtime generate endpoint requires a profileArn. Logins now resolve and
-	// persist it, but as a fallback (older credentials, or login-time resolution failure)
-	// resolve it here. This writes only the per-request auth clone, so it does not persist
-	// across requests — treat it as best-effort recovery, not a cache.
+	// The Kiro runtime generate endpoint requires a profileArn (true for every method,
+	// including external_idp — confirmed by the upstream 400 "profileArn is required").
+	// Logins resolve and persist it (via ListAvailableProfiles or an operator-supplied
+	// override); as a fallback (older credentials, or login-time resolution failure) resolve
+	// it here. This writes only the per-request auth clone, so it does not persist across
+	// requests — treat it as best-effort recovery, not a cache.
 	if creds.profileArn == "" {
 		arn, freshToken := e.resolveKiroProfileArn(ctx, auth, creds)
 		if arn != "" {
@@ -354,8 +361,9 @@ func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxy
 	}
 	svc := kiroauth.NewKiroAuthWithProxy(e.cfg, proxyURL)
 	region := regionForCreds(creds)
+	extIdp := creds.authMethod == "external_idp"
 	freshToken := ""
-	arn, err := svc.ListAvailableProfiles(ctx, creds.accessToken, region)
+	arn, err := svc.ListAvailableProfiles(ctx, creds.accessToken, region, extIdp)
 	if err != nil || arn == "" {
 		// Empty list usually means the access token is expired; refresh once and retry.
 		td, errRefresh := svc.RefreshToken(ctx, kiroauth.RefreshParams{
@@ -371,7 +379,7 @@ func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxy
 			return "", ""
 		}
 		freshToken = td.AccessToken
-		if arn, err = svc.ListAvailableProfiles(ctx, freshToken, region); err != nil || arn == "" {
+		if arn, err = svc.ListAvailableProfiles(ctx, freshToken, region, extIdp); err != nil || arn == "" {
 			log.Warnf("kiro executor: profile resolution failed after refresh: %v", err)
 			return "", freshToken
 		}
@@ -745,7 +753,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		// The OIDC refresh does not return a profileArn; resolve it now with the fresh
 		// token (the runtime generate endpoint requires it) and persist it so it survives
 		// restarts and avoids per-request resolution.
-		if arn, errArn := svc.ListAvailableProfiles(ctx, td.AccessToken, regionForCreds(creds)); errArn == nil && arn != "" {
+		if arn, errArn := svc.ListAvailableProfiles(ctx, td.AccessToken, regionForCreds(creds), creds.authMethod == "external_idp"); errArn == nil && arn != "" {
 			auth.Metadata["profile_arn"] = arn
 		}
 	}

@@ -311,7 +311,8 @@ func (a KiroAuthenticator) loginSocial(ctx context.Context, authSvc *kiro.KiroAu
 			profileArn = resolvedProfileArn
 		}
 	}
-	// Refuse to persist a credential with no profileArn: every runtime request would fail.
+	// The runtime generate endpoint requires a profileArn for every method, so refuse to
+	// persist a credential without one rather than create a record that 400s on every request.
 	if errProfile := kiro.RequireProfileArn(profileArn, "kiro "+bundle.AuthMethod+" login"); errProfile != nil {
 		return nil, errProfile
 	}

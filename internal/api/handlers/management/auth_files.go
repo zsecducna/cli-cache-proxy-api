@@ -2968,7 +2968,8 @@ func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, re
 				profileArn = resolvedProfileArn
 			}
 		}
-		// Refuse to persist a credential with no profile ARN: every runtime request fails.
+		// The runtime generate endpoint requires a profileArn for every method, so refuse to
+		// persist a credential without one rather than create a record that 400s every request.
 		if errProfile := kiro.RequireProfileArn(profileArn, "kiro "+authMethod+" login"); errProfile != nil {
 			SetOAuthSessionError(state, fmt.Sprintf("Kiro profile ARN resolution failed: %v", errProfile))
 			fmt.Printf("Kiro SSO authentication failed: %v\n", errProfile)

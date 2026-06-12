@@ -368,7 +368,11 @@ func (k *KiroAuth) ResolveProfileArn(ctx context.Context, tokenData *KiroTokenDa
 		return tokenData, "", fmt.Errorf("kiro: access token is empty")
 	}
 
-	arn, errLookup := k.ListAvailableProfiles(ctx, tokenData.AccessToken, params.Region)
+	// External IdP credentials are identified by a token endpoint; their ListAvailableProfiles
+	// calls require the TokenType: EXTERNAL_IDP header.
+	externalIdp := strings.TrimSpace(params.TokenEndpoint) != ""
+
+	arn, errLookup := k.ListAvailableProfiles(ctx, tokenData.AccessToken, params.Region, externalIdp)
 	if errLookup == nil && strings.TrimSpace(arn) != "" {
 		return tokenData, arn, nil
 	}
@@ -391,7 +395,7 @@ func (k *KiroAuth) ResolveProfileArn(ctx context.Context, tokenData *KiroTokenDa
 		return refreshed, profileArn, nil
 	}
 
-	arn, errRetry := k.ListAvailableProfiles(ctx, refreshed.AccessToken, params.Region)
+	arn, errRetry := k.ListAvailableProfiles(ctx, refreshed.AccessToken, params.Region, externalIdp)
 	if errRetry == nil && strings.TrimSpace(arn) != "" {
 		return refreshed, arn, nil
 	}
@@ -536,7 +540,7 @@ func ExtractEmailFromJWT(accessToken string) string {
 // POST https://codewhisperer.{region}.amazonaws.com/ with X-Amz-Target
 // AmazonCodeWhispererService.ListAvailableProfiles (aws-json-1.0). The runtime generate
 // endpoint requires this profileArn.
-func (k *KiroAuth) ListAvailableProfiles(ctx context.Context, accessToken, region string) (string, error) {
+func (k *KiroAuth) ListAvailableProfiles(ctx context.Context, accessToken, region string, externalIdp bool) (string, error) {
 	if strings.TrimSpace(accessToken) == "" {
 		return "", fmt.Errorf("kiro: access token is empty")
 	}
@@ -562,6 +566,12 @@ func (k *KiroAuth) ListAvailableProfiles(ctx context.Context, accessToken, regio
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	req.Header.Set("User-Agent", BuildUserAgent(machineID))
 	req.Header.Set("x-amz-user-agent", BuildXAmzUserAgent(machineID))
+	// External IdP (enterprise SSO) tokens MUST carry this header or CodeWhisperer does not
+	// recognize the token type and silently returns an empty profile list. With it, a
+	// provisioned account returns its profile; an unprovisioned one gets a clear 403.
+	if externalIdp {
+		req.Header.Set("TokenType", "EXTERNAL_IDP")
+	}
 
 	resp, err := k.httpClient().Do(req)
 	if err != nil {

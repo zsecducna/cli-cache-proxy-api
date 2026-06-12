@@ -255,7 +255,7 @@ func TestListAvailableProfiles_UsesKiroClientHeaders(t *testing.T) {
 	svc := NewKiroAuth(&config.Config{})
 	svc.listProfilesURLFn = func(string) string { return srv.URL }
 
-	arn, err := svc.ListAvailableProfiles(context.Background(), "access-token", "us-east-1")
+	arn, err := svc.ListAvailableProfiles(context.Background(), "access-token", "us-east-1", false)
 	if err != nil {
 		t.Fatalf("ListAvailableProfiles() error = %v", err)
 	}
