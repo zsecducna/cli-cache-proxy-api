@@ -220,10 +220,12 @@ func (a KiroAuthenticator) loginImport(ctx context.Context, authSvc *kiro.KiroAu
 	}, nil
 }
 
-// loginSocial runs the Kiro social / enterprise SSO sign-in (the flow the Kiro IDE uses).
-// It performs a PKCE authorization-code flow against the Kiro-hosted portal — which
-// federates Google, GitHub, and enterprise IdPs (e.g. an Azure AD tenant) — capturing the
-// authorization code on a transient loopback listener and exchanging it for Kiro tokens.
+// loginSocial runs the Kiro browser sign-in (the flow the Kiro IDE uses). It performs a
+// PKCE authorization-code flow against the Kiro-hosted portal, which branches by account
+// type: Google/GitHub social accounts return a Cognito code directly, while enterprise
+// accounts (an external IdP such as an Azure AD tenant) trigger a second OIDC leg that the
+// loopback listener drives. Both legs land on the transient loopback listener; this method
+// then exchanges the captured code and resolves the profile ARN.
 func (a KiroAuthenticator) loginSocial(ctx context.Context, authSvc *kiro.KiroAuth, opts *LoginOptions) (*kiro.KiroAuthBundle, error) {
 	region := strings.TrimSpace(opts.Metadata["region"])
 	if region == "" {
@@ -236,9 +238,9 @@ func (a KiroAuthenticator) loginSocial(ctx context.Context, authSvc *kiro.KiroAu
 	}
 
 	// Bind the loopback listener BEFORE opening the browser so the redirect cannot race
-	// ahead of a ready listener. The port is fixed because the portal validates the
-	// redirect URI; cleanup releases it once the flow completes or aborts.
-	resultCh, cleanup, err := kiro.StartSocialCallbackListener(pkce.State)
+	// ahead of a ready listener. The listener also drives the enterprise leg by 302-redirecting
+	// the browser on to the IdP and capturing the returned code; cleanup releases the port.
+	resultCh, cleanup, err := authSvc.StartKiroLoginListener(pkce.State)
 	if err != nil {
 		return nil, err
 	}
@@ -255,53 +257,69 @@ func (a KiroAuthenticator) loginSocial(ctx context.Context, authSvc *kiro.KiroAu
 	}
 	fmt.Println("Waiting for SSO authorization...")
 
-	var code string
+	var res kiro.KiroLoginResult
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("kiro: %w", ctx.Err())
-	case res := <-resultCh:
-		if res.Err != nil {
-			return nil, res.Err
+	case r := <-resultCh:
+		if r.Err != nil {
+			return nil, r.Err
 		}
-		code = res.Code
+		res = r
 	case <-time.After(kiro.SocialLoginTimeout):
 		return nil, fmt.Errorf("kiro: SSO login timed out after %s", kiro.SocialLoginTimeout)
 	}
 
-	tokenData, err := authSvc.ExchangeSocialCode(ctx, code, pkce.Verifier)
-	if err != nil {
-		return nil, fmt.Errorf("kiro: SSO token exchange failed: %w", err)
+	var tokenData *kiro.KiroTokenData
+	bundle := &kiro.KiroAuthBundle{Region: region}
+	switch res.Kind {
+	case kiro.KiroLoginExternalIdp:
+		bundle.AuthMethod = "external_idp"
+		bundle.ClientID = res.ClientID
+		bundle.TokenEndpoint = res.TokenEndpoint
+		bundle.IssuerURL = res.IssuerURL
+		bundle.Scopes = res.Scopes
+		tokenData, err = authSvc.ExchangeExternalIdpCode(ctx, res.TokenEndpoint, res.ClientID, res.Code, res.CodeVerifier, res.RedirectURI, res.Scopes)
+		if err != nil {
+			return nil, fmt.Errorf("kiro: enterprise SSO token exchange failed: %w", err)
+		}
+	default:
+		bundle.AuthMethod = "social"
+		tokenData, err = authSvc.ExchangeSocialCode(ctx, res.Code, pkce.Verifier)
+		if err != nil {
+			return nil, fmt.Errorf("kiro: SSO token exchange failed: %w", err)
+		}
 	}
 
-	// The runtime generate endpoint requires a profileArn. The social exchange usually
-	// returns one; if not, resolve it via ListAvailableProfiles using the access token.
+	// The runtime generate endpoint requires a profileArn. Social exchange may return one;
+	// otherwise (and always for external IdP) resolve it via ListAvailableProfiles.
 	profileArn := tokenData.ProfileArn
 	if profileArn == "" {
 		resolvedTokenData, resolvedProfileArn, errResolve := authSvc.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
-			RefreshToken: tokenData.RefreshToken,
-			Region:       region,
+			RefreshToken:  tokenData.RefreshToken,
+			Region:        region,
+			ClientID:      bundle.ClientID,
+			TokenEndpoint: bundle.TokenEndpoint,
+			Scopes:        bundle.Scopes,
 		})
 		if resolvedTokenData != nil {
 			tokenData = resolvedTokenData
 		}
 		if errResolve != nil {
-			log.Warnf("kiro: failed to resolve profile ARN at social login: %v", errResolve)
+			log.Warnf("kiro: failed to resolve profile ARN at %s login: %v", bundle.AuthMethod, errResolve)
 		} else {
 			profileArn = resolvedProfileArn
 		}
 	}
 	// Refuse to persist a credential with no profileArn: every runtime request would fail.
-	if errProfile := kiro.RequireProfileArn(profileArn, "kiro social login"); errProfile != nil {
+	if errProfile := kiro.RequireProfileArn(profileArn, "kiro "+bundle.AuthMethod+" login"); errProfile != nil {
 		return nil, errProfile
 	}
 
-	return &kiro.KiroAuthBundle{
-		TokenData:  tokenData,
-		Region:     region,
-		AuthMethod: "social",
-		ProfileArn: profileArn,
-		Email:      kiro.ExtractEmailFromJWT(tokenData.AccessToken),
-	}, nil
+	bundle.TokenData = tokenData
+	bundle.ProfileArn = profileArn
+	bundle.Email = kiro.ExtractEmailFromJWT(tokenData.AccessToken)
+	return bundle, nil
 }
 
 // buildKiroAuth converts a successful login bundle into a coreauth.Auth record with
@@ -320,11 +338,14 @@ func buildKiroAuth(bundle *kiro.KiroAuthBundle) *coreauth.Auth {
 		ClientID:     bundle.ClientID,
 		ClientSecret: bundle.ClientSecret,
 		Region:       bundle.Region,
-		AuthMethod:   bundle.AuthMethod,
-		StartURL:     bundle.StartURL,
-		Username:     bundle.Username,
-		Email:        bundle.Email,
-		Type:         "kiro",
+		AuthMethod:    bundle.AuthMethod,
+		StartURL:      bundle.StartURL,
+		Username:      bundle.Username,
+		Email:         bundle.Email,
+		TokenEndpoint: bundle.TokenEndpoint,
+		IssuerURL:     bundle.IssuerURL,
+		Scopes:        bundle.Scopes,
+		Type:          "kiro",
 	}
 
 	// Metadata mirrors the storage fields; the executor reads credentials from here.
@@ -356,6 +377,17 @@ func buildKiroAuth(bundle *kiro.KiroAuthBundle) *coreauth.Auth {
 	}
 	if bundle.Email != "" {
 		metadata["email"] = bundle.Email
+	}
+	// External IdP (enterprise) refresh material: the executor refreshes against the IdP
+	// token endpoint using the IdP client id (stored as client_id) and these scopes.
+	if bundle.TokenEndpoint != "" {
+		metadata["token_endpoint"] = bundle.TokenEndpoint
+	}
+	if bundle.IssuerURL != "" {
+		metadata["issuer_url"] = bundle.IssuerURL
+	}
+	if bundle.Scopes != "" {
+		metadata["scopes"] = bundle.Scopes
 	}
 
 	label := "Kiro User"

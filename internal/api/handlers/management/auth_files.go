@@ -2885,7 +2885,9 @@ func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, re
 
 	// Bind the loopback listener up front so the portal redirect cannot arrive before the
 	// listener is ready. The port is fixed because the portal validates the redirect URI.
-	resultCh, cleanup, errListen := kiro.StartSocialCallbackListener(pkce.State)
+	// The listener also drives the enterprise (external IdP) leg by 302-redirecting the
+	// browser on to the IdP and capturing the returned code.
+	resultCh, cleanup, errListen := kiroAuth.StartKiroLoginListener(pkce.State)
 	if errListen != nil {
 		log.Errorf("Failed to bind Kiro SSO callback listener: %v", errListen)
 		// 409: the fixed loopback port is unavailable — another login is mid-flight or a
@@ -2902,36 +2904,60 @@ func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, re
 		defer cleanup()
 		fmt.Println("Waiting for Kiro SSO authorization...")
 
-		// Wait for the loopback listener to capture the authorization code, bounded by the
-		// social-login timeout so a stalled browser flow cannot leak the goroutine/port.
-		var code string
+		// Wait for the loopback listener to capture the final authorization code, bounded by
+		// the login timeout so a stalled browser flow cannot leak the goroutine/port.
+		var res kiro.KiroLoginResult
 		select {
-		case res := <-resultCh:
-			if res.Err != nil {
-				log.Errorf("Kiro SSO authorization failed: %v", res.Err)
+		case r := <-resultCh:
+			if r.Err != nil {
+				log.Errorf("Kiro SSO authorization failed: %v", r.Err)
 				SetOAuthSessionError(state, "Authentication failed")
 				return
 			}
-			code = res.Code
+			res = r
 		case <-time.After(kiro.SocialLoginTimeout):
 			SetOAuthSessionError(state, "Authentication timed out")
 			return
 		}
 
-		tokenData, errExch := kiroAuth.ExchangeSocialCode(ctx, code, pkce.Verifier)
+		// Exchange the code at the appropriate endpoint. Enterprise (external IdP) accounts
+		// exchange at the IdP token endpoint and carry the refresh material; social accounts
+		// exchange at the Kiro Cognito endpoint.
+		var (
+			tokenData     *kiro.KiroTokenData
+			errExch       error
+			authMethod    = "social"
+			clientID      string
+			tokenEndpoint string
+			issuerURL     string
+			scopes        string
+		)
+		if res.Kind == kiro.KiroLoginExternalIdp {
+			authMethod = "external_idp"
+			clientID = res.ClientID
+			tokenEndpoint = res.TokenEndpoint
+			issuerURL = res.IssuerURL
+			scopes = res.Scopes
+			tokenData, errExch = kiroAuth.ExchangeExternalIdpCode(ctx, res.TokenEndpoint, res.ClientID, res.Code, res.CodeVerifier, res.RedirectURI, res.Scopes)
+		} else {
+			tokenData, errExch = kiroAuth.ExchangeSocialCode(ctx, res.Code, pkce.Verifier)
+		}
 		if errExch != nil {
 			log.Errorf("Kiro SSO token exchange failed: %v", errExch)
 			SetOAuthSessionError(state, "Authentication failed")
 			return
 		}
 
-		// The runtime generate endpoint requires a profile ARN. The social exchange usually
-		// returns one; otherwise resolve it via ListAvailableProfiles using the access token.
+		// The runtime generate endpoint requires a profile ARN. Social exchange may return
+		// one; otherwise (and always for external IdP) resolve it via ListAvailableProfiles.
 		profileArn := tokenData.ProfileArn
 		if profileArn == "" {
 			resolvedTokenData, resolvedProfileArn, errResolve := kiroAuth.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
-				RefreshToken: tokenData.RefreshToken,
-				Region:       region,
+				RefreshToken:  tokenData.RefreshToken,
+				Region:        region,
+				ClientID:      clientID,
+				TokenEndpoint: tokenEndpoint,
+				Scopes:        scopes,
 			})
 			if resolvedTokenData != nil {
 				tokenData = resolvedTokenData
@@ -2943,13 +2969,13 @@ func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, re
 			}
 		}
 		// Refuse to persist a credential with no profile ARN: every runtime request fails.
-		if errProfile := kiro.RequireProfileArn(profileArn, "kiro social login"); errProfile != nil {
+		if errProfile := kiro.RequireProfileArn(profileArn, "kiro "+authMethod+" login"); errProfile != nil {
 			SetOAuthSessionError(state, fmt.Sprintf("Kiro profile ARN resolution failed: %v", errProfile))
 			fmt.Printf("Kiro SSO authentication failed: %v\n", errProfile)
 			return
 		}
 
-		if errSave := h.saveKiroSocialCredential(ctx, tokenData, region, profileArn); errSave != nil {
+		if errSave := h.saveKiroBrowserCredential(ctx, tokenData, authMethod, region, profileArn, clientID, tokenEndpoint, issuerURL, scopes); errSave != nil {
 			log.Errorf("Failed to save Kiro SSO authentication tokens: %v", errSave)
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			return
@@ -2962,10 +2988,12 @@ func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, re
 	c.JSON(200, gin.H{"status": "ok", "url": signInURL, "state": state})
 }
 
-// saveKiroSocialCredential persists a social-login Kiro credential. Social credentials
-// carry no AWS OIDC client credentials, no IDC start URL, and no operator username — the
-// email parsed from the access token JWT both labels the record and names the auth file.
-func (h *Handler) saveKiroSocialCredential(ctx context.Context, tokenData *kiro.KiroTokenData, region, profileArn string) error {
+// saveKiroBrowserCredential persists a credential obtained through the Kiro browser sign-in
+// (social or external IdP). Neither carries AWS OIDC client credentials, an IDC start URL,
+// or an operator username — the email parsed from the access token JWT both labels the
+// record and names the auth file. For external IdP, clientID/tokenEndpoint/issuerURL/scopes
+// are the refresh material the executor uses to refresh against the IdP token endpoint.
+func (h *Handler) saveKiroBrowserCredential(ctx context.Context, tokenData *kiro.KiroTokenData, authMethod, region, profileArn, clientID, tokenEndpoint, issuerURL, scopes string) error {
 	expired := ""
 	if tokenData.ExpiresAt > 0 {
 		expired = time.Unix(tokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
@@ -2973,14 +3001,18 @@ func (h *Handler) saveKiroSocialCredential(ctx context.Context, tokenData *kiro.
 	email := kiro.ExtractEmailFromJWT(tokenData.AccessToken)
 
 	storage := &kiro.KiroTokenStorage{
-		AccessToken:  tokenData.AccessToken,
-		RefreshToken: tokenData.RefreshToken,
-		Expired:      expired,
-		ProfileArn:   profileArn,
-		Region:       region,
-		AuthMethod:   "social",
-		Email:        email,
-		Type:         "kiro",
+		AccessToken:   tokenData.AccessToken,
+		RefreshToken:  tokenData.RefreshToken,
+		Expired:       expired,
+		ProfileArn:    profileArn,
+		ClientID:      clientID,
+		Region:        region,
+		AuthMethod:    authMethod,
+		Email:         email,
+		TokenEndpoint: tokenEndpoint,
+		IssuerURL:     issuerURL,
+		Scopes:        scopes,
+		Type:          "kiro",
 	}
 
 	// Metadata mirrors the storage fields; the executor reads credentials from here.
@@ -2989,7 +3021,7 @@ func (h *Handler) saveKiroSocialCredential(ctx context.Context, tokenData *kiro.
 		"access_token":  tokenData.AccessToken,
 		"refresh_token": tokenData.RefreshToken,
 		"region":        region,
-		"auth_method":   "social",
+		"auth_method":   authMethod,
 		"timestamp":     time.Now().UnixMilli(),
 	}
 	if expired != "" {
@@ -3001,13 +3033,25 @@ func (h *Handler) saveKiroSocialCredential(ctx context.Context, tokenData *kiro.
 	if email != "" {
 		metadata["email"] = email
 	}
+	if clientID != "" {
+		metadata["client_id"] = clientID
+	}
+	if tokenEndpoint != "" {
+		metadata["token_endpoint"] = tokenEndpoint
+	}
+	if issuerURL != "" {
+		metadata["issuer_url"] = issuerURL
+	}
+	if scopes != "" {
+		metadata["scopes"] = scopes
+	}
 
 	label := "Kiro User"
 	if email != "" {
 		label = email
 	}
 
-	fileName := kiro.CredentialFileName("social", "", "", email, time.Now().UnixMilli())
+	fileName := kiro.CredentialFileName(authMethod, "", "", email, time.Now().UnixMilli())
 	record := &coreauth.Auth{
 		ID:       fileName,
 		Provider: "kiro",

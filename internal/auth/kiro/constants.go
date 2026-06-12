@@ -60,6 +60,10 @@ const (
 	SocialRedirectPort = "3128"
 	// SocialRedirectFrom mirrors the Kiro IDE client tag the portal expects on the sign-in URL.
 	SocialRedirectFrom = "KiroIDE"
+	// OAuthCallbackPath is the loopback path the enterprise (external IdP) leg redirects the
+	// authorization code back to (SocialRedirectURI + this path). It is distinct from the
+	// portal's /signin/callback so the listener can tell the two legs apart.
+	OAuthCallbackPath = "/oauth/callback"
 	// SocialLoginTimeout bounds how long the loopback listener waits for the user to finish
 	// the browser sign-in before the social login attempt is abandoned.
 	SocialLoginTimeout = 10 * time.Minute

@@ -134,12 +134,12 @@ func TestExchangeSocialCode_Error(t *testing.T) {
 	}
 }
 
-// TestStartSocialCallbackListener_StateGate is the security regression test for the
-// loopback callback: a wrong-state or non-GET request must NOT resolve the one-shot
+// TestStartKiroLoginListener_StateGate is the security regression test for the loopback
+// callback: a wrong-state or non-GET social callback must NOT resolve the one-shot
 // (otherwise a local process could DoS the real login on the fixed port), while the
-// state-matched redirect delivers the code.
-func TestStartSocialCallbackListener_StateGate(t *testing.T) {
-	resultCh, cleanup, err := StartSocialCallbackListener("good-state")
+// state-matched redirect delivers the social code.
+func TestStartKiroLoginListener_StateGate(t *testing.T) {
+	resultCh, cleanup, err := NewKiroAuth(nil).StartKiroLoginListener("good-state")
 	if err != nil {
 		// The port is fixed (3128); skip rather than fail if the environment cannot bind it.
 		t.Skipf("cannot bind loopback callback port (skipping): %v", err)
@@ -174,7 +174,135 @@ func TestStartSocialCallbackListener_StateGate(t *testing.T) {
 	}
 }
 
+// TestValidateExternalIdpEndpoint covers the issuer/endpoint allow-list — the primary guard
+// against SSRF / open-redirect / forced-authorization through a forged portal callback.
+func TestValidateExternalIdpEndpoint(t *testing.T) {
+	ok := []string{
+		"https://login.microsoftonline.com/0e1ff54d-tenant/v2.0",
+		"https://login.microsoftonline.us/tenant/oauth2/v2.0/authorize",
+		"https://login.partner.microsoftonline.cn/tenant/v2.0",
+	}
+	for _, u := range ok {
+		if err := validateExternalIdpEndpoint(u); err != nil {
+			t.Errorf("expected %q to be allowed, got %v", u, err)
+		}
+	}
+	bad := []string{
+		"http://login.microsoftonline.com/tenant/v2.0",      // not https
+		"https://127.0.0.1/tenant/v2.0",                     // IP literal
+		"https://169.254.169.254/latest/meta-data",          // link-local IP (SSRF target)
+		"https://sts.windows.net/tenant/",                   // not allow-listed
+		"https://evil-microsoftonline.com/tenant/",          // suffix not anchored at a dot
+		"https://login.microsoftonline.com.evil.com/tenant/", // allow-listed host as a prefix
+		"https://internal-host/tenant/",                     // bare internal name
+		"not a url at all",
+	}
+	for _, u := range bad {
+		if err := validateExternalIdpEndpoint(u); err == nil {
+			t.Errorf("expected %q to be rejected, but it passed", u)
+		}
+	}
+}
+
+// TestExternalIdpAuthorizeURL verifies the IdP authorize URL carries the PKCE challenge,
+// S256 method, query response mode, login hint, and the scopes verbatim.
+func TestExternalIdpAuthorizeURL(t *testing.T) {
+	raw := ExternalIdpAuthorizeURL(
+		"https://idp.example/authorize", "client-123", "http://localhost:3128/oauth/callback",
+		"api://client-123/codewhisperer:completions offline_access", "chal", "st8", "user@corp.example")
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("authorize URL does not parse: %v", err)
+	}
+	q := u.Query()
+	checks := map[string]string{
+		"client_id":             "client-123",
+		"response_type":         "code",
+		"redirect_uri":          "http://localhost:3128/oauth/callback",
+		"scope":                 "api://client-123/codewhisperer:completions offline_access",
+		"code_challenge":        "chal",
+		"code_challenge_method": "S256",
+		"response_mode":         "query",
+		"state":                 "st8",
+		"login_hint":            "user@corp.example",
+	}
+	for k, want := range checks {
+		if got := q.Get(k); got != want {
+			t.Fatalf("param %q = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestExchangeExternalIdpCode verifies the form-encoded authorization_code exchange and
+// the snake_case response mapping onto KiroTokenData.
+func TestExchangeExternalIdpCode(t *testing.T) {
+	srv := newFormServer(t, func(form url.Values) (int, string) {
+		if form.Get("grant_type") != "authorization_code" {
+			t.Errorf("grant_type = %q", form.Get("grant_type"))
+		}
+		if form.Get("code") != "az-code" || form.Get("code_verifier") != "ver" {
+			t.Errorf("code/code_verifier mismatch: %v", form)
+		}
+		if form.Get("client_id") != "cid" || form.Get("redirect_uri") != "http://localhost:3128/oauth/callback" {
+			t.Errorf("client_id/redirect_uri mismatch: %v", form)
+		}
+		return http.StatusOK, `{"access_token":"acc","refresh_token":"ref","expires_in":3600}`
+	})
+	defer srv.Close()
+
+	td, err := NewKiroAuth(nil).ExchangeExternalIdpCode(context.Background(), srv.URL, "cid", "az-code", "ver", "http://localhost:3128/oauth/callback", "scope:x")
+	if err != nil {
+		t.Fatalf("ExchangeExternalIdpCode error: %v", err)
+	}
+	if td.AccessToken != "acc" || td.RefreshToken != "ref" || td.ExpiresAt <= time.Now().Unix() {
+		t.Fatalf("unexpected token data: %+v", td)
+	}
+}
+
+// TestRefreshToken_ExternalIdp verifies RefreshToken routes to the IdP token endpoint when
+// a TokenEndpoint is set and uses the refresh_token grant.
+func TestRefreshToken_ExternalIdp(t *testing.T) {
+	srv := newFormServer(t, func(form url.Values) (int, string) {
+		if form.Get("grant_type") != "refresh_token" {
+			t.Errorf("grant_type = %q, want refresh_token", form.Get("grant_type"))
+		}
+		if form.Get("refresh_token") != "old-ref" || form.Get("client_id") != "cid" {
+			t.Errorf("refresh_token/client_id mismatch: %v", form)
+		}
+		return http.StatusOK, `{"access_token":"new-acc","refresh_token":"new-ref","expires_in":3600}`
+	})
+	defer srv.Close()
+
+	td, err := NewKiroAuth(nil).RefreshToken(context.Background(), RefreshParams{
+		RefreshToken:  "old-ref",
+		ClientID:      "cid",
+		TokenEndpoint: srv.URL,
+		Scopes:        "scope:x offline_access",
+	})
+	if err != nil {
+		t.Fatalf("RefreshToken(external_idp) error: %v", err)
+	}
+	if td.AccessToken != "new-acc" || td.RefreshToken != "new-ref" {
+		t.Fatalf("unexpected refreshed token: %+v", td)
+	}
+}
+
 // --- helpers ---
+
+// newFormServer starts an httptest server that parses an x-www-form-urlencoded body,
+// passes the values to fn, and writes the (status, body) fn returns.
+func newFormServer(t *testing.T, fn func(url.Values) (int, string)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		status, resp := fn(r.PostForm)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, resp)
+	}))
+}
 
 // newJSONServer starts an httptest server that decodes the JSON request body, passes it
 // to fn, and writes the (status, body) fn returns.

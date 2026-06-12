@@ -130,6 +130,10 @@ type kiroCredentials struct {
 	clientSecret string
 	region       string
 	authMethod   string
+	// tokenEndpoint and scopes are set for the external IdP (enterprise SSO) method and
+	// select the IdP-token-endpoint refresh path (OAuth2 refresh_token grant).
+	tokenEndpoint string
+	scopes        string
 }
 
 // kiroCreds extracts Kiro credentials from auth.Metadata first then auth.Attributes.
@@ -158,6 +162,8 @@ func kiroCreds(a *cliproxyauth.Auth) kiroCredentials {
 	creds.clientSecret = get("client_secret")
 	creds.region = get("region")
 	creds.authMethod = get("auth_method")
+	creds.tokenEndpoint = get("token_endpoint")
+	creds.scopes = get("scopes")
 	return creds
 }
 
@@ -353,10 +359,12 @@ func (e *KiroExecutor) resolveKiroProfileArn(ctx context.Context, auth *cliproxy
 	if err != nil || arn == "" {
 		// Empty list usually means the access token is expired; refresh once and retry.
 		td, errRefresh := svc.RefreshToken(ctx, kiroauth.RefreshParams{
-			RefreshToken: creds.refreshToken,
-			ClientID:     creds.clientID,
-			ClientSecret: creds.clientSecret,
-			Region:       region,
+			RefreshToken:  creds.refreshToken,
+			ClientID:      creds.clientID,
+			ClientSecret:  creds.clientSecret,
+			Region:        region,
+			TokenEndpoint: creds.tokenEndpoint,
+			Scopes:        creds.scopes,
 		})
 		if errRefresh != nil {
 			log.Warnf("kiro executor: profile resolution refresh failed: %v", errRefresh)
@@ -705,13 +713,21 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if strings.TrimSpace(creds.refreshToken) == "" {
 		return auth, nil // Nothing to refresh.
 	}
+	// Fail fast rather than mis-route an external IdP refresh token to the Cognito social
+	// endpoint: RefreshToken selects the IdP branch by token_endpoint, so an external_idp
+	// credential without one would silently hit the wrong endpoint and fail confusingly.
+	if creds.authMethod == "external_idp" && strings.TrimSpace(creds.tokenEndpoint) == "" {
+		return nil, fmt.Errorf("kiro executor: external_idp credential is missing token_endpoint; re-run Kiro SSO login")
+	}
 
 	svc := kiroauth.NewKiroAuthWithProxy(e.cfg, auth.ProxyURL)
 	td, err := svc.RefreshToken(ctx, kiroauth.RefreshParams{
-		RefreshToken: creds.refreshToken,
-		ClientID:     creds.clientID,
-		ClientSecret: creds.clientSecret,
-		Region:       regionForCreds(creds),
+		RefreshToken:  creds.refreshToken,
+		ClientID:      creds.clientID,
+		ClientSecret:  creds.clientSecret,
+		Region:        regionForCreds(creds),
+		TokenEndpoint: creds.tokenEndpoint,
+		Scopes:        creds.scopes,
 	})
 	if err != nil {
 		return nil, err

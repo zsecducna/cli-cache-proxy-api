@@ -253,20 +253,29 @@ func (k *KiroAuth) exchangeDeviceCode(ctx context.Context, clientID, clientSecre
 	return k.toTokenData(out.AccessToken, out.RefreshToken, out.ExpiresIn, ""), false, nil
 }
 
-// RefreshParams carries the inputs required to refresh a Kiro token. When ClientID and
-// ClientSecret are present the AWS SSO OIDC branch is used; otherwise the social branch.
+// RefreshParams carries the inputs required to refresh a Kiro token. The branch is chosen
+// by which fields are set: TokenEndpoint => external IdP (enterprise SSO); ClientID +
+// ClientSecret => AWS SSO OIDC (Builder ID / IDC); otherwise the Cognito social branch.
 type RefreshParams struct {
 	RefreshToken string
 	ClientID     string
 	ClientSecret string
 	Region       string
+	// TokenEndpoint and Scopes select the external IdP refresh (OAuth2 refresh_token grant
+	// against the IdP token endpoint, e.g. an Azure AD tenant). ClientID is the IdP client.
+	TokenEndpoint string
+	Scopes        string
 }
 
-// RefreshToken exchanges a refresh token for a fresh access token. It selects the AWS
-// OIDC branch when client credentials are present, falling back to the social branch.
+// RefreshToken exchanges a refresh token for a fresh access token. It selects the external
+// IdP branch when a token endpoint is present, then the AWS OIDC branch when client
+// credentials are present, falling back to the Cognito social branch.
 func (k *KiroAuth) RefreshToken(ctx context.Context, params RefreshParams) (*KiroTokenData, error) {
 	if strings.TrimSpace(params.RefreshToken) == "" {
 		return nil, fmt.Errorf("kiro: refresh token is empty")
+	}
+	if strings.TrimSpace(params.TokenEndpoint) != "" {
+		return k.refreshViaExternalIdp(ctx, params.TokenEndpoint, params.ClientID, params.RefreshToken, params.Scopes)
 	}
 	if strings.TrimSpace(params.ClientID) != "" && strings.TrimSpace(params.ClientSecret) != "" {
 		return k.refreshViaOIDC(ctx, params)

@@ -41,6 +41,12 @@ type KiroTokenStorage struct {
 	Username string `json:"username,omitempty"`
 	// Email is the best-effort account email parsed from the access token JWT.
 	Email string `json:"email,omitempty"`
+	// TokenEndpoint, IssuerURL and Scopes are set for the external IdP (enterprise SSO)
+	// method. The credential is an IdP-issued OAuth token (e.g. from an Azure AD tenant)
+	// refreshed against TokenEndpoint using the IdP ClientID and Scopes (refresh_token grant).
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	IssuerURL     string `json:"issuer_url,omitempty"`
+	Scopes        string `json:"scopes,omitempty"`
 	// Type indicates the authentication provider type, always "kiro" for this storage.
 	Type string `json:"type"`
 
@@ -87,6 +93,11 @@ type KiroAuthBundle struct {
 	ProfileArn string
 	// Email is the best-effort account email.
 	Email string
+	// TokenEndpoint, IssuerURL and Scopes are set for the external IdP method and carry the
+	// IdP token endpoint, issuer, and granted scopes needed to refresh the credential.
+	TokenEndpoint string
+	IssuerURL     string
+	Scopes        string
 }
 
 // DeviceCodeResponse represents the AWS SSO OIDC device authorization response.
