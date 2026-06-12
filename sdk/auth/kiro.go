@@ -36,7 +36,7 @@ func (KiroAuthenticator) RefreshLead() *time.Duration {
 }
 
 // Login runs the selected Kiro authentication method. The method is read from
-// opts.Metadata["method"] (builder-id|idc|import); builder-id is the default.
+// opts.Metadata["method"] (builder-id|idc|import|social); builder-id is the default.
 func (a KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
@@ -57,6 +57,8 @@ func (a KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	switch method {
 	case "import":
 		bundle, err = a.loginImport(ctx, authSvc, opts)
+	case "social", "sso":
+		bundle, err = a.loginSocial(ctx, authSvc, opts)
 	case "idc":
 		bundle, err = a.loginDevice(ctx, authSvc, opts, method)
 	default:
@@ -214,6 +216,90 @@ func (a KiroAuthenticator) loginImport(ctx context.Context, authSvc *kiro.KiroAu
 		Region:     kiro.DefaultRegion,
 		AuthMethod: "import",
 		ProfileArn: tokenData.ProfileArn,
+		Email:      kiro.ExtractEmailFromJWT(tokenData.AccessToken),
+	}, nil
+}
+
+// loginSocial runs the Kiro social / enterprise SSO sign-in (the flow the Kiro IDE uses).
+// It performs a PKCE authorization-code flow against the Kiro-hosted portal — which
+// federates Google, GitHub, and enterprise IdPs (e.g. an Azure AD tenant) — capturing the
+// authorization code on a transient loopback listener and exchanging it for Kiro tokens.
+func (a KiroAuthenticator) loginSocial(ctx context.Context, authSvc *kiro.KiroAuth, opts *LoginOptions) (*kiro.KiroAuthBundle, error) {
+	region := strings.TrimSpace(opts.Metadata["region"])
+	if region == "" {
+		region = kiro.DefaultRegion
+	}
+
+	pkce, err := kiro.GenerateSocialPKCE()
+	if err != nil {
+		return nil, err
+	}
+
+	// Bind the loopback listener BEFORE opening the browser so the redirect cannot race
+	// ahead of a ready listener. The port is fixed because the portal validates the
+	// redirect URI; cleanup releases it once the flow completes or aborts.
+	resultCh, cleanup, err := kiro.StartSocialCallbackListener(pkce.State)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	signInURL := kiro.SocialSignInURL(pkce)
+	fmt.Printf("\nTo authenticate with Kiro SSO, please visit:\n%s\n\n", signInURL)
+	if !opts.NoBrowser && browser.IsAvailable() {
+		if errOpen := browser.OpenURL(signInURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		} else {
+			fmt.Println("Browser opened automatically.")
+		}
+	}
+	fmt.Println("Waiting for SSO authorization...")
+
+	var code string
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("kiro: %w", ctx.Err())
+	case res := <-resultCh:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		code = res.Code
+	case <-time.After(kiro.SocialLoginTimeout):
+		return nil, fmt.Errorf("kiro: SSO login timed out after %s", kiro.SocialLoginTimeout)
+	}
+
+	tokenData, err := authSvc.ExchangeSocialCode(ctx, code, pkce.Verifier)
+	if err != nil {
+		return nil, fmt.Errorf("kiro: SSO token exchange failed: %w", err)
+	}
+
+	// The runtime generate endpoint requires a profileArn. The social exchange usually
+	// returns one; if not, resolve it via ListAvailableProfiles using the access token.
+	profileArn := tokenData.ProfileArn
+	if profileArn == "" {
+		resolvedTokenData, resolvedProfileArn, errResolve := authSvc.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
+			RefreshToken: tokenData.RefreshToken,
+			Region:       region,
+		})
+		if resolvedTokenData != nil {
+			tokenData = resolvedTokenData
+		}
+		if errResolve != nil {
+			log.Warnf("kiro: failed to resolve profile ARN at social login: %v", errResolve)
+		} else {
+			profileArn = resolvedProfileArn
+		}
+	}
+	// Refuse to persist a credential with no profileArn: every runtime request would fail.
+	if errProfile := kiro.RequireProfileArn(profileArn, "kiro social login"); errProfile != nil {
+		return nil, errProfile
+	}
+
+	return &kiro.KiroAuthBundle{
+		TokenData:  tokenData,
+		Region:     region,
+		AuthMethod: "social",
+		ProfileArn: profileArn,
 		Email:      kiro.ExtractEmailFromJWT(tokenData.AccessToken),
 	}, nil
 }

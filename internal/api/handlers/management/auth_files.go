@@ -2662,12 +2662,31 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		return
 	}
 
-	// Derive the login method and start URL from the IDC start URL parameter.
+	// Derive the login method. An explicit "method" query parameter selects the flow;
+	// for backward compatibility a bare "idc_start_url" (no method) still implies IDC.
+	//   - "social"/"sso": Kiro hosted SSO portal (Google/GitHub/enterprise IdP such as an
+	//     Azure AD tenant). Handled by a dedicated PKCE + loopback-listener path that owns
+	//     its own response, so it returns here rather than falling through to device flow.
+	//   - "idc":          AWS IAM Identity Center device flow (needs start URL + username).
+	//   - "builder-id":   AWS Builder ID device flow (default).
+	loginType := strings.ToLower(strings.TrimSpace(c.Query("method")))
+	idcStartURL := strings.TrimSpace(c.Query("idc_start_url"))
+	if loginType == "social" || loginType == "sso" {
+		h.requestKiroSocialToken(c, ctx, region)
+		return
+	}
+
 	method := "builder-id"
 	startURL := kiro.BuilderIDStartURL
 	username := strings.TrimSpace(c.Query("username"))
-	if idcStartURL := strings.TrimSpace(c.Query("idc_start_url")); idcStartURL != "" {
+	if loginType == "idc" || (loginType == "" && idcStartURL != "") {
 		method = "idc"
+		// The start URL is what selects the organization's Identity Center; without it the
+		// flow would silently fall back to Builder ID, so require it explicitly for IDC.
+		if idcStartURL == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "idc_start_url is required for IDC login"})
+			return
+		}
 		startURL = idcStartURL
 		// The IDC access token is an opaque AWS blob with no derivable identity, so the
 		// account label that names the auth file (kiro-<username>-<directoryID>.json) must
@@ -2843,6 +2862,166 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "user_code": deviceCode.UserCode})
+}
+
+// requestKiroSocialToken starts the Kiro social / enterprise SSO login from the WebUI.
+//
+// Unlike the device flows, this is a PKCE authorization-code flow against the Kiro hosted
+// sign-in portal, which federates Google, GitHub, and enterprise identity providers (such
+// as an Azure AD tenant) into a single Kiro account. A transient loopback listener on the
+// fixed redirect port captures the authorization code; a background goroutine exchanges
+// it, resolves the profile ARN, and persists the credential. The synchronous phase returns
+// the sign-in URL + state so the browser can open it and the existing get-auth-status
+// polling can track completion (mirroring the device-flow response shape, minus user_code).
+func (h *Handler) requestKiroSocialToken(c *gin.Context, ctx context.Context, region string) {
+	kiroAuth := kiro.NewKiroAuth(h.cfg)
+
+	pkce, errPKCE := kiro.GenerateSocialPKCE()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate Kiro SSO PKCE codes: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start SSO login"})
+		return
+	}
+
+	// Bind the loopback listener up front so the portal redirect cannot arrive before the
+	// listener is ready. The port is fixed because the portal validates the redirect URI.
+	resultCh, cleanup, errListen := kiro.StartSocialCallbackListener(pkce.State)
+	if errListen != nil {
+		log.Errorf("Failed to bind Kiro SSO callback listener: %v", errListen)
+		// 409: the fixed loopback port is unavailable — another login is mid-flight or a
+		// local service already owns it. The operator must free it before retrying.
+		c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("SSO loopback port %s is unavailable", kiro.SocialRedirectPort)})
+		return
+	}
+
+	signInURL := kiro.SocialSignInURL(pkce)
+	state := fmt.Sprintf("kiro-%d", time.Now().UnixNano())
+	RegisterOAuthSession(state, "kiro")
+
+	go func() {
+		defer cleanup()
+		fmt.Println("Waiting for Kiro SSO authorization...")
+
+		// Wait for the loopback listener to capture the authorization code, bounded by the
+		// social-login timeout so a stalled browser flow cannot leak the goroutine/port.
+		var code string
+		select {
+		case res := <-resultCh:
+			if res.Err != nil {
+				log.Errorf("Kiro SSO authorization failed: %v", res.Err)
+				SetOAuthSessionError(state, "Authentication failed")
+				return
+			}
+			code = res.Code
+		case <-time.After(kiro.SocialLoginTimeout):
+			SetOAuthSessionError(state, "Authentication timed out")
+			return
+		}
+
+		tokenData, errExch := kiroAuth.ExchangeSocialCode(ctx, code, pkce.Verifier)
+		if errExch != nil {
+			log.Errorf("Kiro SSO token exchange failed: %v", errExch)
+			SetOAuthSessionError(state, "Authentication failed")
+			return
+		}
+
+		// The runtime generate endpoint requires a profile ARN. The social exchange usually
+		// returns one; otherwise resolve it via ListAvailableProfiles using the access token.
+		profileArn := tokenData.ProfileArn
+		if profileArn == "" {
+			resolvedTokenData, resolvedProfileArn, errResolve := kiroAuth.ResolveProfileArn(ctx, tokenData, kiro.RefreshParams{
+				RefreshToken: tokenData.RefreshToken,
+				Region:       region,
+			})
+			if resolvedTokenData != nil {
+				tokenData = resolvedTokenData
+			}
+			if errResolve != nil {
+				log.Warnf("kiro: failed to resolve profile ARN at SSO login: %v", errResolve)
+			} else {
+				profileArn = resolvedProfileArn
+			}
+		}
+		// Refuse to persist a credential with no profile ARN: every runtime request fails.
+		if errProfile := kiro.RequireProfileArn(profileArn, "kiro social login"); errProfile != nil {
+			SetOAuthSessionError(state, fmt.Sprintf("Kiro profile ARN resolution failed: %v", errProfile))
+			fmt.Printf("Kiro SSO authentication failed: %v\n", errProfile)
+			return
+		}
+
+		if errSave := h.saveKiroSocialCredential(ctx, tokenData, region, profileArn); errSave != nil {
+			log.Errorf("Failed to save Kiro SSO authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("kiro")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": signInURL, "state": state})
+}
+
+// saveKiroSocialCredential persists a social-login Kiro credential. Social credentials
+// carry no AWS OIDC client credentials, no IDC start URL, and no operator username — the
+// email parsed from the access token JWT both labels the record and names the auth file.
+func (h *Handler) saveKiroSocialCredential(ctx context.Context, tokenData *kiro.KiroTokenData, region, profileArn string) error {
+	expired := ""
+	if tokenData.ExpiresAt > 0 {
+		expired = time.Unix(tokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+	}
+	email := kiro.ExtractEmailFromJWT(tokenData.AccessToken)
+
+	storage := &kiro.KiroTokenStorage{
+		AccessToken:  tokenData.AccessToken,
+		RefreshToken: tokenData.RefreshToken,
+		Expired:      expired,
+		ProfileArn:   profileArn,
+		Region:       region,
+		AuthMethod:   "social",
+		Email:        email,
+		Type:         "kiro",
+	}
+
+	// Metadata mirrors the storage fields; the executor reads credentials from here.
+	metadata := map[string]any{
+		"type":          "kiro",
+		"access_token":  tokenData.AccessToken,
+		"refresh_token": tokenData.RefreshToken,
+		"region":        region,
+		"auth_method":   "social",
+		"timestamp":     time.Now().UnixMilli(),
+	}
+	if expired != "" {
+		metadata["expired"] = expired
+	}
+	if profileArn != "" {
+		metadata["profile_arn"] = profileArn
+	}
+	if email != "" {
+		metadata["email"] = email
+	}
+
+	label := "Kiro User"
+	if email != "" {
+		label = email
+	}
+
+	fileName := kiro.CredentialFileName("social", "", "", email, time.Now().UnixMilli())
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "kiro",
+		FileName: fileName,
+		Label:    label,
+		Storage:  storage,
+		Metadata: metadata,
+	}
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		return errSave
+	}
+	fmt.Printf("Kiro SSO authentication successful! Token saved to %s\n", savedPath)
+	return nil
 }
 
 type projectSelectionRequiredError struct{}

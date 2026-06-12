@@ -24,15 +24,19 @@ import (
 //   - importToken: a refresh token to import (import method only; empty triggers auto-detect)
 //   - username: account label used to name the IDC auth file (required for the idc method;
 //     the IDC access token is opaque and carries no derivable identity)
-func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region, importToken, username string) {
+//   - sso: when true, use the Kiro hosted SSO portal (social method) — a PKCE flow that
+//     federates Google, GitHub, and enterprise IdPs (e.g. an Azure AD tenant). It needs no
+//     start URL or username (the account email is parsed from the issued token).
+func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region, importToken, username string, sso bool) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
 
-	// Derive the login method. An import token implies "import" and an explicit IDC start
-	// URL implies "idc"; both bypass the interactive menu so scripted use keeps working.
-	// When neither flag is supplied, prompt the user to choose the authentication method
-	// (Builder ID vs IAM Identity Center) and, for IDC, collect the start URL and region.
+	// Derive the login method. An import token implies "import", the SSO flag implies
+	// "social", and an explicit IDC start URL implies "idc"; each bypasses the interactive
+	// menu so scripted use keeps working. When no method-selecting flag is supplied, prompt
+	// the user to choose (Builder ID vs IAM Identity Center) and, for IDC, collect the
+	// start URL and region.
 	idcStartURL = strings.TrimSpace(idcStartURL)
 	region = strings.TrimSpace(region)
 	importToken = strings.TrimSpace(importToken)
@@ -42,6 +46,8 @@ func DoKiroLogin(cfg *config.Config, options *LoginOptions, idcStartURL, region,
 	switch {
 	case importToken != "":
 		method = "import"
+	case sso:
+		method = "social"
 	case idcStartURL != "":
 		method = "idc"
 		// IDC names the auth file kiro-<username>-<directoryID>.json. The username cannot be

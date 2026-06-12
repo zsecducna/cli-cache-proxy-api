@@ -42,16 +42,18 @@ type KiroAuth struct {
 	// local httptest server instead of the real CodeWhisperer endpoint.
 	listProfilesURLFn func(region string) string
 	socialRefreshURL  string
+	// socialTokenURL is the social PKCE code-exchange endpoint, overridable in tests.
+	socialTokenURL string
 }
 
 // NewKiroAuth creates a new KiroAuth service instance.
 func NewKiroAuth(cfg *config.Config) *KiroAuth {
-	return &KiroAuth{cfg: cfg, tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken"}
+	return &KiroAuth{cfg: cfg, tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken", socialTokenURL: socialAuthBase + "/oauth/token"}
 }
 
 // NewKiroAuthWithProxy creates a KiroAuth that overrides the configured proxy URL.
 func NewKiroAuthWithProxy(cfg *config.Config, proxyURL string) *KiroAuth {
-	return &KiroAuth{cfg: cfg, proxyURL: strings.TrimSpace(proxyURL), tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken"}
+	return &KiroAuth{cfg: cfg, proxyURL: strings.TrimSpace(proxyURL), tokenURLFn: OIDCTokenURL, listProfilesURLFn: ListProfilesEndpoint, socialRefreshURL: socialAuthBase + "/refreshToken", socialTokenURL: socialAuthBase + "/oauth/token"}
 }
 
 // httpClient builds a proxy-aware HTTP client with a credential-phase timeout.

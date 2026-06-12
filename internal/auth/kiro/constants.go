@@ -41,6 +41,29 @@ const (
 	// ImportTokenPrefix is the prefix every valid Kiro refresh token starts with.
 	ImportTokenPrefix = "aorAAAAAG"
 
+	// --- Social / enterprise SSO login (the flow the Kiro IDE itself uses) ---
+	//
+	// Unlike Builder ID / IDC (AWS SSO OIDC device flows), the "social" method drives the
+	// Kiro-hosted sign-in portal, which federates Google, GitHub, AND enterprise identity
+	// providers (e.g. an Azure AD tenant) behind a single PKCE authorization-code flow.
+	// This is what lets an enterprise SSO email — which is neither an AWS Builder ID nor an
+	// AWS IAM Identity Center account — log in to Kiro.
+
+	// SocialSignInBaseURL is the Kiro hosted sign-in page opened in the browser. It returns
+	// the authorization code to SocialRedirectURI after the user authenticates.
+	SocialSignInBaseURL = "https://app.kiro.dev/signin"
+	// SocialRedirectURI is the loopback redirect the portal validates and redirects to once
+	// sign-in succeeds. The value is fixed by the portal, so the login flow binds a transient
+	// listener on SocialRedirectPort to capture the returned authorization code.
+	SocialRedirectURI = "http://localhost:3128"
+	// SocialRedirectPort is the loopback port embedded in SocialRedirectURI.
+	SocialRedirectPort = "3128"
+	// SocialRedirectFrom mirrors the Kiro IDE client tag the portal expects on the sign-in URL.
+	SocialRedirectFrom = "KiroIDE"
+	// SocialLoginTimeout bounds how long the loopback listener waits for the user to finish
+	// the browser sign-in before the social login attempt is abandoned.
+	SocialLoginTimeout = 10 * time.Minute
+
 	// DefaultThinkingBudget is the fallback thinking budget (in tokens) when thinking
 	// is enabled without an explicit budget.
 	DefaultThinkingBudget = 16000
