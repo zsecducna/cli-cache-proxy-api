@@ -267,6 +267,30 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
+	// fallbackToLocalStore degrades to the local file-backed config/token store when a remote
+	// store backend (postgres/object/git) cannot be initialized. Without this, a stale or
+	// unreachable PGSTORE_DSN (or object/git config) makes startup return early, and under
+	// launchd KeepAlive / systemd Restart=always the service crash-loops instead of coming up.
+	// Falling back keeps the proxy bootable for users who do not run those backends.
+	fallbackToLocalStore := func(backend string, cause error) {
+		log.Warnf("%s unavailable (%v); falling back to local file-backed store — auth/config/usage state stays local to this node and will not sync to the remote store", backend, cause)
+		// Clear every remote-store selection so both token-store registration and
+		// usage-statistics persistence resolve to local backends later in startup.
+		usePostgresStore = false
+		useObjectStore = false
+		useGitStore = false
+		pgStoreDSN = ""
+		pgStoreInst = nil
+		objectStoreInst = nil
+		gitStoreInst = nil
+		// Mirror the no-store default branch: prefer an explicit -config path, else wd/config.yaml.
+		if strings.TrimSpace(configPath) != "" {
+			configFilePath = configPath
+		} else {
+			configFilePath = filepath.Join(wd, "config.yaml")
+		}
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+	}
 	if strings.TrimSpace(homeJWT) != "" {
 		configLoadedFromHome = true
 		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
@@ -316,146 +340,158 @@ func main() {
 		useObjectStore = false
 		useGitStore = false
 	} else if usePostgresStore {
-		if pgStoreLocalPath == "" {
-			pgStoreLocalPath = wd
-		}
-		pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		pgStoreInst, err = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
-			DSN:      pgStoreDSN,
-			Schema:   pgStoreSchema,
-			SpoolDir: pgStoreLocalPath,
-			SeedRoot: pgStoreStatsLocalPath,
-		})
-		cancel()
-		if err != nil {
-			log.Errorf("failed to initialize postgres token store: %v", err)
-			return
-		}
-		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+		// Initialize the postgres-backed store inside a closure so any failure can degrade to
+		// the local file store (fallbackToLocalStore) instead of aborting startup.
+		if errStore := func() error {
+			if pgStoreLocalPath == "" {
+				pgStoreLocalPath = wd
+			}
+			pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			var errInit error
+			pgStoreInst, errInit = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
+				DSN:      pgStoreDSN,
+				Schema:   pgStoreSchema,
+				SpoolDir: pgStoreLocalPath,
+				SeedRoot: pgStoreStatsLocalPath,
+			})
 			cancel()
-			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
-			return
-		}
-		cancel()
-		configFilePath = pgStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
-		if err == nil {
-			cfg.AuthDir = pgStoreInst.AuthDir()
-			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+			if errInit != nil {
+				return fmt.Errorf("initialize postgres token store: %w", errInit)
+			}
+			examplePath := filepath.Join(wd, "config.example.yaml")
+			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+			if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+				cancel()
+				return fmt.Errorf("bootstrap postgres-backed config: %w", errBootstrap)
+			}
+			cancel()
+			configFilePath = pgStoreInst.ConfigPath()
+			cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+			if err == nil {
+				cfg.AuthDir = pgStoreInst.AuthDir()
+				log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+			}
+			return nil
+		}(); errStore != nil {
+			fallbackToLocalStore("postgres token store", errStore)
 		}
 	} else if useObjectStore {
-		if objectStoreLocalPath == "" {
-			if writableBase != "" {
-				objectStoreLocalPath = writableBase
-			} else {
-				objectStoreLocalPath = wd
+		// Initialize the object-backed store inside a closure so any failure (bad endpoint,
+		// unreachable bucket, bootstrap error) degrades to the local file store instead of
+		// aborting startup.
+		if errStore := func() error {
+			if objectStoreLocalPath == "" {
+				if writableBase != "" {
+					objectStoreLocalPath = writableBase
+				} else {
+					objectStoreLocalPath = wd
+				}
 			}
-		}
-		objectStoreRoot := filepath.Join(objectStoreLocalPath, "objectstore")
-		resolvedEndpoint := strings.TrimSpace(objectStoreEndpoint)
-		useSSL := true
-		if strings.Contains(resolvedEndpoint, "://") {
-			parsed, errParse := url.Parse(resolvedEndpoint)
-			if errParse != nil {
-				log.Errorf("failed to parse object store endpoint %q: %v", objectStoreEndpoint, errParse)
-				return
+			objectStoreRoot := filepath.Join(objectStoreLocalPath, "objectstore")
+			resolvedEndpoint := strings.TrimSpace(objectStoreEndpoint)
+			useSSL := true
+			if strings.Contains(resolvedEndpoint, "://") {
+				parsed, errParse := url.Parse(resolvedEndpoint)
+				if errParse != nil {
+					return fmt.Errorf("parse object store endpoint %q: %w", objectStoreEndpoint, errParse)
+				}
+				switch strings.ToLower(parsed.Scheme) {
+				case "http":
+					useSSL = false
+				case "https":
+					useSSL = true
+				default:
+					return fmt.Errorf("unsupported object store scheme %q (only http and https are allowed)", parsed.Scheme)
+				}
+				if parsed.Host == "" {
+					return fmt.Errorf("object store endpoint %q is missing host information", objectStoreEndpoint)
+				}
+				resolvedEndpoint = parsed.Host
+				if parsed.Path != "" && parsed.Path != "/" {
+					resolvedEndpoint = strings.TrimSuffix(parsed.Host+parsed.Path, "/")
+				}
 			}
-			switch strings.ToLower(parsed.Scheme) {
-			case "http":
-				useSSL = false
-			case "https":
-				useSSL = true
-			default:
-				log.Errorf("unsupported object store scheme %q (only http and https are allowed)", parsed.Scheme)
-				return
+			resolvedEndpoint = strings.TrimRight(resolvedEndpoint, "/")
+			objCfg := store.ObjectStoreConfig{
+				Endpoint:  resolvedEndpoint,
+				Bucket:    objectStoreBucket,
+				AccessKey: objectStoreAccess,
+				SecretKey: objectStoreSecret,
+				LocalRoot: objectStoreRoot,
+				UseSSL:    useSSL,
+				PathStyle: true,
 			}
-			if parsed.Host == "" {
-				log.Errorf("object store endpoint %q is missing host information", objectStoreEndpoint)
-				return
+			var errInit error
+			objectStoreInst, errInit = store.NewObjectTokenStore(objCfg)
+			if errInit != nil {
+				return fmt.Errorf("initialize object token store: %w", errInit)
 			}
-			resolvedEndpoint = parsed.Host
-			if parsed.Path != "" && parsed.Path != "/" {
-				resolvedEndpoint = strings.TrimSuffix(parsed.Host+parsed.Path, "/")
+			examplePath := filepath.Join(wd, "config.example.yaml")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+				cancel()
+				return fmt.Errorf("bootstrap object-backed config: %w", errBootstrap)
 			}
-		}
-		resolvedEndpoint = strings.TrimRight(resolvedEndpoint, "/")
-		objCfg := store.ObjectStoreConfig{
-			Endpoint:  resolvedEndpoint,
-			Bucket:    objectStoreBucket,
-			AccessKey: objectStoreAccess,
-			SecretKey: objectStoreSecret,
-			LocalRoot: objectStoreRoot,
-			UseSSL:    useSSL,
-			PathStyle: true,
-		}
-		objectStoreInst, err = store.NewObjectTokenStore(objCfg)
-		if err != nil {
-			log.Errorf("failed to initialize object token store: %v", err)
-			return
-		}
-		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := objectStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
 			cancel()
-			log.Errorf("failed to bootstrap object-backed config: %v", errBootstrap)
-			return
-		}
-		cancel()
-		configFilePath = objectStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
-		if err == nil {
-			if cfg == nil {
-				cfg = &config.Config{}
+			configFilePath = objectStoreInst.ConfigPath()
+			cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+			if err == nil {
+				if cfg == nil {
+					cfg = &config.Config{}
+				}
+				cfg.AuthDir = objectStoreInst.AuthDir()
+				log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
 			}
-			cfg.AuthDir = objectStoreInst.AuthDir()
-			log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
+			return nil
+		}(); errStore != nil {
+			fallbackToLocalStore("object token store", errStore)
 		}
 	} else if useGitStore {
-		if gitStoreLocalPath == "" {
-			if writableBase != "" {
-				gitStoreLocalPath = writableBase
-			} else {
-				gitStoreLocalPath = wd
+		// Initialize the git-backed store inside a closure so any failure (clone/commit error,
+		// missing template) degrades to the local file store instead of aborting startup.
+		if errStore := func() error {
+			if gitStoreLocalPath == "" {
+				if writableBase != "" {
+					gitStoreLocalPath = writableBase
+				} else {
+					gitStoreLocalPath = wd
+				}
 			}
-		}
-		gitStoreRoot = filepath.Join(gitStoreLocalPath, "gitstore")
-		authDir := filepath.Join(gitStoreRoot, "auths")
-		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch)
-		gitStoreInst.SetBaseDir(authDir)
-		if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
-			log.Errorf("failed to prepare git token store: %v", errRepo)
-			return
-		}
-		configFilePath = gitStoreInst.ConfigPath()
-		if configFilePath == "" {
-			configFilePath = filepath.Join(gitStoreRoot, "config", "config.yaml")
-		}
-		if _, statErr := os.Stat(configFilePath); errors.Is(statErr, fs.ErrNotExist) {
-			examplePath := filepath.Join(wd, "config.example.yaml")
-			if _, errExample := os.Stat(examplePath); errExample != nil {
-				log.Errorf("failed to find template config file: %v", errExample)
-				return
+			gitStoreRoot = filepath.Join(gitStoreLocalPath, "gitstore")
+			authDir := filepath.Join(gitStoreRoot, "auths")
+			gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch)
+			gitStoreInst.SetBaseDir(authDir)
+			if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
+				return fmt.Errorf("prepare git token store: %w", errRepo)
 			}
-			if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
-				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
-				return
+			configFilePath = gitStoreInst.ConfigPath()
+			if configFilePath == "" {
+				configFilePath = filepath.Join(gitStoreRoot, "config", "config.yaml")
 			}
-			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
-				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
-				return
+			if _, statErr := os.Stat(configFilePath); errors.Is(statErr, fs.ErrNotExist) {
+				examplePath := filepath.Join(wd, "config.example.yaml")
+				if _, errExample := os.Stat(examplePath); errExample != nil {
+					return fmt.Errorf("find template config file: %w", errExample)
+				}
+				if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
+					return fmt.Errorf("bootstrap git-backed config: %w", errCopy)
+				}
+				if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
+					return fmt.Errorf("commit initial git-backed config: %w", errCommit)
+				}
+				log.Infof("git-backed config initialized from template: %s", configFilePath)
+			} else if statErr != nil {
+				return fmt.Errorf("inspect git-backed config: %w", statErr)
 			}
-			log.Infof("git-backed config initialized from template: %s", configFilePath)
-		} else if statErr != nil {
-			log.Errorf("failed to inspect git-backed config: %v", statErr)
-			return
-		}
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
-		if err == nil {
-			cfg.AuthDir = gitStoreInst.AuthDir()
-			log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
+			cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+			if err == nil {
+				cfg.AuthDir = gitStoreInst.AuthDir()
+				log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
+			}
+			return nil
+		}(); errStore != nil {
+			fallbackToLocalStore("git token store", errStore)
 		}
 	} else if configPath != "" {
 		configFilePath = configPath
@@ -500,6 +536,15 @@ func main() {
 				configFileExists = true
 			}
 		}
+	}
+	// Default the listen port for ordinary installs when the config omits it (e.g. the installer's
+	// minimal config writes only auth-dir + usage stats). Without this the server binds ":0" and
+	// the kernel assigns a random ephemeral port, leaving the proxy unreachable at a known address.
+	// Cloud-deploy mode is skipped on purpose: it treats Port == 0 as the "no valid config yet"
+	// sentinel above and fills the port from configuration delivered later.
+	if !isCloudDeploy && cfg.Port == 0 {
+		cfg.Port = 8317
+		log.Infof("no listen port configured; defaulting to %d", cfg.Port)
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)

@@ -265,6 +265,9 @@ detect_sources() {
   fi
 
   maybe_add_config_source "$install_root/config.yaml"
+  # A prior Postgres-backed install seeds config under <root>/pgstore/config; offer it as an
+  # import source so declining Postgres later still recovers the operator's settings.
+  maybe_add_config_source "$install_root/pgstore/config/config.yaml"
 
   if [[ -n "$SOURCE_CONFIG_OVERRIDE" ]]; then
     maybe_add_config_source "$SOURCE_CONFIG_OVERRIDE"
@@ -272,8 +275,14 @@ detect_sources() {
     maybe_add_config_source "$DEFAULT_SOURCE_CONFIG"
   fi
 
+  # Detect prior auth folders so their credentials migrate into the (now plural) auths target:
+  #   <root>/auth        legacy flat layout (singular)
+  #   <root>/pgstore/auths   Postgres-backed seed layout
   if [[ -d "$install_root/auth" ]]; then
     add_unique_path AUTH_SOURCES "$install_root/auth"
+  fi
+  if [[ -d "$install_root/pgstore/auths" ]]; then
+    add_unique_path AUTH_SOURCES "$install_root/pgstore/auths"
   fi
 
   for config_path in "${CONFIG_SOURCES[@]:-}"; do
@@ -441,9 +450,44 @@ write_minimal_config() {
   local file_path="$1"
   local auth_dir="$2"
   cat > "$file_path" <<EOF
+port: 8317
 auth-dir: "$(escape_yaml_double "$auth_dir")"
 usage-statistics-enabled: true
 EOF
+}
+
+# Seed a management key so the control-panel routes are mounted. Without a secret-key (or
+# MANAGEMENT_PASSWORD / local password) the server returns 404 for all /v0/management routes and
+# panel login fails. Only seed when the config has no remote-management block at all, so configs
+# copied from config.example.yaml (which already ship a secret-key) are left untouched and we
+# never write a duplicate mapping key.
+ensure_management_secret() {
+  local file_path="$1"
+  local key="$2"
+  [[ -n "$key" ]] || return 0
+  [[ -f "$file_path" ]] || return 0
+  if grep -qE '^[[:space:]]*remote-management:' "$file_path"; then
+    return 0
+  fi
+  local tmp="${file_path}.mgmt.$$"
+  {
+    printf 'remote-management:\n  secret-key: "%s"\n' "$(escape_yaml_double "$key")"
+    cat "$file_path"
+  } > "$tmp" && mv "$tmp" "$file_path"
+  say "Seeded management panel key into $file_path"
+}
+
+# Generate a strong random management key, with fallbacks when openssl is unavailable.
+generate_management_key() {
+  local key=""
+  key="$(openssl rand -hex 16 2>/dev/null || true)"
+  if [[ -z "$key" ]]; then
+    key="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
+  fi
+  if [[ -z "$key" ]]; then
+    key="$(date +%s | shasum 2>/dev/null | cut -c1-32)"
+  fi
+  printf '%s' "$key"
 }
 
 read_env_scalar() {
@@ -1216,6 +1260,11 @@ print_next_steps() {
   say "  Binary: $binary_path"
   say "  Config: $config_path"
   say "  Auth dir: $auth_dir"
+  local mgmt_key=""
+  mgmt_key="$(grep -E '^[[:space:]]*secret-key:' "$config_path" 2>/dev/null | head -n1 | sed -E 's/.*secret-key:[[:space:]]*//; s/^["'\'']//; s/["'\'']$//')"
+  if [[ -n "$mgmt_key" ]]; then
+    say "  Management key (panel login): $mgmt_key"
+  fi
   say "  Stats DB: $stats_db"
   if [[ -f "$env_path" ]]; then
     say "  Postgres env: $env_path"
@@ -1267,8 +1316,11 @@ main() {
 
   install_root_input="$(prompt_with_default "Install location" "$DEFAULT_INSTALL_ROOT")"
   install_root="$(expand_path "$install_root_input")"
-  auth_dir_input="$(prompt_with_default "Auth folder" "$install_root/auth")"
+  auth_dir_input="$(prompt_with_default "Auth folder" "$install_root/auths")"
   auth_dir="$(expand_path "$auth_dir_input")"
+  local management_key=""
+  management_key="$(generate_management_key)"
+  management_key="$(prompt_with_default "Management panel key (control-panel login)" "$management_key")"
   if confirm_yes_no "Build binary from source now?" "Y"; then
     build_now=1
   fi
@@ -1300,6 +1352,7 @@ main() {
   done < <(append_sources_excluding_target DB_SOURCES "$stats_db_path")
 
   copy_or_patch_config "$selected_config" "$config_path" "$auth_dir"
+  ensure_management_secret "$config_path" "$management_key"
 
   if [[ "${#auth_merge_sources[@]}" -gt 0 ]]; then
     if dir_has_entries "$auth_dir"; then

@@ -144,6 +144,54 @@ function Merge-AuthDir($SourceDir, $TargetDir) {
     }
 }
 
+function Set-ConfigAuthDir($Path, $AuthDir) {
+    if (-not (Test-Path $Path)) { return }
+    # YAML double-quoted scalars treat backslash as an escape character, so a Windows path like
+    # C:\Users must be written C:\\Users (and embedded quotes escaped) to round-trip correctly.
+    $yamlValue = $AuthDir.Replace('\', '\\').Replace('"', '\"')
+    $line = "auth-dir: `"$yamlValue`""
+    $content = Get-Content -Path $Path
+    # auth-dir is a top-level key; anchor to column 0 so nested mapping keys are never rewritten.
+    if ($content -match '^auth-dir\s*:') {
+        $content = $content -replace '^auth-dir\s*:.*$', $line
+    }
+    else {
+        $content = @($line) + $content
+    }
+    Set-Content -Path $Path -Value $content -Encoding utf8
+}
+
+function New-ManagementKey {
+    # Cryptographically strong 16-byte hex key for control-panel login.
+    $bytes = New-Object byte[] 16
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+function Ensure-ManagementSecret($Path, $Key) {
+    # Seed a management key so the control-panel routes are mounted. Without a secret-key (or
+    # MANAGEMENT_PASSWORD / local password) the server returns 404 for all /v0/management routes and
+    # panel login fails. Only seed when the config has no remote-management block, so configs copied
+    # from config.example.yaml (which already ship a secret-key) stay untouched and no duplicate key
+    # is written.
+    if ([string]::IsNullOrWhiteSpace($Key)) { return }
+    if (-not (Test-Path $Path)) { return }
+    $content = Get-Content -Path $Path
+    if ($content -match '^\s*remote-management\s*:') { return }
+    $yamlValue = $Key.Replace('\', '\\').Replace('"', '\"')
+    $block = @('remote-management:', "  secret-key: `"$yamlValue`"")
+    Set-Content -Path $Path -Value ($block + $content) -Encoding utf8
+    Say "Seeded management panel key into $Path"
+}
+
+function Get-ConfigSecretKey($Path) {
+    if (-not (Test-Path $Path)) { return '' }
+    foreach ($line in Get-Content -Path $Path) {
+        if ($line -match '^\s*secret-key\s*:\s*"?([^"\s]+)"?') { return $Matches[1] }
+    }
+    return ''
+}
+
 function Prompt-RequiredValue($Label, $DefaultValue) {
     while ($true) {
         $value = (Prompt-WithDefault $Label $DefaultValue).Trim()
@@ -610,7 +658,8 @@ function Register-InstallerTask($LauncherPath) {
 }
 
 $installRoot = Expand-PathValue (Prompt-WithDefault 'Install location' $DefaultInstallRoot)
-$authDir = Expand-PathValue (Prompt-WithDefault 'Auth folder' (Join-Path $installRoot 'auth'))
+$authDir = Expand-PathValue (Prompt-WithDefault 'Auth folder' (Join-Path $installRoot 'auths'))
+$managementKey = Prompt-WithDefault 'Management panel key (control-panel login)' (New-ManagementKey)
 $buildNow = Confirm-YesNo 'Build binary from source now?' $true
 $createTask = Confirm-YesNo 'Create startup task?' $true
 $startTask = $false
@@ -629,22 +678,37 @@ $statsDbPath = Join-Path $installRoot 'stats\cache-statistics.sqlite'
 $envPath = Join-Path $installRoot '.env'
 $launcherPath = Join-Path $installRoot 'start-cli-proxy-api.cmd'
 
+# Recover settings from a prior Postgres-backed install when no flat config exists yet, so that
+# declining Postgres later does not lose the operator's configuration.
+$pgStoreConfig = Join-Path $installRoot 'pgstore\config\config.yaml'
+if ((-not (Test-Path $configPath)) -and (Test-Path $pgStoreConfig)) {
+    Copy-Item -Force $pgStoreConfig $configPath
+}
 Copy-IfMissing $DefaultSourceConfig $configPath
 if (-not (Test-Path $configPath)) {
     @(
+        'port: 8317',
         "auth-dir: `"$authDir`"",
         'usage-statistics-enabled: true'
     ) | Set-Content -Path $configPath
 }
+# Point the active config at the chosen auth folder regardless of the template/imported default.
+Set-ConfigAuthDir $configPath $authDir
+Ensure-ManagementSecret $configPath $managementKey
 
 if (Test-Path $DefaultSourceStatsDir) {
     Copy-IfMissing (Join-Path $DefaultSourceStatsDir 'cache-statistics.sqlite') $statsDbPath
 }
 
+# Migrate credentials from prior auth layouts into the (now plural) auths target. Merge-AuthDir
+# is a no-op when the source is missing or equals the target, so these are always safe to call:
+#   <bundled default config folder>  upgrade from the shipped default location
+#   <root>\auth                       legacy flat layout (singular)
+#   <root>\pgstore\auths              Postgres-backed seed layout
 $defaultAuthDir = Split-Path -Parent $DefaultSourceConfig
-if (Test-Path $defaultAuthDir) {
-    Merge-AuthDir $defaultAuthDir $authDir
-}
+Merge-AuthDir $defaultAuthDir $authDir
+Merge-AuthDir (Join-Path $installRoot 'auth') $authDir
+Merge-AuthDir (Join-Path $installRoot 'pgstore\auths') $authDir
 
 $existingPgStoreDsn = Read-EnvScalar $envPath 'PGSTORE_DSN'
 $existingPgStoreSchema = Read-EnvScalar $envPath 'PGSTORE_SCHEMA'
@@ -688,6 +752,10 @@ Say "  Binary: $binaryPath"
 Say "  Launcher: $launcherPath"
 Say "  Config: $configPath"
 Say "  Auth dir: $authDir"
+$mgmtKey = Get-ConfigSecretKey $configPath
+if (-not [string]::IsNullOrWhiteSpace($mgmtKey)) {
+    Say "  Management key (panel login): $mgmtKey"
+}
 Say "  Stats DB: $statsDbPath"
 if (Test-Path $envPath) {
     Say "  Postgres env: $envPath"
