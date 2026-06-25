@@ -115,10 +115,16 @@ func GenerateEndpoint(region string) string {
 	return fmt.Sprintf("https://runtime.%s.kiro.dev/generateAssistantResponse", normalizeRegion(region))
 }
 
-// ListProfilesEndpoint returns the CodeWhisperer service root that serves the
-// non-streaming ListAvailableProfiles operation (used to resolve the profileArn).
+// ListProfilesEndpoint returns the Amazon Q Developer (formerly CodeWhisperer) service root
+// that serves the non-streaming ListAvailableProfiles operation (used to resolve the
+// profileArn). Every region is served under the q.{region}.amazonaws.com Amazon Q Developer
+// host. The legacy codewhisperer.{region}.amazonaws.com alias only ever resolved in us-east-1
+// (codewhisperer.eu-central-1.amazonaws.com does not exist), which made eu-central-1 SSO
+// logins fail with "missing profile ARN". q.{region}.amazonaws.com resolves in both us-east-1
+// and eu-central-1 and serves the identical AmazonCodeWhispererService.ListAvailableProfiles
+// operation, so it is used uniformly.
 func ListProfilesEndpoint(region string) string {
-	return fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/", normalizeRegion(region))
+	return fmt.Sprintf("https://q.%s.amazonaws.com/", normalizeRegion(region))
 }
 
 // RegionFromProfileArn extracts the region from an ARN shaped like

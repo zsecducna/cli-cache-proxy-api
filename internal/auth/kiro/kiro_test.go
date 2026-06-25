@@ -61,6 +61,24 @@ func TestRegionFromProfileArn(t *testing.T) {
 	}
 }
 
+// TestListProfilesEndpoint_RegionHost verifies every region (including us-east-1 and the
+// empty default) resolves to the q.{region}.amazonaws.com Amazon Q Developer host — the EU
+// host the legacy codewhisperer.* alias never provided.
+func TestListProfilesEndpoint_RegionHost(t *testing.T) {
+	if got := ListProfilesEndpoint("us-east-1"); got != "https://q.us-east-1.amazonaws.com/" {
+		t.Fatalf("us-east-1 endpoint = %q, want q.us-east-1 host", got)
+	}
+	if got := ListProfilesEndpoint(""); got != "https://q.us-east-1.amazonaws.com/" {
+		t.Fatalf("empty-region endpoint = %q, want default q.us-east-1 host", got)
+	}
+	if got := ListProfilesEndpoint("eu-central-1"); got != "https://q.eu-central-1.amazonaws.com/" {
+		t.Fatalf("eu-central-1 endpoint = %q, want q.eu-central-1 host", got)
+	}
+	if got := ListProfilesEndpoint("ap-south-1"); got != "https://q.ap-south-1.amazonaws.com/" {
+		t.Fatalf("ap-south-1 endpoint = %q, want q.ap-south-1 host", got)
+	}
+}
+
 // TestClampThinkingBudget bounds and defaults the budget.
 func TestClampThinkingBudget(t *testing.T) {
 	if got := ClampThinkingBudget(0); got != DefaultThinkingBudget {
